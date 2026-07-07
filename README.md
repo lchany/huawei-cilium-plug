@@ -36,12 +36,14 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── series
 ├── apply.sh
 ├── runtime-checklist.md
+├── INSTALL-DEPLOY.md
 └── README.md
 ```
 
 - `series`：patch 应用顺序。
 - `apply.sh`：在干净的 Cilium 源码树中按 `series` 应用 patch。
 - `runtime-checklist.md`：部署后需要验证的基础运行时场景。
+- `INSTALL-DEPLOY.md`：从应用 patch、构建镜像到 Helm 部署的完整安装部署文档。
 
 ## Patch 管理流程
 
@@ -292,6 +294,8 @@ git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 ```
 
 脚本会按 `series` 顺序应用三个 patch。
+
+完整安装部署流程见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
 
 ## 边界说明
 
