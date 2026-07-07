@@ -45,37 +45,22 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 
 ## Patch 管理流程
 
-```text
-upstream Cilium v1.19.1 baseline
-    |
-    v
-apply patches in series order
-    |
-    v
-HuaweiCloud customized Cilium source tree
-    |
-    v
-build cilium-agent / cilium-operator images
-    |
-    v
-deploy to HuaweiCloud Kubernetes cluster
-    |
-    v
-validate with runtime-checklist.md
+```mermaid
+flowchart TB
+    base["upstream Cilium v1.19.1 baseline"]
+    apply["按 series 顺序应用 patch"]
+    source["HuaweiCloud 定制版 Cilium 源码树"]
+    build["构建 cilium-agent 和 cilium-operator 镜像"]
+    deploy["部署到 HuaweiCloud Kubernetes 集群"]
+    verify["按 runtime-checklist.md 验证"]
 
+    change["HuaweiCloud 适配改动"]
+    patch["整理为编号 patch"]
+    series["更新 series 顺序"]
+    run["在目标 Cilium baseline 上运行 apply.sh"]
 
-HuaweiCloud adaptation changes
-    |
-    v
-organize changes into numbered patches
-    |
-    v
-update series
-    |
-    v
-run apply.sh against target Cilium baseline
-    |
-    +--> back to "apply patches in series order"
+    base --> apply --> source --> build --> deploy --> verify
+    change --> patch --> series --> run --> apply
 ```
 
 这个项目只保存图中的“编号 patch、series、应用脚本”。Cilium 源码本身不保存在这个
@@ -93,46 +78,36 @@ HuaweiCloud 适配分为控制面和数据面两部分：
 
 ### 控制面流程
 
-```text
-节点发现与云资源同步：
+```mermaid
+flowchart LR
+    subgraph discover["节点发现与云资源同步"]
+        meta["HuaweiCloud Metadata"]
+        api["HuaweiCloud VPC/SubENI API"]
+        operator["cilium-operator-huaweicloud"]
+        k8s["Kubernetes API"]
+        cn["CiliumNode spec/status.huawei-cloud"]
 
-HuaweiCloud Metadata
-        |
-        v
-cilium-operator-huaweicloud <---- HuaweiCloud VPC/SubENI API
-        ^
-        |
-Kubernetes API
-        |
-        v
-CiliumNode spec/status.huawei-cloud
+        meta --> operator
+        api --> operator
+        k8s --> operator
+        operator --> cn
+    end
 
+    subgraph alloc["Pod 分配与 BPF map 同步"]
+        pod["Pod 创建"]
+        cni["Cilium CNI"]
+        ipam["HuaweiCloud IPAM allocator"]
+        subeni["SubENI 分配结果"]
+        endpoint["Cilium Endpoint"]
+        manager["SubENI Endpoint Manager"]
+        map1["cilium_hwc_srcip4"]
+        map2["cilium_hwc_vlan_mac"]
 
-Pod 分配与 BPF map 同步：
-
-Pod 创建
-   |
-   v
-Cilium CNI
-   |
-   v
-HuaweiCloud IPAM allocator
-   |
-   v
-HuaweiCloud VPC/SubENI API
-   |
-   v
-SubENI 分配结果：IP / VLAN / MAC / Gateway / CIDR
-   |
-   v
-Cilium Endpoint
-   |
-   v
-SubENI Endpoint Manager
-   |
-   +--> cilium_hwc_srcip4    : Pod IP -> VLAN / SubENI MAC
-   |
-   +--> cilium_hwc_vlan_mac  : VLAN + SubENI MAC -> endpoint
+        pod --> cni --> ipam --> api
+        api --> subeni --> ipam --> cni --> endpoint --> manager
+        manager --> map1
+        manager --> map2
+    end
 ```
 
 关键状态：
@@ -145,51 +120,31 @@ SubENI Endpoint Manager
 
 ### 数据面流程
 
-```text
-Pod 出方向：
+```mermaid
+flowchart TB
+    subgraph egress["Pod 出方向"]
+        epod["Pod 发包"]
+        elxc["bpf_lxc / endpoint datapath"]
+        ect["Cilium CT / policy / service 逻辑"]
+        eto["bpf_host: cil_to_netdev"]
+        esrc["查询 cilium_hwc_srcip4"]
+        evlan["改源 MAC 并 push VLAN"]
+        etrunk["trunk ENI 发出"]
 
-Pod 发包
-   |
-   v
-bpf_lxc / endpoint datapath
-   |
-   v
-Cilium CT / policy / service 逻辑
-   |
-   v
-bpf_host: cil_to_netdev
-   |
-   v
-查询 cilium_hwc_srcip4
-   |
-   v
-改写源 MAC 为 SubENI MAC，并 push VLAN
-   |
-   v
-trunk ENI 发出
+        epod --> elxc --> ect --> eto --> esrc --> evlan --> etrunk
+    end
 
+    subgraph ingress["Pod 入方向"]
+        itrunk["trunk ENI 收到 VLAN 包"]
+        ifrom["bpf_host: cil_from_netdev"]
+        imap["查询 cilium_hwc_vlan_mac"]
+        ipop["pop VLAN 并修正 PACKET_HOST"]
+        inative["回到 Cilium 原生 datapath"]
+        ict["Cilium CT / ingress policy / proxy"]
+        ideliver["local delivery 到目标 Pod"]
 
-Pod 入方向：
-
-trunk ENI 收到 VLAN 包
-   |
-   v
-bpf_host: cil_from_netdev
-   |
-   v
-按 VLAN + 目的 MAC 查询 cilium_hwc_vlan_mac
-   |
-   v
-pop VLAN，并修正 skb 为 PACKET_HOST
-   |
-   v
-回到 Cilium 原生 datapath
-   |
-   v
-Cilium CT / ingress policy / proxy
-   |
-   v
-local delivery 到目标 Pod
+        itrunk --> ifrom --> imap --> ipop --> inative --> ict --> ideliver
+    end
 ```
 
 入方向的关键原则是：HuaweiCloud 逻辑不直接 `redirect` 到 Pod，只做 VLAN 归一化，
