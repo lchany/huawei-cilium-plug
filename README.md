@@ -46,36 +46,36 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ## Patch 管理流程
 
 ```text
-上游 Cilium v1.19.1 baseline
-        │
-        ▼
-按照 series 顺序应用 patch
-        │
-        ▼
-生成 HuaweiCloud 定制版 Cilium 源码树
-        │
-        ▼
-构建 cilium-agent / cilium-operator 镜像
-        │
-        ▼
-部署到 HuaweiCloud Kubernetes 集群
-        │
-        ▼
-按 runtime-checklist.md 验证
+upstream Cilium v1.19.1 baseline
+    |
+    v
+apply patches in series order
+    |
+    v
+HuaweiCloud customized Cilium source tree
+    |
+    v
+build cilium-agent / cilium-operator images
+    |
+    v
+deploy to HuaweiCloud Kubernetes cluster
+    |
+    v
+validate with runtime-checklist.md
 
 
-HuaweiCloud 适配改动
-        │
-        ▼
-整理为编号 patch
-        │
-        ▼
-更新 series 顺序
-        │
-        ▼
-在目标 Cilium baseline 上运行 apply.sh
-        │
-        └── 回到“按照 series 顺序应用 patch”
+HuaweiCloud adaptation changes
+    |
+    v
+organize changes into numbered patches
+    |
+    v
+update series
+    |
+    v
+run apply.sh against target Cilium baseline
+    |
+    +--> back to "apply patches in series order"
 ```
 
 这个项目只保存图中的“编号 patch、series、应用脚本”。Cilium 源码本身不保存在这个
@@ -96,37 +96,43 @@ HuaweiCloud 适配分为控制面和数据面两部分：
 ```text
 节点发现与云资源同步：
 
-HuaweiCloud Metadata ─┐
-                      ▼
-HuaweiCloud API ───► cilium-operator-huaweicloud ───► CiliumNode
-                         ▲                              │
-                         │                              ▼
-                    Kubernetes API              spec/status.huawei-cloud
+HuaweiCloud Metadata
+        |
+        v
+cilium-operator-huaweicloud <---- HuaweiCloud VPC/SubENI API
+        ^
+        |
+Kubernetes API
+        |
+        v
+CiliumNode spec/status.huawei-cloud
 
 
 Pod 分配与 BPF map 同步：
 
 Pod 创建
-   │
-   ▼
+   |
+   v
 Cilium CNI
-   │
-   ▼
+   |
+   v
 HuaweiCloud IPAM allocator
-   │
-   ▼
+   |
+   v
 HuaweiCloud VPC/SubENI API
-   │
-   ▼
+   |
+   v
 SubENI 分配结果：IP / VLAN / MAC / Gateway / CIDR
-   │
-   ▼
+   |
+   v
 Cilium Endpoint
-   │
-   ▼
+   |
+   v
 SubENI Endpoint Manager
-   ├──► cilium_hwc_srcip4     （Pod IP -> VLAN / SubENI MAC）
-   └──► cilium_hwc_vlan_mac   （VLAN + SubENI MAC -> endpoint）
+   |
+   +--> cilium_hwc_srcip4    : Pod IP -> VLAN / SubENI MAC
+   |
+   +--> cilium_hwc_vlan_mac  : VLAN + SubENI MAC -> endpoint
 ```
 
 关键状态：
@@ -143,46 +149,46 @@ SubENI Endpoint Manager
 Pod 出方向：
 
 Pod 发包
-   │
-   ▼
+   |
+   v
 bpf_lxc / endpoint datapath
-   │
-   ▼
+   |
+   v
 Cilium CT / policy / service 逻辑
-   │
-   ▼
+   |
+   v
 bpf_host: cil_to_netdev
-   │
-   ▼
+   |
+   v
 查询 cilium_hwc_srcip4
-   │
-   ▼
+   |
+   v
 改写源 MAC 为 SubENI MAC，并 push VLAN
-   │
-   ▼
+   |
+   v
 trunk ENI 发出
 
 
 Pod 入方向：
 
 trunk ENI 收到 VLAN 包
-   │
-   ▼
+   |
+   v
 bpf_host: cil_from_netdev
-   │
-   ▼
+   |
+   v
 按 VLAN + 目的 MAC 查询 cilium_hwc_vlan_mac
-   │
-   ▼
+   |
+   v
 pop VLAN，并修正 skb 为 PACKET_HOST
-   │
-   ▼
+   |
+   v
 回到 Cilium 原生 datapath
-   │
-   ▼
+   |
+   v
 Cilium CT / ingress policy / proxy
-   │
-   ▼
+   |
+   v
 local delivery 到目标 Pod
 ```
 
