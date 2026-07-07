@@ -110,6 +110,31 @@ flowchart LR
     end
 ```
 
+控制面可以理解成“给 Pod 申请云上网卡资源，并把结果告诉 Cilium 数据面”的过程。
+
+按步骤看：
+
+1. `cilium-operator-huaweicloud` 启动后，会先了解当前节点运行在哪台华为云 ECS 上。
+   它会通过 `HuaweiCloud Metadata` 查询本机实例 ID、可用区、VPC、trunk ENI 等基础信息。
+2. operator 再调用 `HuaweiCloud VPC/SubENI API`，查询这个节点能使用哪些子网、安全组、
+   SubENI 配额，以及当前已经有哪些 SubENI。
+3. operator 把这些节点级信息写入 Kubernetes 里的 `CiliumNode` 对象。
+   可以把 `CiliumNode` 理解成 Cilium 为每个节点维护的一份“网络资源登记表”。
+4. 当 Kubernetes 创建 Pod 时，`Cilium CNI` 会被 kubelet 调用，开始给这个 Pod 分配网络。
+5. `HuaweiCloud IPAM allocator` 根据 `CiliumNode` 里的节点信息和当前空闲资源，决定给这个
+   Pod 分配哪个 SubENI/IP。如果资源不够，它会继续调用 HuaweiCloud API 创建新的 SubENI。
+6. 华为云返回 SubENI 的关键信息，例如 Pod IP、VLAN ID、SubENI MAC、网关和 CIDR。
+   这些信息会作为 CNI 分配结果传回 Cilium。
+7. Cilium 创建或更新 `Cilium Endpoint`。这是 Cilium 对一个 Pod 的本地网络状态记录。
+8. `SubENI Endpoint Manager` 监听 endpoint 变化，把 Pod 和 SubENI 的关系写入两张 BPF map：
+   - `cilium_hwc_srcip4`：用于出方向。数据面看到 Pod 源 IP 后，知道要使用哪个 VLAN 和
+     SubENI MAC 发出去。
+   - `cilium_hwc_vlan_mac`：用于入方向。数据面看到 trunk 网卡收到的 VLAN 包后，知道这个包
+     是发给哪个本地 Pod 的。
+
+一句话总结：控制面不直接转发数据包，它负责“申请资源、记录关系、下发映射”。真正处理
+报文的是后面的数据面 BPF 逻辑。
+
 关键状态：
 
 - `CiliumNode.spec.huawei-cloud`：记录节点侧实例、VPC、trunk ENI、子网、安全组等信息。
