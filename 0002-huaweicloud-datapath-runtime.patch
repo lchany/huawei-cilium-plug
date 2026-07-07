@@ -1,0 +1,841 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HuaweiCloud Cilium Patch Bot <huaweicloud-cilium-patches@example.invalid>
+Date: Tue, 7 Jul 2026 00:00:00 +0800
+Subject: [PATCH] huaweicloud datapath and runtime wiring
+
+---
+diff --git a/bpf/Makefile b/bpf/Makefile
+index 4b681f2484..6da9327827 100644
+--- a/bpf/Makefile
++++ b/bpf/Makefile
+@@ -53,6 +53,11 @@ MAX_BASE_OPTIONS += -DENABLE_BANDWIDTH_MANAGER=1 -DENABLE_EGRESS_GATEWAY=1 -DENA
+ MAX_BASE_OPTIONS += -DENABLE_TPROXY=1 -DENABLE_HOST_ROUTING=1
+ MAX_BASE_OPTIONS += -DENABLE_CLUSTER_AWARE_ADDRESSING=1 -DENABLE_INTER_CLUSTER_SNAT=1
+ 
++# HuaweiCloud trunk/SubENI VLAN support
++ifdef ENABLE_HUAWEICLOUD_VLAN
++MAX_BASE_OPTIONS += -DENABLE_HUAWEICLOUD_VLAN=1
++endif
++
+ ifndef MAX_LB_OPTIONS
+ MAX_LB_OPTIONS = $(MAX_BASE_OPTIONS) -DENABLE_NAT_46X64=1 -DENABLE_NAT_46X64_GATEWAY=1 -DENCAP_IFINDEX=1 -DTUNNEL_MODE=1
+ MAX_LB_OPTIONS += -DLB_SELECTION_PER_SERVICE=1 -DLB_SELECTION_MAGLEV=2 -DLB_SELECTION_RANDOM=1 -DENABLE_IPSEC=1
+diff --git a/bpf/bpf_host.c b/bpf/bpf_host.c
+index bdaf738343..8111a03491 100644
+--- a/bpf/bpf_host.c
++++ b/bpf/bpf_host.c
+@@ -59,6 +59,9 @@
+ #include "lib/l2_responder.h"
+ #include "lib/vtep.h"
+ #include "lib/subnet.h"
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++#include "lib/huaweicloud.h"
++#endif
+ 
+  #define host_egress_policy_hook(ctx, src_sec_identity, ext_err) CTX_ACT_OK
+  #define host_wg_encrypt_hook(ctx, proto, src_sec_identity)			\
+@@ -1198,6 +1201,17 @@ int cil_from_netdev(struct __ctx_buff *ctx)
+ #endif
+ 	int ret;
+ 
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	/* HuaweiCloud SubENI ingress: intercept VLAN-tagged SubENI packets
++	 * before the generic VLAN filter drops them.
++	 */
++	ret = hwc_from_netdev(ctx);
++	if (ret == CTX_ACT_REDIRECT)
++		return ret;
++	if (IS_ERR(ret))
++		goto drop_err;
++#endif
++
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 * We will see the packet again in from-netdev@eth0.vlanXXX.
+ 	 */
+@@ -1436,6 +1450,16 @@ skip_host_firewall:
+ 	if (IS_ERR(ret))
+ 		goto drop_err;
+ 
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	/* HuaweiCloud SubENI egress: rewrite src MAC and push VLAN tag for
++	 * packets from SubENI-managed pods leaving via the trunk interface.
++	 * Must run after policy but before masquerade/NAT.
++	 */
++	ret = hwc_to_netdev(ctx, proto);
++	if (IS_ERR(ret))
++		goto drop_err;
++#endif
++
+ #ifdef ENABLE_EGRESS_GATEWAY_COMMON
+ 	/* If request arrived via from-overlay, don't redirect it again: */
+ 	if (!ctx_egw_done(ctx)) {
+diff --git a/bpf/include/bpf/config/node.h b/bpf/include/bpf/config/node.h
+index 2260c782d0..14edaebab4 100644
+--- a/bpf/include/bpf/config/node.h
++++ b/bpf/include/bpf/config/node.h
+@@ -35,3 +35,6 @@ NODE_CONFIG(__u8, tracing_ip_option_type, "The IP option type to use for packet
+ NODE_CONFIG(bool, policy_deny_response_enabled, "Enable ICMP responses for policy-denied traffic")
+ 
+ NODE_CONFIG(bool, hybrid_routing_enabled, "Enable hybrid mode routing based on subnet IDs")
++
++NODE_CONFIG(__u32, hwc_trunk_ifindex, "HuaweiCloud trunk interface ifindex for SubENI VLAN handling")
++#define HWC_TRUNK_IFINDEX CONFIG(hwc_trunk_ifindex)
+diff --git a/bpf/include/bpf/helpers_skb.h b/bpf/include/bpf/helpers_skb.h
+index 0633d18cfa..29e634ba74 100644
+--- a/bpf/include/bpf/helpers_skb.h
++++ b/bpf/include/bpf/helpers_skb.h
+@@ -42,6 +42,9 @@ static int BPF_FUNC(skb_change_tail, struct __sk_buff *skb, __u32 nlen,
+ 		    __u32 flags);
+ static int BPF_FUNC(skb_change_head, struct __sk_buff *skb, __u32 head_room,
+ 		    __u64 flags);
++static int BPF_FUNC(skb_vlan_push, struct __sk_buff *skb, __be16 vlan_proto,
++		    __u16 vlan_tci);
++static int BPF_FUNC(skb_vlan_pop, struct __sk_buff *skb);
+ 
+ static int BPF_FUNC(skb_pull_data, struct __sk_buff *skb, __u32 len);
+ 
+diff --git a/bpf/lib/drop_reasons.h b/bpf/lib/drop_reasons.h
+index 0eaf2b8a47..0b4f5db16d 100644
+--- a/bpf/lib/drop_reasons.h
++++ b/bpf/lib/drop_reasons.h
+@@ -86,3 +86,6 @@
+ #define DROP_EP_NOT_READY	-203
+ #define DROP_NO_EGRESS_IP	-204
+ #define DROP_PUNT_PROXY		-205 /* Mapped as drop code, though drop not necessary. */
++#define DROP_HWC_VLAN_PUSH_FAIL   -206
++#define DROP_HWC_VLAN_POP_FAIL    -207
++#define DROP_HWC_MAC_REWRITE_FAIL -208
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+new file mode 100644
+index 0000000000..287f54a55e
+--- /dev/null
++++ b/bpf/lib/huaweicloud.h
+@@ -0,0 +1,182 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/* Copyright Authors of Cilium */
++
++#pragma once
++
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++
++#include "common.h"
++#include "eth.h"
++#include "local_delivery.h"
++#include "drop.h"
++
++/* ===== Stage 9: BPF Map definitions ===== */
++/*
++ * Map 1: source IP -> SubENI info  (used by egress path)
++ * Key:   pod IPv4 address
++ * Value: SubENI VLAN ID, MAC address, LXC ID
++ */
++
++struct hwc_srcip_key4 {
++	__u32 addr;     /* Pod IPv4 address */
++};
++
++struct hwc_srcip_key6 {
++	__u8 addr[16];  /* Pod IPv6 address */
++};
++
++struct hwc_subeni_info {
++	__u16 vlan_id;  /* SubENI VLAN ID */
++	__u8  mac[6];   /* SubENI MAC address */
++	__u16 pad;
++	__u16 reserved;
++	__u32 lxc_id;   /* Endpoint LXC ID */
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_srcip_key4);
++	__type(value, struct hwc_subeni_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_srcip4 __section_maps_btf;
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_srcip_key6);
++	__type(value, struct hwc_subeni_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_srcip6 __section_maps_btf;
++
++/*
++ * Map 2: (VLAN ID + dst MAC) -> endpoint info  (used by ingress path)
++ * Key:   VLAN ID + destination MAC
++ * Value: veth ifindex, LXC ID, flags
++ */
++
++struct hwc_vlan_mac_key {
++	__u16 vlan_id;
++	__u8  mac[6];   /* Destination MAC */
++};
++
++struct hwc_ep_info {
++	__u32 ifindex;  /* Endpoint veth ifindex */
++	__u16 lxc_id;
++	__u16 flags;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_vlan_mac_key);
++	__type(value, struct hwc_ep_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_vlan_mac __section_maps_btf;
++
++/* ===== Stage 10: Egress — hwc_to_netdev ===== */
++/*
++ * hwc_to_netdev: called from cil_to_netdev on the trunk interface.
++ *
++ * For packets originating from SubENI-managed pods:
++ *   1. Look up the pod's source IP in Map 1 to get the SubENI's VLAN ID and MAC.
++ *   2. Rewrite the source MAC to the SubENI's MAC address.
++ *   3. Push an 802.1Q VLAN tag with the SubENI's VLAN ID.
++ *
++ * Non-SubENI traffic (map miss) is passed through unchanged.
++ */
++static __always_inline int
++hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
++{
++	struct hwc_subeni_info *info;
++	__u32 src_ip4 = 0;
++
++	/* Only process traffic on the trunk interface. */
++	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++		return CTX_ACT_OK;
++
++	/* Only handle IPv4 for now; IPv6 is a future extension. */
++	if (proto != bpf_htons(ETH_P_IP))
++		return CTX_ACT_OK;
++
++	if (ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, saddr),
++			   &src_ip4, sizeof(src_ip4)) < 0)
++		return CTX_ACT_OK;
++
++	struct hwc_srcip_key4 key = { .addr = src_ip4 };
++
++	info = map_lookup_elem(&cilium_hwc_srcip4, &key);
++	if (!info)
++		return CTX_ACT_OK; /* Not a SubENI pod — pass through. */
++
++	/* Rewrite source MAC to the SubENI's MAC address. */
++	if (eth_store_saddr(ctx, info->mac, 0) < 0)
++		return DROP_HWC_MAC_REWRITE_FAIL;
++
++	/* Push 802.1Q VLAN tag with the SubENI's VLAN ID. */
++	if (skb_vlan_push(ctx, bpf_htons(ETH_P_8021Q), info->vlan_id) < 0)
++		return DROP_HWC_VLAN_PUSH_FAIL;
++
++	return CTX_ACT_OK;
++}
++
++/* ===== Stage 11: Ingress — hwc_from_netdev ===== */
++/*
++ * hwc_from_netdev: called from cil_from_netdev on the trunk interface.
++ *
++ * For inbound 802.1Q-tagged packets destined for SubENI-managed pods:
++ *   1. Check that the packet carries a VLAN tag on the trunk interface.
++ *   2. Look up (VLAN ID + dst MAC) in Map 2 to find the target endpoint.
++ *   3. Strip the VLAN tag.
++ *   4. Fall back to the generic host ingress path so normal local-delivery
++ *      logic can rewrite L2 headers, enforce policy, and redirect.
++ *
++ * Packets without a VLAN tag or with an unknown (VLAN, MAC) pair are
++ * returned as CTX_ACT_OK so the caller can continue with default processing.
++ */
++static __always_inline int
++hwc_from_netdev(struct __ctx_buff *ctx)
++{
++	struct hwc_vlan_mac_key key __align_stack_8 = {};
++	struct hwc_ep_info *ep;
++	void *data, *data_end;
++	struct ethhdr *eth;
++
++	/* Only process traffic on the trunk interface. */
++	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++		return CTX_ACT_OK;
++
++	/* Packets without a VLAN tag are not SubENI traffic. */
++	if (!ctx->vlan_present)
++		return CTX_ACT_OK;
++
++	/* Validate Ethernet header bounds. */
++	data     = (void *)(long)ctx->data;
++	data_end = (void *)(long)ctx->data_end;
++	eth = data;
++	if ((void *)(eth + 1) > data_end)
++		return DROP_INVALID;
++
++	/* Build the lookup key from VLAN ID and destination MAC. */
++	key.vlan_id = ctx->vlan_tci & 0xfff;
++	key.mac[0] = eth->h_dest[0];
++	key.mac[1] = eth->h_dest[1];
++	key.mac[2] = eth->h_dest[2];
++	key.mac[3] = eth->h_dest[3];
++	key.mac[4] = eth->h_dest[4];
++	key.mac[5] = eth->h_dest[5];
++
++	ep = map_lookup_elem(&cilium_hwc_vlan_mac, &key);
++	if (!ep)
++		return CTX_ACT_OK; /* Unknown (VLAN, MAC) — continue default path. */
++
++	/* Strip the VLAN tag before handing off to the endpoint. */
++	if (skb_vlan_pop(ctx) < 0)
++		return DROP_HWC_VLAN_POP_FAIL;
++
++	ctx_change_type(ctx, PACKET_HOST);
++
++	return CTX_ACT_OK;
++}
++
++#endif /* ENABLE_HUAWEICLOUD_VLAN */
+diff --git a/pkg/monitor/api/drop.go b/pkg/monitor/api/drop.go
+index 3bc1508827..6b85f6d2cb 100644
+--- a/pkg/monitor/api/drop.go
++++ b/pkg/monitor/api/drop.go
+@@ -105,6 +105,9 @@ var errors = map[uint8]string{
+ 	203: "Endpoint policy program not available",
+ 	204: "No Egress IP configured",
+ 	205: "Punt to proxy",
++	206: "HuaweiCloud: VLAN push failed",
++	207: "HuaweiCloud: VLAN pop failed",
++	208: "HuaweiCloud: MAC rewrite failed",
+ }
+ 
+ func extendedReason(extError int8) string {
+diff --git a/daemon/infraendpoints/infra_ip_allocation.go b/daemon/infraendpoints/infra_ip_allocation.go
+index 42dc54de18..65b700a9ef 100644
+--- a/daemon/infraendpoints/infra_ip_allocation.go
++++ b/daemon/infraendpoints/infra_ip_allocation.go
+@@ -284,6 +284,7 @@ func (r *infraIPAllocator) reallocateRouterIPs(ctx context.Context, family datap
+ 
+ 	if (r.daemonConfig.IPAM == ipamOption.IPAMENI ||
+ 		r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud ||
++		r.daemonConfig.IPAM == ipamOption.IPAMHuaweiCloud ||
+ 		r.daemonConfig.IPAM == ipamOption.IPAMAzure) && result != nil {
+ 		var routingInfo *linuxrouting.RoutingInfo
+ 		routingInfo, err = linuxrouting.NewRoutingInfo(r.logger, result.GatewayIP, result.CIDRs,
+@@ -391,7 +392,7 @@ func (r *infraIPAllocator) allocateHealthIPs(oldV4HealthIP net.IP, oldV6HealthIP
+ 		// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the ENI MAC addr
+ 		// in order to set up rules and routes on the local node to direct
+ 		// endpoint traffic out of the ENIs.
+-		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud {
++		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud || r.daemonConfig.IPAM == ipamOption.IPAMHuaweiCloud {
+ 			if r.healthEndpointRouting, err = r.parseRoutingInfo(result); err != nil {
+ 				r.logger.Warn("Unable to allocate health information for ENI", logfields.Error, err)
+ 			}
+@@ -478,7 +479,7 @@ func (r *infraIPAllocator) allocateIngressIPs(oldV4IngressIP net.IP, oldV6Ingres
+ 		// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the
+ 		// ENI MAC addr in order to set up rules and routes on the local node to
+ 		// direct ingress traffic out of the ENIs.
+-		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud {
++		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud || r.daemonConfig.IPAM == ipamOption.IPAMHuaweiCloud {
+ 			if ingressRouting, err := r.parseRoutingInfo(result); err != nil {
+ 				r.logger.Warn("Unable to allocate ingress information for ENI", logfields.Error, err)
+ 			} else {
+diff --git a/pkg/datapath/config/config.go b/pkg/datapath/config/config.go
+index 877217b743..b19b5d5d80 100644
+--- a/pkg/datapath/config/config.go
++++ b/pkg/datapath/config/config.go
+@@ -6,6 +6,7 @@ package config
+ import (
+ 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
+ 	datapath "github.com/cilium/cilium/pkg/datapath/types"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/option"
+ )
+ 
+@@ -31,6 +32,9 @@ func NodeConfig(lnc *datapath.LocalNodeConfiguration) Node {
+ 
+ 	if lnc.DirectRoutingDevice != nil {
+ 		node.DirectRoutingDevIfIndex = uint32(lnc.DirectRoutingDevice.Index)
++		if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++			node.HuaweiCloudTrunkIfIndex = uint32(lnc.DirectRoutingDevice.Index)
++		}
+ 	}
+ 
+ 	node.SupportsFIBLookupSkipNeigh = probes.HaveFibLookupSkipNeigh() == nil
+diff --git a/pkg/datapath/config/node_config.go b/pkg/datapath/config/node_config.go
+index 7a1bf5b6cb..b0d6ad866d 100644
+--- a/pkg/datapath/config/node_config.go
++++ b/pkg/datapath/config/node_config.go
+@@ -15,6 +15,7 @@ type Node struct {
+ 	ClusterIDMax uint32 `config:"cluster_id_max"`
+ 	// Index of the interface used to connect nodes in the cluster.
+ 	DirectRoutingDevIfIndex uint32 `config:"direct_routing_dev_ifindex"`
++	HuaweiCloudTrunkIfIndex uint32 `config:"hwc_trunk_ifindex"`
+ 	// Use jiffies (count of timer ticks since boot).
+ 	EnableJiffies bool `config:"enable_jiffies"`
+ 	// Enable hybrid mode routing based on subnet IDs.
+@@ -40,7 +41,7 @@ type Node struct {
+ }
+ 
+ func NewNode() *Node {
+-	return &Node{0x0, 0xff, 0x0, false, false, 0x0, false,
++	return &Node{0x0, 0xff, 0x0, 0x0, false, false, 0x0, false,
+ 		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+ 		[4]byte{0x0, 0x0, 0x0, 0x0},
+ 		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+diff --git a/pkg/datapath/iptables/iptables.go b/pkg/datapath/iptables/iptables.go
+index 3565f039e2..1770c79ebd 100644
+--- a/pkg/datapath/iptables/iptables.go
++++ b/pkg/datapath/iptables/iptables.go
+@@ -1321,7 +1321,8 @@ func (m *Manager) getDeliveryInterface(ifName string) string {
+ 		return "lxc+"
+ 
+ 	case m.sharedCfg.IPAM == ipamOption.IPAMENI ||
+-		m.sharedCfg.IPAM == ipamOption.IPAMAlibabaCloud:
++		m.sharedCfg.IPAM == ipamOption.IPAMAlibabaCloud ||
++		m.sharedCfg.IPAM == ipamOption.IPAMHuaweiCloud:
+ 		return "lxc+"
+ 
+ 	default:
+@@ -1796,7 +1797,7 @@ func (m *Manager) installRules(state desiredState) error {
+ 	// and route them back the same way even if the pod responding is using
+ 	// the IP of a different interface. Please see note in Reinitialize()
+ 	// in pkg/datapath/loader for more details.
+-	if m.sharedCfg.IPAM == ipamOption.IPAMENI || m.sharedCfg.IPAM == ipamOption.IPAMAlibabaCloud {
++	if m.sharedCfg.IPAM == ipamOption.IPAMENI || m.sharedCfg.IPAM == ipamOption.IPAMAlibabaCloud || m.sharedCfg.IPAM == ipamOption.IPAMHuaweiCloud {
+ 		if err := m.addCiliumENIRules(); err != nil {
+ 			return fmt.Errorf("cannot install rules for ENI multi-node NodePort: %w", err)
+ 		}
+diff --git a/pkg/datapath/linux/config/config.go b/pkg/datapath/linux/config/config.go
+index 72718a15e5..962e3c5ad3 100644
+--- a/pkg/datapath/linux/config/config.go
++++ b/pkg/datapath/linux/config/config.go
+@@ -31,6 +31,7 @@ import (
+ 	datapath "github.com/cilium/cilium/pkg/datapath/types"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	"github.com/cilium/cilium/pkg/identity"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/kpr"
+ 	"github.com/cilium/cilium/pkg/labels"
+ 	"github.com/cilium/cilium/pkg/loadbalancer"
+@@ -214,6 +215,10 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
+ 		cDefinesMap["ENABLE_IPV4"] = "1"
+ 	}
+ 
++	if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++		cDefinesMap["ENABLE_HUAWEICLOUD_VLAN"] = "1"
++	}
++
+ 	if option.Config.EnableIPv6 {
+ 		cDefinesMap["ENABLE_IPV6"] = "1"
+ 	}
+diff --git a/pkg/datapath/orchestrator/localnodeconfig.go b/pkg/datapath/orchestrator/localnodeconfig.go
+index 0389ab8b92..60334d08e2 100644
+--- a/pkg/datapath/orchestrator/localnodeconfig.go
++++ b/pkg/datapath/orchestrator/localnodeconfig.go
+@@ -142,7 +142,7 @@ func newLocalNodeConfig(
+ 		EnableAutoDirectRouting:      config.EnableAutoDirectRouting,
+ 		EphemeralMin:                 uint16(ephemeralMin),
+ 		DirectRoutingSkipUnreachable: config.DirectRoutingSkipUnreachable,
+-		EnableLocalNodeRoute:         config.EnableLocalNodeRoute && config.IPAM != ipamOption.IPAMENI && config.IPAM != ipamOption.IPAMAzure && config.IPAM != ipamOption.IPAMAlibabaCloud,
++		EnableLocalNodeRoute:         config.EnableLocalNodeRoute && config.IPAM != ipamOption.IPAMENI && config.IPAM != ipamOption.IPAMAzure && config.IPAM != ipamOption.IPAMAlibabaCloud && config.IPAM != ipamOption.IPAMHuaweiCloud,
+ 		EnableWireguard:              wgAgent.Enabled(),
+ 		WireguardIfIndex:             wgIndex,
+ 		EnableIPSec:                  ipsecCfg.Enabled(),
+diff --git a/pkg/endpoint/endpoint.go b/pkg/endpoint/endpoint.go
+index a45662ea35..c71f566376 100644
+--- a/pkg/endpoint/endpoint.go
++++ b/pkg/endpoint/endpoint.go
+@@ -2554,7 +2554,7 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
+ 	}
+ 	e.setState(StateDisconnecting, "Deleting endpoint")
+ 
+-	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud ||
++	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud ||
+ 		(option.Config.IPAM == ipamOption.IPAMDelegatedPlugin && option.Config.InstallUplinkRoutesForDelegatedIPAM) {
+ 		e.getLogger().Debug(
+ 			"Deleting endpoint routing rules",
+diff --git a/pkg/health/health_connectivity_endpoint.go b/pkg/health/health_connectivity_endpoint.go
+index d5ac4d2061..4d6d900367 100644
+--- a/pkg/health/health_connectivity_endpoint.go
++++ b/pkg/health/health_connectivity_endpoint.go
+@@ -389,7 +389,7 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
+ 		return nil, fmt.Errorf("Error while configuring routes: %w", err)
+ 	}
+ 
+-	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 		ri := h.infraIPAllocator.GetHealthEndpointRouting()
+ 		if ri == nil {
+ 			return nil, errors.New("failed to configure health endpoint routing - no IP allocated")
+diff --git a/plugins/cilium-cni/cmd/cmd.go b/plugins/cilium-cni/cmd/cmd.go
+index ab2167ff9a..7b4d260eea 100644
+--- a/plugins/cilium-cni/cmd/cmd.go
++++ b/plugins/cilium-cni/cmd/cmd.go
+@@ -1339,7 +1339,7 @@ func buildLogAttrsWithCNIArgs(logger *slog.Logger, cniArgs *types.ArgsSpec) *slo
+ // - DelegatedPlugin mode with InstallUplinkRoutesForDelegatedIPAM set to true.
+ func needsEndpointRoutingOnHost(conf *models.DaemonConfigurationStatus) bool {
+ 	switch conf.IpamMode {
+-	case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++	case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 		return true
+ 	case ipamOption.IPAMDelegatedPlugin:
+ 		return conf.InstallUplinkRoutesForDelegatedIPAM
+diff --git a/plugins/cilium-cni/cmd/endpoint.go b/plugins/cilium-cni/cmd/endpoint.go
+index 81b92ae0a1..b12695c103 100644
+--- a/plugins/cilium-cni/cmd/endpoint.go
++++ b/plugins/cilium-cni/cmd/endpoint.go
+@@ -95,7 +95,7 @@ func (c *defaultEndpointConfiguration) PrepareEndpoint(ipam *models.IPAMResponse
+ 		ep.DatapathConfiguration.ExternalIpam = true
+ 	}
+ 
+-	if c.Conf.IpamMode == ipamOption.IPAMENI {
++	if c.Conf.IpamMode == ipamOption.IPAMENI || c.Conf.IpamMode == ipamOption.IPAMHuaweiCloud {
+ 		ifindex, err := ifindexFromMac(ipam.IPV4.MasterMac)
+ 		if err == nil {
+ 			ep.ParentInterfaceIndex = ifindex
+diff --git a/pkg/k8s/endpoints.go b/pkg/k8s/endpoints.go
+index c99448f6f1..8f85c4b8cb 100644
+--- a/pkg/k8s/endpoints.go
++++ b/pkg/k8s/endpoints.go
+@@ -13,6 +13,8 @@ import (
+ 	"strings"
+ 
+ 	corev1 "k8s.io/api/core/v1"
++	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	serviceStore "github.com/cilium/cilium/pkg/clustermesh/store"
+ 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+@@ -339,6 +341,18 @@ func ParseEndpointSliceV1(logger *slog.Logger, ep *slim_discovery_v1.EndpointSli
+ 	return endpoints
+ }
+ 
++func slimObjectMetaFromMetaV1(meta metav1.ObjectMeta) slim_metav1.ObjectMeta {
++	return slim_metav1.ObjectMeta{
++		Name:            meta.Name,
++		Namespace:       meta.Namespace,
++		UID:             meta.UID,
++		ResourceVersion: meta.ResourceVersion,
++		Labels:          maps.Clone(meta.Labels),
++		Annotations:     maps.Clone(meta.Annotations),
++		OwnerReferences: slim_metav1.SlimOwnerReferences(meta.OwnerReferences),
++	}
++}
++
+ // parseEndpointPortV1 returns the port name and the port parsed as a L4Addr from
+ // the given port.
+ func parseEndpointPortV1(port slim_discovery_v1.EndpointPort) (name string, addr loadbalancer.L4Addr, ok bool) {
+@@ -363,3 +377,122 @@ func parseEndpointPortV1(port slim_discovery_v1.EndpointPort) (name string, addr
+ 	}
+ 	return name, loadbalancer.NewL4Addr(proto, uint16(*port.Port)), true
+ }
++
++func parseEndpointConditionsV1Beta1(conditions discoveryv1beta1.EndpointConditions) (bc BackendCondition) {
++	if conditions.Ready == nil || *conditions.Ready {
++		bc |= BackendConditionReady
++	}
++	if conditions.Serving == nil || conditions.Serving != nil && *conditions.Serving {
++		bc |= BackendConditionServing
++	}
++	if conditions.Terminating != nil && *conditions.Terminating {
++		bc |= BackendConditionTerminating
++	}
++	return
++}
++
++func parseEndpointSliceV1Beta1(logger *slog.Logger, ep *discoveryv1beta1.EndpointSlice) *Endpoints {
++	backendCount := 0
++	for _, sub := range ep.Endpoints {
++		backendCount += len(sub.Addresses)
++	}
++	endpoints := newEndpoints(backendCount)
++	endpoints.ObjectMeta = slimObjectMetaFromMetaV1(ep.ObjectMeta)
++	endpoints.EndpointSliceID = ParseEndpointSliceID(ep)
++
++	if ep.AddressType != discoveryv1beta1.AddressTypeIPv4 &&
++		ep.AddressType != discoveryv1beta1.AddressTypeIPv6 {
++		return endpoints
++	}
++
++	logger.Debug("Processing endpoints for EndpointSlice v1beta1",
++		logfields.LenEndpoints, len(ep.Endpoints),
++		logfields.Name, ep.Name,
++	)
++
++	ports := make(map[loadbalancer.L4Addr][]string, len(ep.Ports))
++	for _, port := range ep.Ports {
++		if name, lbPort, ok := parseEndpointPortV1Beta1(port); ok {
++			ports[lbPort] = append(ports[lbPort], name)
++		}
++	}
++
++	for i, sub := range ep.Endpoints {
++		backend := &Backend{
++			Conditions: parseEndpointConditionsV1Beta1(sub.Conditions),
++			Ports:      ports,
++		}
++
++		if sub.NodeName != nil {
++			backend.NodeName = *sub.NodeName
++		} else if nodeName, ok := sub.Topology[corev1.LabelHostname]; ok {
++			backend.NodeName = nodeName
++		}
++
++		if sub.Hostname != nil {
++			backend.Hostname = *sub.Hostname
++		}
++		if zoneName, ok := sub.Topology[corev1.LabelTopologyZone]; ok {
++			backend.Zone = zoneName
++		}
++
++		if sub.Hints != nil && len(sub.Hints.ForZones) > 0 {
++			hints := sub.Hints.ForZones
++			backend.HintsForZones = make([]string, len(hints))
++			for i, hint := range hints {
++				backend.HintsForZones[i] = hint.Name
++			}
++		}
++
++		for _, addr := range sub.Addresses {
++			addrCluster, err := cmtypes.ParseAddrCluster(addr)
++			if err != nil {
++				logger.Info(
++					"Unable to parse address in EndpointSlice v1beta1",
++					logfields.Error, err,
++					logfields.Address, addr,
++					logfields.Name, ep.Name,
++				)
++				continue
++			}
++			endpoints.Backends[addrCluster] = backend
++		}
++
++		if backend.Conditions.IsTerminating() {
++			metrics.TerminatingEndpointsEvents.Inc()
++		}
++
++		logger.Debug("Processed endpoint",
++			logfields.Index, i,
++			logfields.Name, ep.Name,
++			logfields.Addresses, sub.Addresses,
++			logfields.Backend, backend,
++			logfieldTerminating, backend.Conditions.IsTerminating(),
++		)
++	}
++
++	return endpoints
++}
++
++func parseEndpointPortV1Beta1(port discoveryv1beta1.EndpointPort) (name string, addr loadbalancer.L4Addr, ok bool) {
++	proto := loadbalancer.TCP
++	if port.Protocol != nil {
++		switch *port.Protocol {
++		case corev1.ProtocolTCP:
++			proto = loadbalancer.TCP
++		case corev1.ProtocolUDP:
++			proto = loadbalancer.UDP
++		case corev1.ProtocolSCTP:
++			proto = loadbalancer.SCTP
++		default:
++			return
++		}
++	}
++	if port.Port == nil {
++		return
++	}
++	if port.Name != nil {
++		name = *port.Name
++	}
++	return name, loadbalancer.NewL4Addr(proto, uint16(*port.Port)), true
++}
+diff --git a/pkg/k8s/endpointslice_compat.go b/pkg/k8s/endpointslice_compat.go
+new file mode 100644
+index 0000000000..eefef4ec95
+--- /dev/null
++++ b/pkg/k8s/endpointslice_compat.go
+@@ -0,0 +1,73 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package k8s
++
++import (
++	"fmt"
++	"log/slog"
++
++	discoveryv1 "k8s.io/api/discovery/v1"
++	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	k8sRuntime "k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/client-go/tools/cache"
++
++	"github.com/cilium/cilium/pkg/k8s/client"
++	slim_discoveryv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
++	"github.com/cilium/cilium/pkg/k8s/utils"
++	"github.com/cilium/cilium/pkg/logging/logfields"
++)
++
++const endpointSliceResourceName = "endpointslices"
++
++func NewEndpointSliceListerWatcher(logger *slog.Logger, cs client.Clientset, opts ...func(*metav1.ListOptions)) (cache.ListerWatcher, k8sRuntime.Object) {
++	if endpointSliceV1Supported(logger, cs) {
++		logger.Info("Using discoveryv1.EndpointSlice")
++		lw := utils.ListerWatcherFromTyped[*slim_discoveryv1.EndpointSliceList](cs.Slim().DiscoveryV1().EndpointSlices(""))
++		return utils.ListerWatcherWithModifiers(lw, opts...), &slim_discoveryv1.EndpointSlice{}
++	}
++
++	logger.Info("Using discoveryv1beta1.EndpointSlice")
++	lw := utils.ListerWatcherFromTyped[*discoveryv1beta1.EndpointSliceList](cs.DiscoveryV1beta1().EndpointSlices(""))
++	return utils.ListerWatcherWithModifiers(lw, opts...), &discoveryv1beta1.EndpointSlice{}
++}
++
++func endpointSliceV1Supported(logger *slog.Logger, cs client.Clientset) bool {
++	resources, err := cs.Discovery().ServerResourcesForGroupVersion(discoveryv1.SchemeGroupVersion.String())
++	switch {
++	case err == nil:
++		return hasEndpointSliceResource(resources)
++	case apierrors.IsNotFound(err):
++		return false
++	default:
++		logger.Warn("Unable to detect discovery/v1 EndpointSlice support, defaulting to discovery/v1",
++			logfields.Error, err,
++		)
++		return true
++	}
++}
++
++func hasEndpointSliceResource(resources *metav1.APIResourceList) bool {
++	if resources == nil {
++		return false
++	}
++	for _, resource := range resources.APIResources {
++		if resource.Name == endpointSliceResourceName {
++			return true
++		}
++	}
++	return false
++}
++
++func ParseEndpointSlice(logger *slog.Logger, obj any) (*Endpoints, error) {
++	switch obj := obj.(type) {
++	case *slim_discoveryv1.EndpointSlice:
++		return ParseEndpointSliceV1(logger, obj), nil
++	case *discoveryv1beta1.EndpointSlice:
++		return parseEndpointSliceV1Beta1(logger, obj), nil
++	default:
++		return nil, fmt.Errorf("%T not a known endpoint slice object", obj)
++	}
++}
+diff --git a/pkg/k8s/resource_ctors.go b/pkg/k8s/resource_ctors.go
+index 065fb1e12c..1580a81741 100644
+--- a/pkg/k8s/resource_ctors.go
++++ b/pkg/k8s/resource_ctors.go
+@@ -6,7 +6,6 @@ package k8s
+ import (
+ 	"fmt"
+ 	"log/slog"
+-	"reflect"
+ 	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+@@ -24,7 +23,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/resource"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+-	slim_discoveryv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
+ 	slim_networkingv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
+ 	"github.com/cilium/cilium/pkg/k8s/synced"
+ 	"github.com/cilium/cilium/pkg/k8s/types"
+@@ -336,12 +334,7 @@ func (lw *endpointsListerWatcher) getSourceObj() k8sRuntime.Object {
+ 
+ func (lw *endpointsListerWatcher) getListerWatcher() cache.ListerWatcher {
+ 	lw.once.Do(func() {
+-		lw.logger.Info("Using discoveryv1.EndpointSlice")
+-		lw.cachedListerWatcher = utils.ListerWatcherFromTyped[*slim_discoveryv1.EndpointSliceList](
+-			lw.cs.Slim().DiscoveryV1().EndpointSlices(""),
+-		)
+-		lw.sourceObj = &slim_discoveryv1.EndpointSlice{}
+-		lw.cachedListerWatcher = utils.ListerWatcherWithModifiers(lw.cachedListerWatcher, lw.endpointSlicesOptsModifiers...)
++		lw.cachedListerWatcher, lw.sourceObj = NewEndpointSliceListerWatcher(lw.logger, lw.cs, lw.endpointSlicesOptsModifiers...)
+ 	})
+ 	return lw.cachedListerWatcher
+ }
+@@ -356,13 +349,15 @@ func (lw *endpointsListerWatcher) Watch(opts metav1.ListOptions) (watch.Interfac
+ 
+ func transformEndpoint(logger *slog.Logger, obj any) (any, error) {
+ 	switch obj := obj.(type) {
+-	case *slim_discoveryv1.EndpointSlice:
+-		return ParseEndpointSliceV1(logger, obj), nil
+ 	case cache.DeletedFinalStateUnknown:
+ 		return obj, nil
+ 	default:
+-		logger.Error("Unknown endpoint or endpoint slice object", logfields.Name, reflect.TypeOf(obj))
+-		return nil, fmt.Errorf("%T not a known endpoint or endpoint slice object", obj)
++		eps, err := ParseEndpointSlice(logger, obj)
++		if err != nil {
++			logger.Error("Unknown endpoint or endpoint slice object", logfields.Error, err)
++			return nil, err
++		}
++		return eps, nil
+ 	}
+ }
+ 
+diff --git a/pkg/k8s/version/version.go b/pkg/k8s/version/version.go
+index 664d112327..f06186268f 100644
+--- a/pkg/k8s/version/version.go
++++ b/pkg/k8s/version/version.go
+@@ -34,7 +34,9 @@ type cachedVersion struct {
+ const (
+ 	// MinimalVersionConstraint is the minimal version that Cilium supports to
+ 	// run kubernetes.
+-	MinimalVersionConstraint = "1.21.0"
++	// 原值为 "1.21.0"，此处降低到 "1.20.0" 以支持 K8s v1.20 测试环境。
++	// 仅用于华为云 SubENI 功能测试，生产环境应使用 K8s 1.28+（欺骗版本检查）。
++	MinimalVersionConstraint = "1.20.0"
+ )
+ 
+ var (
+diff --git a/pkg/loadbalancer/reflectors/k8s.go b/pkg/loadbalancer/reflectors/k8s.go
+index 6de989d83a..65a8d4d24e 100644
+--- a/pkg/loadbalancer/reflectors/k8s.go
++++ b/pkg/loadbalancer/reflectors/k8s.go
+@@ -30,7 +30,6 @@ import (
+ 	"github.com/cilium/cilium/pkg/k8s/client"
+ 	"github.com/cilium/cilium/pkg/k8s/resource"
+ 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+-	slim_discoveryv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
+ 	"github.com/cilium/cilium/pkg/k8s/utils"
+ 	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
+ 	"github.com/cilium/cilium/pkg/loadbalancer"
+@@ -868,7 +867,14 @@ type replaceEndpointsEvent struct {
+ func (replaceEndpointsEvent) isEvent() {}
+ 
+ func endpointsEvents(log *slog.Logger, c client.Clientset) stream.Observable[event] {
+-	lw := k8sUtils.ListerWatcherFromTyped(c.Slim().DiscoveryV1().EndpointSlices(""))
++	lw, _ := k8s.NewEndpointSliceListerWatcher(log, c)
++	parseEndpoint := func(obj any) *k8s.Endpoints {
++		eps, err := k8s.ParseEndpointSlice(log, obj)
++		if err != nil {
++			panic(fmt.Sprintf("unexpected EndpointSlice object type %T: %v", obj, err))
++		}
++		return eps
++	}
+ 	return stream.Map(
+ 		k8s.ListerWatcherToObservable(lw),
+ 		func(ev k8s.CacheStoreEvent) event {
+@@ -876,12 +882,11 @@ func endpointsEvents(log *slog.Logger, c client.Clientset) stream.Observable[eve
+ 				raw := ev.Obj.([]any)
+ 				objs := make([]*k8s.Endpoints, len(raw))
+ 				for i := range objs {
+-					objs[i] = k8s.ParseEndpointSliceV1(log, raw[i].(*slim_discoveryv1.EndpointSlice))
++					objs[i] = parseEndpoint(raw[i])
+ 				}
+ 				return replaceEndpointsEvent{objs: objs}
+ 			}
+-			obj := ev.Obj.(*slim_discoveryv1.EndpointSlice)
+-			eps := k8s.ParseEndpointSliceV1(log, obj)
++			eps := parseEndpoint(ev.Obj)
+ 			switch ev.Kind {
+ 			case k8s.CacheStoreEventAdd:
+ 				return upsertEndpointEvent{eps}
+-- 
+2.43.0
