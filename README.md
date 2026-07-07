@@ -78,62 +78,70 @@ HuaweiCloud 适配分为控制面和数据面两部分：
 
 ### 控制面流程
 
+控制面可以先理解成一套“办入网手续”的系统：Pod 要上网，Cilium 需要先向华为云申请
+SubENI/IP，再把申请结果登记下来，最后把这些结果写给数据面使用。
+
+先认清几个角色：
+
+| 角色 | 可以理解成 | 主要职责 |
+|---|---|---|
+| `cilium-operator-huaweicloud` | 节点网络资源管理员 | 发现节点信息，调用华为云 API，维护 `CiliumNode` |
+| `CiliumNode` | 每个节点的网络资源档案 | 记录节点有哪些 trunk ENI、子网、安全组、SubENI/IP |
+| `Cilium CNI` | Pod 入网办理入口 | Pod 创建时被 kubelet 调用，为 Pod 申请网络 |
+| `HuaweiCloud IPAM allocator` | IP/SubENI 分配器 | 决定给 Pod 分配哪个 SubENI/IP |
+| `SubENI Endpoint Manager` | 数据面映射下发器 | 把 Pod 和 SubENI 的关系写入 BPF map |
+| BPF map | 数据面的查表规则 | 让 BPF 知道出方向怎么打 VLAN，入方向怎么找到 Pod |
+
+下面这张图按编号展示完整流程，后面的步骤说明与图中编号一一对应。
+
 ```mermaid
-flowchart LR
-    subgraph discover["节点发现与云资源同步"]
-        meta["HuaweiCloud Metadata"]
-        api["HuaweiCloud VPC/SubENI API"]
-        operator["cilium-operator-huaweicloud"]
-        k8s["Kubernetes API"]
-        cn["CiliumNode spec/status.huawei-cloud"]
-
-        meta --> operator
-        api --> operator
-        k8s --> operator
-        operator --> cn
+flowchart TB
+    subgraph node["节点准备阶段"]
+        s1["1 operator 启动"]
+        s2["2 读取 Metadata"]
+        s3["3 查询华为云资源"]
+        s4["4 写入 CiliumNode"]
+        s1 --> s2 --> s3 --> s4
     end
 
-    subgraph alloc["Pod 分配与 BPF map 同步"]
-        pod["Pod 创建"]
-        cni["Cilium CNI"]
-        ipam["HuaweiCloud IPAM allocator"]
-        subeni["SubENI 分配结果"]
-        endpoint["Cilium Endpoint"]
-        manager["SubENI Endpoint Manager"]
-        map1["cilium_hwc_srcip4"]
-        map2["cilium_hwc_vlan_mac"]
-
-        pod --> cni --> ipam --> api
-        api --> subeni --> ipam --> cni --> endpoint --> manager
-        manager --> map1
-        manager --> map2
+    subgraph pod["Pod 入网阶段"]
+        s5["5 Pod 创建触发 CNI"]
+        s6["6 IPAM 申请 SubENI/IP"]
+        s7["7 华为云返回分配结果"]
+        s8["8 创建或更新 Endpoint"]
+        s5 --> s6 --> s7 --> s8
     end
+
+    subgraph datapath["下发给数据面"]
+        s9["9 Endpoint Manager 监听变化"]
+        s10["10 写出方向 BPF map"]
+        s11["11 写入方向 BPF map"]
+        s9 --> s10
+        s9 --> s11
+    end
+
+    s4 --> s6
+    s8 --> s9
 ```
 
-控制面可以理解成“给 Pod 申请云上网卡资源，并把结果告诉 Cilium 数据面”的过程。
+编号解释：
 
-按步骤看：
+| 编号 | 发生了什么 | 为什么需要这一步 |
+|---|---|---|
+| 1 | `cilium-operator-huaweicloud` 启动 | 需要一个组件负责和华为云 API 交互 |
+| 2 | operator 读取 `HuaweiCloud Metadata` | 确认“我当前在哪台 ECS、哪个 VPC、哪个可用区” |
+| 3 | operator 查询华为云 VPC/SubENI API | 获取 trunk ENI、子网、安全组、SubENI 配额和已有 SubENI |
+| 4 | operator 写入 `CiliumNode` | 把节点网络资源登记到 Kubernetes，后续分配 Pod 网络时可以读取 |
+| 5 | Pod 创建时 kubelet 调用 `Cilium CNI` | 每个新 Pod 都需要通过 CNI 获得 IP 和网络配置 |
+| 6 | `HuaweiCloud IPAM allocator` 申请 SubENI/IP | 给 Pod 选择一个可用的 SubENI/IP；资源不够时创建新的 SubENI |
+| 7 | 华为云返回分配结果 | 结果里包含 Pod IP、VLAN ID、SubENI MAC、网关、CIDR |
+| 8 | Cilium 创建或更新 `Cilium Endpoint` | Cilium 用 Endpoint 记录这个 Pod 的本地网络状态 |
+| 9 | `SubENI Endpoint Manager` 监听 Endpoint 变化 | Endpoint 有了 SubENI 信息后，需要同步给 BPF 数据面 |
+| 10 | 写 `cilium_hwc_srcip4` | 出方向使用：BPF 根据 Pod 源 IP 查到 VLAN 和 SubENI MAC |
+| 11 | 写 `cilium_hwc_vlan_mac` | 入方向使用：BPF 根据 VLAN 和目的 MAC 找到本地 Pod |
 
-1. `cilium-operator-huaweicloud` 启动后，会先了解当前节点运行在哪台华为云 ECS 上。
-   它会通过 `HuaweiCloud Metadata` 查询本机实例 ID、可用区、VPC、trunk ENI 等基础信息。
-2. operator 再调用 `HuaweiCloud VPC/SubENI API`，查询这个节点能使用哪些子网、安全组、
-   SubENI 配额，以及当前已经有哪些 SubENI。
-3. operator 把这些节点级信息写入 Kubernetes 里的 `CiliumNode` 对象。
-   可以把 `CiliumNode` 理解成 Cilium 为每个节点维护的一份“网络资源登记表”。
-4. 当 Kubernetes 创建 Pod 时，`Cilium CNI` 会被 kubelet 调用，开始给这个 Pod 分配网络。
-5. `HuaweiCloud IPAM allocator` 根据 `CiliumNode` 里的节点信息和当前空闲资源，决定给这个
-   Pod 分配哪个 SubENI/IP。如果资源不够，它会继续调用 HuaweiCloud API 创建新的 SubENI。
-6. 华为云返回 SubENI 的关键信息，例如 Pod IP、VLAN ID、SubENI MAC、网关和 CIDR。
-   这些信息会作为 CNI 分配结果传回 Cilium。
-7. Cilium 创建或更新 `Cilium Endpoint`。这是 Cilium 对一个 Pod 的本地网络状态记录。
-8. `SubENI Endpoint Manager` 监听 endpoint 变化，把 Pod 和 SubENI 的关系写入两张 BPF map：
-   - `cilium_hwc_srcip4`：用于出方向。数据面看到 Pod 源 IP 后，知道要使用哪个 VLAN 和
-     SubENI MAC 发出去。
-   - `cilium_hwc_vlan_mac`：用于入方向。数据面看到 trunk 网卡收到的 VLAN 包后，知道这个包
-     是发给哪个本地 Pod 的。
-
-一句话总结：控制面不直接转发数据包，它负责“申请资源、记录关系、下发映射”。真正处理
-报文的是后面的数据面 BPF 逻辑。
+一句话总结：控制面不直接转发数据包，它只负责三件事：**向华为云申请资源、把资源关系登记
+到 Cilium、把查表规则下发给 BPF 数据面**。
 
 关键状态：
 
@@ -145,32 +153,65 @@ flowchart LR
 
 ### 数据面流程
 
+数据面可以理解成“真正搬运数据包”的部分。控制面已经告诉 BPF：某个 Pod 对应哪个
+SubENI、哪个 VLAN、哪个 MAC。数据面收到包以后，就按这些映射表处理。
+
+这里分两条路看：
+
+- **Pod 出方向**：Pod 发出去的包，需要打上对应 SubENI 的 VLAN，并把源 MAC 改成
+  SubENI MAC。
+- **Pod 入方向**：trunk ENI 收到带 VLAN 的包，需要识别它属于哪个 Pod，去掉 VLAN，
+  再交给 Cilium 原生 datapath 继续处理。
+
+#### Pod 出方向
+
 ```mermaid
 flowchart TB
-    subgraph egress["Pod 出方向"]
-        epod["Pod 发包"]
-        elxc["bpf_lxc / endpoint datapath"]
-        ect["Cilium CT / policy / service 逻辑"]
-        eto["bpf_host: cil_to_netdev"]
-        esrc["查询 cilium_hwc_srcip4"]
-        evlan["改源 MAC 并 push VLAN"]
-        etrunk["trunk ENI 发出"]
+    e1["1 Pod 发包"]
+    e2["2 进入 Cilium endpoint datapath"]
+    e3["3 执行 Cilium CT / policy / service 逻辑"]
+    e4["4 到达 bpf_host: cil_to_netdev"]
+    e5["5 按 Pod 源 IP 查询 cilium_hwc_srcip4"]
+    e6["6 改源 MAC 并 push VLAN"]
+    e7["7 从 trunk ENI 发出"]
 
-        epod --> elxc --> ect --> eto --> esrc --> evlan --> etrunk
-    end
-
-    subgraph ingress["Pod 入方向"]
-        itrunk["trunk ENI 收到 VLAN 包"]
-        ifrom["bpf_host: cil_from_netdev"]
-        imap["查询 cilium_hwc_vlan_mac"]
-        ipop["pop VLAN 并修正 PACKET_HOST"]
-        inative["回到 Cilium 原生 datapath"]
-        ict["Cilium CT / ingress policy / proxy"]
-        ideliver["local delivery 到目标 Pod"]
-
-        itrunk --> ifrom --> imap --> ipop --> inative --> ict --> ideliver
-    end
+    e1 --> e2 --> e3 --> e4 --> e5 --> e6 --> e7
 ```
+
+| 编号 | 发生了什么 | 小白解释 |
+|---|---|---|
+| 1 | Pod 发出数据包 | 比如 Pod 访问 Kubernetes API、Service 或外部地址 |
+| 2 | 包先进入 Cilium endpoint datapath | Cilium 先接管 Pod 的流量 |
+| 3 | Cilium 执行 CT / policy / service 逻辑 | 这里会处理连接跟踪、网络策略、Service 转发等原生能力 |
+| 4 | 包准备从节点网卡发出，进入 `cil_to_netdev` | 这是 Cilium 发往物理网卡前的 BPF 入口 |
+| 5 | BPF 用 Pod 源 IP 查询 `cilium_hwc_srcip4` | 查到这个 Pod 应该使用哪个 VLAN 和 SubENI MAC |
+| 6 | BPF 改写源 MAC，并给包打 VLAN tag | 华为云用 VLAN 区分不同 SubENI 的流量 |
+| 7 | 包从 trunk ENI 发出 | 对云网络来说，这个包看起来就是从对应 SubENI 发出的 |
+
+#### Pod 入方向
+
+```mermaid
+flowchart TB
+    i1["1 trunk ENI 收到 VLAN 包"]
+    i2["2 进入 bpf_host: cil_from_netdev"]
+    i3["3 按 VLAN + 目的 MAC 查询 cilium_hwc_vlan_mac"]
+    i4["4 pop VLAN 并修正 PACKET_HOST"]
+    i5["5 回到 Cilium 原生 datapath"]
+    i6["6 执行 Cilium CT / ingress policy / proxy"]
+    i7["7 local delivery 到目标 Pod"]
+
+    i1 --> i2 --> i3 --> i4 --> i5 --> i6 --> i7
+```
+
+| 编号 | 发生了什么 | 小白解释 |
+|---|---|---|
+| 1 | trunk ENI 收到带 VLAN 的回包 | 这是云网络返回给某个 SubENI/Pod 的流量 |
+| 2 | 包进入 `cil_from_netdev` | 这是 Cilium 处理物理网卡入方向流量的 BPF 入口 |
+| 3 | BPF 查询 `cilium_hwc_vlan_mac` | 根据 VLAN 和目的 MAC 判断这个包属于哪个本地 Pod |
+| 4 | BPF 去掉 VLAN，并把包标记为 `PACKET_HOST` | 去 VLAN 后，包才能继续按本机 Pod 流量处理 |
+| 5 | 包回到 Cilium 原生 datapath | HuaweiCloud 逻辑到这里结束，不直接送进 Pod |
+| 6 | Cilium 执行 CT / ingress policy / proxy | 入方向网络策略、连接跟踪、L7 proxy 等能力仍然保留 |
+| 7 | Cilium 把包投递到目标 Pod | 这是最终进入 Pod 的一步 |
 
 入方向的关键原则是：HuaweiCloud 逻辑不直接 `redirect` 到 Pod，只做 VLAN 归一化，
 然后回到 Cilium 原生路径。这样可以保留 Cilium 的连接跟踪、NetworkPolicy、L7 proxy
