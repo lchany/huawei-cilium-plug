@@ -1,55 +1,194 @@
-# HuaweiCloud Cilium Patch Series
+# HuaweiCloud Cilium Patch Archive
 
-本分支是 HuaweiCloud/SubENI 对 upstream Cilium `v1.19.1` 的 **patch-only
-归档分支**。
+这个项目用于管理 HuaweiCloud/SubENI 对 Cilium `v1.19.1` 的适配改动。
 
-它不是 Cilium 源码分支，也不包含完整 Cilium 源码树。分支中只保留
-HuaweiCloud 相关改动的 patch series、应用脚本、校验脚本和运行时检查清单。
+它的目标不是维护一份完整的 Cilium fork，而是把 HuaweiCloud 相关修改整理成
+patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按顺序应用到
+干净的 upstream Cilium `v1.19.1` 源码上。
 
-## 用途
+这种方式解决的是 **源码管理方式解耦**：
 
-这个分支用于把 HuaweiCloud 对 Cilium 的改动从完整 Cilium fork 中拆出来管理：
+- Cilium upstream 源码作为独立基线存在。
+- HuaweiCloud 适配逻辑以 patch 文件归档。
+- 后续升级 Cilium 时，可以重新审查和迁移这些 patch。
+- patch 应用后仍然会修改 Cilium 源码，这一点和 Terway 的 Cilium patch 管理方式一致。
 
-- Cilium 主框架源码不作为本分支的交付主体。
-- HuaweiCloud 改动以编号 patch 文件归档。
-- 需要构建定制版 Cilium 时，将这些 patch 应用到干净的 upstream Cilium
-  `v1.19.1` baseline 上。
-- 这种方式与 Terway 在 `policy/cilium/*.patch` 中管理 Cilium 修改的思路一致：
-  管理方式解耦，但 patch 应用后仍会修改 Cilium 源码。
+## 基线版本
 
-## Baseline
-
-patch series 目标基线：
+这些 patch 面向以下 Cilium 基线：
 
 - upstream tag: `v1.19.1`
-- peeled commit: `d0d0c8792c3420b3a6739fa21e3a182827a0bbc6`
+- commit: `d0d0c8792c3420b3a6739fa21e3a182827a0bbc6`
 
-`apply.sh` 默认会校验目标 Cilium 仓库当前 HEAD 是否等于该 commit。
+`apply.sh` 默认会检查目标仓库是否处于这个 commit，避免 patch 打到错误版本。
 
-## Patch 列表
-
-patch 顺序由 `series` 文件定义：
+## 目录说明
 
 ```text
-0001-huaweicloud-control-plane.patch
-0002-huaweicloud-datapath-runtime.patch
-0003-huaweicloud-generated-tests-docs.patch
+.
+├── 0001-huaweicloud-control-plane.patch
+├── 0002-huaweicloud-datapath-runtime.patch
+├── 0003-huaweicloud-generated-tests-docs.patch
+├── series
+├── apply.sh
+├── check.sh
+├── runtime-checklist.md
+└── README.md
 ```
 
-分组说明：
+- `series`：patch 应用顺序。
+- `apply.sh`：在干净的 Cilium 源码树中按 `series` 应用 patch。
+- `check.sh`：拉起临时 Cilium baseline worktree，检查 patch 是否可应用。
+- `runtime-checklist.md`：部署后需要验证的基础运行时场景。
 
-- `0001-huaweicloud-control-plane.patch`
-  - HuaweiCloud IPAM mode、CRD、云 API、SubENI allocator、node discovery、
-    SubENI BPF map manager、operator/Helm/RBAC/build 接线。
-- `0002-huaweicloud-datapath-runtime.patch`
-  - BPF VLAN datapath、CNI/daemon/datapath runtime wiring、EndpointSlice
-    兼容、drop reason 和 monitor API。
-- `0003-huaweicloud-generated-tests-docs.patch`
-  - `go.mod` / `go.sum`、vendor、generated 文件、CRD yaml、测试和文档。
+## Patch 管理流程
+
+```mermaid
+flowchart TD
+    A[upstream Cilium v1.19.1 baseline] --> B[按 series 应用 patch]
+    B --> C[生成 HuaweiCloud 定制版 Cilium 源码树]
+    C --> D[构建 cilium-agent / cilium-operator 镜像]
+    D --> E[部署到 HuaweiCloud Kubernetes 集群]
+    E --> F[按 runtime-checklist.md 验证]
+
+    G[HuaweiCloud 适配改动] --> H[整理为编号 patch]
+    H --> I[更新 series 顺序]
+    I --> J[运行 check.sh 校验可应用性]
+    J --> B
+```
+
+这个项目只保存图中的“编号 patch、series、应用/校验脚本”。Cilium 源码本身不保存在
+这个分支里。
+
+## HuaweiCloud 插件原理
+
+HuaweiCloud 适配分为控制面和数据面两部分：
+
+- 控制面负责发现 ECS/VPC/子网/trunk ENI 信息，调用 HuaweiCloud API 创建和释放
+  SubENI，并把 Pod 与 SubENI 的关系写入 CiliumNode 和 BPF map。
+- 数据面负责在 trunk 网卡上处理 SubENI VLAN 流量。Pod 出方向打 VLAN、改写 SubENI
+  MAC；Pod 入方向识别 VLAN、去 VLAN 后交回 Cilium 原生 datapath，继续走连接跟踪、
+  NetworkPolicy 和本地投递逻辑。
+
+### 控制面流程
+
+```mermaid
+flowchart LR
+    K8S[Kubernetes API] --> CN[CiliumNode]
+    CNO[cilium-operator-huaweicloud] --> META[HuaweiCloud Metadata]
+    CNO --> HWCAPI[HuaweiCloud VPC/SubENI API]
+    META --> CNO
+    HWCAPI --> CNO
+    CNO --> CN
+
+    POD[Pod 创建] --> CNI[Cilium CNI]
+    CNI --> IPAM[HuaweiCloud IPAM allocator]
+    IPAM --> HWCAPI
+    HWCAPI --> SUBENI[SubENI: IP / VLAN / MAC]
+    SUBENI --> IPAM
+    IPAM --> CNI
+    CNI --> EP[Cilium Endpoint]
+    EP --> EPM[SubENI Endpoint Manager]
+    EPM --> MAP1[cilium_hwc_srcip4]
+    EPM --> MAP2[cilium_hwc_vlan_mac]
+```
+
+关键状态：
+
+- `CiliumNode.spec.huawei-cloud`：记录节点侧实例、VPC、trunk ENI、子网、安全组等信息。
+- `CiliumNode.status.huawei-cloud`：记录已分配的 SubENI/IP/VLAN/MAC 等运行时状态。
+- `cilium_hwc_srcip4`：Pod IP 到 SubENI VLAN/MAC 的映射，供 egress 使用。
+- `cilium_hwc_vlan_mac`：VLAN + SubENI MAC 到 endpoint 的映射，供 ingress 识别本地
+  SubENI 流量。
+
+### 数据面流程
+
+```mermaid
+flowchart TD
+    subgraph Egress[Pod 出方向]
+        P1[Pod 发包] --> LXC[bpf_lxc / endpoint datapath]
+        LXC --> CT1[Cilium CT / policy / service 逻辑]
+        CT1 --> HOST[bpf_host cil_to_netdev]
+        HOST --> LOOKUP1[查 cilium_hwc_srcip4]
+        LOOKUP1 --> VLANPUSH[改源 MAC 为 SubENI MAC 并 push VLAN]
+        VLANPUSH --> TRUNK[trunk ENI 发出]
+    end
+
+    subgraph Ingress[Pod 入方向]
+        NET[trunk ENI 收到 VLAN 包] --> FROMDEV[bpf_host cil_from_netdev]
+        FROMDEV --> LOOKUP2[按 VLAN + dst MAC 查 cilium_hwc_vlan_mac]
+        LOOKUP2 --> VLANPOP[pop VLAN 并修正 PACKET_HOST]
+        VLANPOP --> NATIVE[回到 Cilium 原生 datapath]
+        NATIVE --> CT2[Cilium CT / ingress policy / proxy]
+        CT2 --> DELIVER[local delivery 到目标 Pod]
+    end
+```
+
+入方向的关键原则是：HuaweiCloud 逻辑不直接 `redirect` 到 Pod，只做 VLAN 归一化，
+然后回到 Cilium 原生路径。这样可以保留 Cilium 的连接跟踪、NetworkPolicy、L7 proxy
+和观测能力。
+
+## Patch 说明
+
+### 0001-huaweicloud-control-plane.patch
+
+管理面适配 patch。
+
+这个 patch 负责把 HuaweiCloud 作为一种 Cilium IPAM/云厂商后端接入到控制面。
+
+主要内容：
+
+- 增加 `huaweicloud` IPAM mode。
+- 扩展 `CiliumNode` 中的 HuaweiCloud/SubENI 字段。
+- 增加 HuaweiCloud VPC/SubENI API client、错误处理和类型定义。
+- 增加 SubENI allocator、节点实例信息、配额、metadata 查询逻辑。
+- 在 node discovery 中写入 HuaweiCloud 节点、VPC、子网、trunk ENI 等信息。
+- 增加 SubENI endpoint manager，用于维护 Pod 与 SubENI/VLAN/MAC 的关系。
+- 接入 operator、Helm、RBAC 和构建入口。
+
+它主要影响 Cilium 的 operator、IPAM、CiliumNode CRD、HuaweiCloud API 封装和
+SubENI 分配管理逻辑。
+
+### 0002-huaweicloud-datapath-runtime.patch
+
+数据面和运行时接线 patch。
+
+这个 patch 负责让 HuaweiCloud SubENI 分配结果进入 Cilium datapath，并在 BPF 中处理
+SubENI VLAN 流量。
+
+主要内容：
+
+- 增加 HuaweiCloud VLAN BPF datapath。
+- 在 egress 路径中根据 Pod IP 查找 SubENI 信息，改写源 MAC 并 push VLAN。
+- 在 ingress 路径中识别 trunk 网卡上的 SubENI VLAN 包，pop VLAN 后交回 Cilium 原生
+  datapath。
+- 增加 HuaweiCloud 相关 BPF map、drop reason 和 monitor 展示。
+- 将 CNI 返回的 gateway、CIDR、VLAN ID、MAC 等结果传递给 daemon/datapath。
+- 接入 endpoint、health endpoint、iptables、node config 等运行时路径。
+- 增加 Kubernetes Endpoint / EndpointSlice 兼容处理。
+
+它主要影响 Cilium 的 BPF 代码、CNI 接线、daemon datapath 配置、endpoint 运行时状态
+和 K8s service/endpoints 兼容逻辑。
+
+### 0003-huaweicloud-generated-tests-docs.patch
+
+生成物、依赖、测试和文档 patch。
+
+这个 patch 不承载主要业务逻辑，主要用于补齐前两个 patch 引入的依赖和验证材料。
+
+主要内容：
+
+- 更新 `go.mod` / `go.sum`。
+- 增加 HuaweiCloud SDK 等 vendor 依赖。
+- 更新 CRD yaml、deepcopy、deepequal 等 generated 文件。
+- 增加 HuaweiCloud API、allocator、metadata、SubENI map、IPAM、EndpointSlice 等单测。
+- 增加 HuaweiCloud Cilium README 和技术说明文档。
+
+它主要用于保证代码生成、依赖 vendoring、测试覆盖和文档说明完整。
 
 ## 应用方式
 
-准备一个干净的 upstream Cilium 仓库，并切到 baseline commit：
+准备干净的 upstream Cilium 源码：
 
 ```bash
 git clone https://github.com/cilium/cilium.git cilium-v1.19.1
@@ -57,57 +196,34 @@ cd cilium-v1.19.1
 git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 ```
 
-从目标 Cilium 仓库根目录执行本分支中的 `apply.sh`：
+从 Cilium 仓库根目录执行本项目中的 `apply.sh`：
 
 ```bash
-/path/to/huawei-cilium-v1.19.1/apply.sh
+/path/to/patch-archive/apply.sh
 ```
 
-脚本会：
-
-- 拒绝在 dirty worktree 上应用 patch。
-- 校验目标仓库 HEAD 是否为指定 baseline。
-- 按 `series` 顺序先执行 `git apply --check --3way`。
-- 再使用 `git am --3way` 应用每个 patch。
-
-如果是在明确 rebase patch series 的场景，可以跳过 baseline commit 校验：
-
-```bash
-/path/to/huawei-cilium-v1.19.1/apply.sh --no-base-check
-```
-
-该参数只跳过 commit 校验，仍然要求目标 worktree 干净。
+脚本会按 `series` 顺序应用三个 patch。
 
 ## 校验方式
 
-在本 patch-only 分支仓库根目录执行：
+在本项目根目录执行：
 
 ```bash
 ./check.sh
 ```
 
-`check.sh` 会准备一个干净的临时 Cilium baseline worktree，逐个检查并应用
-`series` 中的 patch。
-
-如果本地已有 Cilium baseline clone，可以指定缓存目录：
+如需复用已有 Cilium baseline clone：
 
 ```bash
 CILIUM_BASE_DIR=/path/to/cilium-cache ./check.sh
 ```
 
-## 运行时检查
+## 边界说明
 
-patch 应用并部署定制版 Cilium 后，按 `runtime-checklist.md` 做基础验证，包括：
+这个项目不是运行时插件，也不是独立 CNI 实现。
 
-- HuaweiCloud operator 是否正常启动。
-- `CiliumNode.spec/status.huawei-cloud` 是否正确写入。
-- SubENI 分配和释放是否正常。
-- `cilium_hwc_srcip4` / `cilium_hwc_vlan_mac` BPF map 是否写入。
-- Pod 访问 Kubernetes API、ClusterIP、DNS、跨节点流量是否正常。
+它只是 HuaweiCloud 对 Cilium 的源码改动归档。patch 应用后，Cilium 源码仍会被修改，
+包括 Go 控制面代码、BPF 数据面代码、Helm/RBAC、generated 文件和 vendor 依赖。
 
-## 注意事项
-
-- 本分支只解决“Cilium 修改管理方式解耦”，不是运行时完全插件化。
-- patch 应用后仍会修改 Cilium 源码，包括 Go 代码、BPF 代码、Helm/RBAC、
-  generated 文件和 vendor。
-- 更新 patch 时应保持 `series` 顺序可应用，并重新运行 `./check.sh`。
+后续升级 Cilium 时，应以 `series` 中的 patch 为迁移单元，逐个检查是否仍然需要、
+是否可以上游化、是否需要重写。
