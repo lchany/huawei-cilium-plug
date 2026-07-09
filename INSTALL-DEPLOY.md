@@ -106,12 +106,32 @@ INSTALL-DEPLOY.md
 
 ## 4. 准备 upstream Cilium 源码
 
-另开一个目录，拉取 upstream Cilium：
+这些 patch 只面向 Cilium `v1.19.1`，对应的基线 commit 是：
+
+```text
+d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
+```
+
+推荐按下面的命令拉取源码并切到固定基线：
 
 ```bash
 git clone https://github.com/cilium/cilium.git cilium-v1.19.1-huaweicloud
 cd cilium-v1.19.1-huaweicloud
 git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
+```
+
+如果网络较慢，也可以只拉取 `v1.19.1` tag：
+
+```bash
+git clone --branch v1.19.1 --depth 1 https://github.com/cilium/cilium.git cilium-v1.19.1-huaweicloud
+cd cilium-v1.19.1-huaweicloud
+git rev-parse HEAD
+```
+
+`v1.19.1` tag 的 HEAD 也应该是：
+
+```text
+d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 ```
 
 确认当前 commit：
