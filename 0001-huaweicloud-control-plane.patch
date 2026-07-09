@@ -3320,7 +3320,7 @@ index cf835f44ba..e6fe31769e 100644
  		config:           c,
  	}
  }
-@@ -586,6 +591,52 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
+@@ -586,7 +591,74 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
  				nodeResource.Spec.IPAM.PreAllocate = c.IPAM.PreAllocate
  			}
  		}
@@ -3370,9 +3370,86 @@ index cf835f44ba..e6fe31769e 100644
 +		if len(n.config.HuaweiCloudSecurityGroupIDs) > 0 {
 +			nodeResource.Spec.HuaweiCloud.SecurityGroups = n.config.HuaweiCloudSecurityGroupIDs
 +		}
++		if c := n.cniConfigManager.GetCustomNetConf(); c != nil {
++			applyHuaweiCloudNetConf(nodeResource.Spec.HuaweiCloud, c.HuaweiCloud)
++		}
  	}
  
  	return nil
+ }
++
++func applyHuaweiCloudNetConf(dst *huaweiCloudTypes.Spec, src huaweiCloudTypes.Spec) {
++	if dst == nil {
++		return
++	}
++	if len(src.Subnets) > 0 {
++		dst.Subnets = src.Subnets
++	}
++	if len(src.SubnetTags) > 0 {
++		dst.SubnetTags = src.SubnetTags
++	}
++	if len(src.SecurityGroups) > 0 {
++		dst.SecurityGroups = src.SecurityGroups
++	}
++	if len(src.SecurityGroupTags) > 0 {
++		dst.SecurityGroupTags = src.SecurityGroupTags
++	}
++}
+diff --git a/pkg/nodediscovery/nodediscovery_test.go b/pkg/nodediscovery/nodediscovery_test.go
+new file mode 100644
+index 0000000000..1737c150c8
+--- /dev/null
++++ b/pkg/nodediscovery/nodediscovery_test.go
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package nodediscovery
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++)
++
++func TestApplyHuaweiCloudNetConfOnlyOverridesResourceSelection(t *testing.T) {
++	dst := &huaweiCloudTypes.Spec{
++		InstanceID:       "instance-from-metadata",
++		InstanceType:     "c7.large.4",
++		VPCID:            "vpc-from-metadata",
++		AvailabilityZone: "cn-north-4a",
++		TrunkInterfaceID: "trunk-from-metadata",
++		TrunkInterface:   "eth0",
++		Subnets:          []string{"subnet-flag"},
++		SecurityGroups:   []string{"sg-flag"},
++	}
++
++	applyHuaweiCloudNetConf(dst, huaweiCloudTypes.Spec{
++		InstanceID:       "instance-from-netconf",
++		InstanceType:     "wrong-type",
++		VPCID:            "wrong-vpc",
++		AvailabilityZone: "wrong-az",
++		TrunkInterfaceID: "wrong-trunk-id",
++		TrunkInterface:   "wrong-trunk-interface",
++		Subnets:          []string{"subnet-netconf"},
++		SubnetTags:       map[string]string{"role": "pod"},
++		SecurityGroups:   []string{"sg-netconf"},
++		SecurityGroupTags: map[string]string{"role": "worker"},
++	})
++
++	assert.Equal(t, "instance-from-metadata", dst.InstanceID)
++	assert.Equal(t, "c7.large.4", dst.InstanceType)
++	assert.Equal(t, "vpc-from-metadata", dst.VPCID)
++	assert.Equal(t, "cn-north-4a", dst.AvailabilityZone)
++	assert.Equal(t, "trunk-from-metadata", dst.TrunkInterfaceID)
++	assert.Equal(t, "eth0", dst.TrunkInterface)
++	assert.Equal(t, []string{"subnet-netconf"}, dst.Subnets)
++	assert.Equal(t, map[string]string{"role": "pod"}, dst.SubnetTags)
++	assert.Equal(t, []string{"sg-netconf"}, dst.SecurityGroups)
++	assert.Equal(t, map[string]string{"role": "worker"}, dst.SecurityGroupTags)
++}
 diff --git a/pkg/endpointmanager/cell.go b/pkg/endpointmanager/cell.go
 index eb861ecc55..959ddaf773 100644
 --- a/pkg/endpointmanager/cell.go
@@ -4458,5 +4535,118 @@ index 9929b382b1..be7ba203b6 100644
  	// Option maps and slices
  
  	if m := vp.GetStringSlice(IPAMSubnetsIDs); len(m) != 0 {
+diff --git a/plugins/cilium-cni/types/types.go b/plugins/cilium-cni/types/types.go
+index c1f8994264..2e912e4b79 100644
+--- a/plugins/cilium-cni/types/types.go
++++ b/plugins/cilium-cni/types/types.go
+@@ -15,6 +15,7 @@ import (
+ 	alibabaCloudTypes "github.com/cilium/cilium/pkg/alibabacloud/eni/types"
+ 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
+ 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+ )
+ 
+@@ -28,6 +29,7 @@ type NetConf struct {
+ 	Azure          azureTypes.AzureSpec   `json:"azure,omitempty"`
+ 	IPAM           IPAM                   `json:"ipam,omitempty"` // Shadows the JSON field "ipam" in cniTypes.NetConf.
+ 	AlibabaCloud   alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
++	HuaweiCloud    huaweiCloudTypes.Spec  `json:"huawei-cloud,omitempty"`
+ 	EnableDebug    bool                   `json:"enable-debug"`
+ 	LogFormat      string                 `json:"log-format"`
+ 	LogFile        string                 `json:"log-file"`
+diff --git a/plugins/cilium-cni/types/types_test.go b/plugins/cilium-cni/types/types_test.go
+index 3c4499f21a..cd00fc475c 100644
+--- a/plugins/cilium-cni/types/types_test.go
++++ b/plugins/cilium-cni/types/types_test.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
+ 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+ )
+ 
+@@ -259,6 +260,80 @@ func TestReadCNIConfAzurev2WithPlugins(t *testing.T) {
+ 	testConfRead(t, confFile1, &netConf1)
+ }
+ 
++func TestReadCNIConfHuaweiCloudWithPlugins(t *testing.T) {
++	confFile := `
++{
++  "cniVersion":"0.3.1",
++  "name":"cilium",
++  "plugins": [
++    {
++      "cniVersion":"0.3.1",
++      "type":"cilium-cni",
++      "huawei-cloud": {
++        "subnet-ids": ["subnet-1"],
++        "subnet-tags": {
++          "role": "pod"
++        },
++        "security-group-ids": ["sg-1"],
++        "security-group-tags": {
++          "role": "worker"
++        }
++      }
++    }
++  ]
++}
++`
++	netConf := NetConf{
++		NetConf: cnitypes.NetConf{
++			CNIVersion: "0.3.1",
++			Type:       "cilium-cni",
++		},
++		HuaweiCloud: huaweiCloudTypes.Spec{
++			Subnets: []string{"subnet-1"},
++			SubnetTags: map[string]string{
++				"role": "pod",
++			},
++			SecurityGroups: []string{"sg-1"},
++			SecurityGroupTags: map[string]string{
++				"role": "worker",
++			},
++		},
++	}
++	testConfRead(t, confFile, &netConf)
++}
++
++func TestReadCNIConfHuaweiCloud(t *testing.T) {
++	confFile := `
++{
++  "name": "cilium",
++  "type": "cilium-cni",
++  "huawei-cloud": {
++    "subnet-tags": {
++      "role": "pod"
++    },
++    "security-group-tags": {
++      "role": "worker"
++    }
++  }
++}
++`
++	netConf := NetConf{
++		NetConf: cnitypes.NetConf{
++			Name: "cilium",
++			Type: "cilium-cni",
++		},
++		HuaweiCloud: huaweiCloudTypes.Spec{
++			SubnetTags: map[string]string{
++				"role": "pod",
++			},
++			SecurityGroupTags: map[string]string{
++				"role": "worker",
++			},
++		},
++	}
++	testConfRead(t, confFile, &netConf)
++}
++
+ func TestReadCNIConfIPAMType(t *testing.T) {
+ 	confFile := `
+ {
 -- 
 2.43.0
