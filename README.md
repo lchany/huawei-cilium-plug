@@ -35,14 +35,12 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── 0003-huaweicloud-generated-tests-docs.patch
 ├── series
 ├── apply.sh
-├── runtime-checklist.md
 ├── INSTALL-DEPLOY.md
 └── README.md
 ```
 
 - `series`：patch 应用顺序。
 - `apply.sh`：在干净的 Cilium 源码树中按 `series` 应用 patch。
-- `runtime-checklist.md`：部署后需要验证的基础运行时场景。
 - `INSTALL-DEPLOY.md`：从应用 patch、构建镜像到 Helm 部署的完整安装部署文档。
 
 ## Patch 管理流程
@@ -54,7 +52,7 @@ flowchart TB
     source["HuaweiCloud 定制版 Cilium 源码树"]
     build["构建 cilium-agent 和 cilium-operator 镜像"]
     deploy["部署到 HuaweiCloud Kubernetes 集群"]
-    verify["按 runtime-checklist.md 验证"]
+    verify["按 INSTALL-DEPLOY.md 验证"]
 
     change["HuaweiCloud 适配改动"]
     patch["整理为编号 patch"]

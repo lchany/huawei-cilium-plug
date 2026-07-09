@@ -99,7 +99,6 @@ ls
 apply.sh
 series
 README.md
-runtime-checklist.md
 INSTALL-DEPLOY.md
 ```
 
