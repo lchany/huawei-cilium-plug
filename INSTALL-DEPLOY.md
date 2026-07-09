@@ -1,8 +1,11 @@
-# HuaweiCloud Cilium Patch 安装部署文档
+# HuaweiCloud Cilium Patch 安装部署说明
 
-本文档说明如何把本项目中的 HuaweiCloud patch 应用到 upstream Cilium `v1.19.1`，构建镜像，并部署到华为云 Kubernetes 集群。
+这份文档给现场部署人员使用，说明怎么把 HuaweiCloud patch 打到 upstream Cilium
+`v1.19.1` 上，构建镜像，再部署到华为云 Kubernetes 集群。
 
-先明确一个边界：本项目不是一个可以直接部署的 Helm chart，也不是完整 Cilium 源码仓库。它只提供 patch。实际部署时，需要先准备一份干净的 upstream Cilium 源码，把 patch 应用进去，再构建自己的 Cilium 镜像。
+先说清楚边界：这个仓库不是 Helm chart，也不是完整的 Cilium 源码仓库。它只保存
+HuaweiCloud 相关 patch。部署时要先准备一份干净的 upstream Cilium 源码，把 patch
+打进去，再构建自己的 Cilium 镜像。
 
 ## 1. 部署流程总览
 
@@ -22,16 +25,18 @@ flowchart TB
     p3 --> p4 --> p5 --> p6 --> p7 --> p8
 ```
 
-可以把整个过程理解成两段：
+部署大致分两段：
 
-- **源码准备阶段**：把 HuaweiCloud 改动合入 Cilium 源码，并构建出带 HuaweiCloud 能力的镜像。
-- **集群部署阶段**：用这些镜像部署 Cilium，并通过 `ipam.mode=huaweicloud` 启用 HuaweiCloud IPAM。
+- **准备源码和镜像**：把 HuaweiCloud 改动合入 Cilium 源码，构建 agent 和 operator
+  镜像。
+- **部署到集群**：用这些镜像安装 Cilium，并通过 `ipam.mode=huaweicloud` 启用
+  HuaweiCloud IPAM。
 
 ## 2. 前置条件
 
 ### 2.1 本地工具
 
-执行机器需要安装：
+执行部署的机器需要有这些工具：
 
 - `git`
 - `bash`
@@ -40,23 +45,24 @@ flowchart TB
 - `helm`
 - `kubectl`
 
-如果要构建多架构镜像，还需要可用的 Docker Buildx builder。
+需要多架构镜像时，还要准备可用的 Docker Buildx builder。
 
 ### 2.2 Kubernetes 集群
 
-目标集群需要满足：
+目标集群至少要满足这些条件：
 
 - 节点运行在华为云 ECS 上。
 - 节点所在 VPC、子网、安全组允许创建辅助弹性网卡。
 - 节点使用 trunk ENI 承载 SubENI VLAN 流量。
-- 集群里不要同时运行另一个会接管 Pod 网络的 CNI。
+- 集群里不能同时运行另一个接管 Pod 网络的 CNI。
 - kubelet 能正常调用 Cilium CNI。
 
-如果是已有集群升级，先确认原 CNI 的迁移方案。CNI 切换会影响节点上已有 Pod 的网络，不建议直接在生产集群上裸改。
+如果是在已有集群上升级，先确认原 CNI 的迁移方案。CNI 切换会影响节点上已经运行的
+Pod，生产集群不要直接试。
 
 ### 2.3 华为云信息
 
-部署前准备这些参数：
+部署前把这些参数准备好：
 
 | 参数 | 示例 | 说明 |
 |---|---|---|
@@ -70,7 +76,8 @@ flowchart TB
 | SubENI 子网 ID | `subnet-...` | 用于创建辅助弹性网卡的子网 |
 | 安全组 ID | `sg-...` | 新建 SubENI 绑定的安全组 |
 
-建议显式配置 `region`、`vpc id`、子网和安全组。依赖元数据自动推导时，排障会更绕。
+建议显式填写 `region`、`vpc id`、子网和安全组。让程序从元数据里自动推导也能跑，
+但出问题时排查会绕很多。
 
 ## 3. 获取 patch 归档
 
@@ -83,7 +90,7 @@ cd huawei-cilium-patches
 ls
 ```
 
-期望能看到：
+目录里应该能看到：
 
 ```text
 0001-huaweicloud-control-plane.patch
@@ -96,7 +103,7 @@ runtime-checklist.md
 INSTALL-DEPLOY.md
 ```
 
-`series` 决定 patch 应用顺序。正常情况下不要手工改顺序。
+`series` 决定 patch 应用顺序。不要随手调整顺序，除非你正在维护 patch 本身。
 
 ## 4. 准备 upstream Cilium 源码
 
@@ -120,7 +127,8 @@ git rev-parse HEAD
 d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 ```
 
-这个检查很重要。`apply.sh` 默认只允许 patch 应用到这个基线，避免把改动打到错误版本。
+这个 commit 必须对上。`apply.sh` 默认只允许 patch 打到这个基线，避免把改动打到错误
+版本上。
 
 ## 5. 应用 HuaweiCloud patch
 
@@ -130,7 +138,7 @@ d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 ../huawei-cilium-patches/apply.sh
 ```
 
-脚本会做三件事：
+脚本会先做几项检查：
 
 1. 检查当前目录是不是 Git 仓库根目录。
 2. 检查 worktree 是否干净。
@@ -151,11 +159,11 @@ git log --oneline --max-count=5
 d0d0c8792c342 upstream v1.19.1 baseline
 ```
 
-如果要重新应用，先使用一份新的干净 Cilium 源码。不要在已经打过 patch 的源码树里重复执行。
+要重新来一遍时，换一份新的干净 Cilium 源码。不要在已经打过 patch 的源码树里重复执行。
 
 ## 6. 编译检查
 
-建议先做一次最小编译检查：
+先做一次最小编译检查：
 
 ```bash
 make build-container
@@ -169,7 +177,8 @@ go test -mod=vendor ./pkg/huaweicloud/...
 go test -mod=vendor -tags ipam_provider_huaweicloud ./pkg/ipam/allocator/huaweicloud/...
 ```
 
-如果本地环境没有完整 Cilium 构建依赖，可以跳过本地编译，改用项目已有 CI 或镜像流水线构建。但至少要保证 operator 镜像里存在这个二进制：
+如果本地没有完整 Cilium 构建环境，可以交给 CI 或镜像流水线构建。无论用哪种方式，
+operator 镜像里必须有这个二进制：
 
 ```text
 /usr/bin/cilium-operator-huaweicloud
@@ -177,7 +186,7 @@ go test -mod=vendor -tags ipam_provider_huaweicloud ./pkg/ipam/allocator/huaweic
 
 ## 7. 构建并推送镜像
 
-下面示例使用 Cilium 原生 Makefile 构建镜像。请把 registry 和 tag 换成自己的值。
+下面示例使用 Cilium 原生 Makefile 构建镜像。把 registry 和 tag 换成现场实际值。
 
 ```bash
 export DOCKER_REGISTRY=registry.example.com
@@ -206,7 +215,7 @@ docker buildx imagetools inspect \
   registry.example.com/network/operator-huaweicloud:v1.19.1-huaweicloud
 ```
 
-如果你的集群节点是 ARM64，构建时要使用多架构参数，例如：
+如果集群节点是 ARM64，构建时要使用多架构参数，例如：
 
 ```bash
 export ARCH=multi
@@ -217,7 +226,7 @@ make docker-operator-huaweicloud-image
 
 ## 8. 准备 HuaweiCloud Secret
 
-在集群中创建 Secret。不要把 AK/SK 直接写进 Helm 命令行。
+在集群中创建 Secret。AK/SK 不要直接写进 Helm 命令行。
 
 ```bash
 kubectl -n kube-system create secret generic cilium-huaweicloud \
@@ -228,7 +237,7 @@ kubectl -n kube-system create secret generic cilium-huaweicloud \
   --from-literal=HUAWEI_CLOUD_VPC_ID='<VPC_ID>'
 ```
 
-如果需要自定义 endpoint，创建 Secret 时一起加上：
+需要自定义 endpoint 时，创建 Secret 时一起加上：
 
 ```bash
 kubectl -n kube-system create secret generic cilium-huaweicloud \
@@ -240,7 +249,7 @@ kubectl -n kube-system create secret generic cilium-huaweicloud \
   --from-literal=HUAWEI_CLOUD_ENDPOINT='<ENDPOINT>'
 ```
 
-正式环境建议用 Secret YAML、SealedSecret 或外部密钥系统统一管理。
+正式环境建议用 Secret YAML、SealedSecret 或外部密钥系统管理，别靠临时命令长期维护。
 
 ## 9. 编写 Helm values
 
@@ -294,7 +303,7 @@ extraArgs:
   - "--huawei-cloud-security-group-ids=<SECURITY_GROUP_ID_1>,<SECURITY_GROUP_ID_2>"
 ```
 
-如果使用自定义 endpoint，在 `operator.extraEnv` 里再加：
+使用自定义 endpoint 时，在 `operator.extraEnv` 里再加：
 
 ```yaml
     - name: HUAWEI_CLOUD_ENDPOINT
@@ -304,11 +313,11 @@ extraArgs:
           key: HUAWEI_CLOUD_ENDPOINT
 ```
 
-注意这里的 operator 镜像配置：
+这里要注意 operator 镜像名：
 
 - Helm 模板会根据 `ipam.mode=huaweicloud` 自动把 operator 镜像拼成 `operator-huaweicloud:<tag>`。
 - 所以 `operator.image.repository` 要写成不带 `-huaweicloud` 后缀的基础名：`registry.example.com/network/operator`。
-- 如果你直接使用完整镜像名，也可以改用 `operator.image.override`。
+- 如果要直接指定完整镜像名，可以改用 `operator.image.override`。
 
 使用完整镜像名的写法：
 
@@ -342,7 +351,7 @@ kubectl -n kube-system get deploy cilium-operator -o jsonpath='{.spec.template.s
 echo
 ```
 
-期望输出里包含：
+输出里应该包含：
 
 ```text
 cilium-operator-huaweicloud
@@ -357,11 +366,11 @@ kubectl -n kube-system get pods -o wide
 kubectl -n kube-system exec ds/cilium -- cilium status
 ```
 
-确认：
+确认这些状态：
 
 - `cilium` DaemonSet 全部 Ready。
 - `cilium-operator` Deployment Ready。
-- Cilium 状态里没有明显错误。
+- `cilium status` 没有报错。
 
 ### 11.2 检查 CiliumNode
 
@@ -369,12 +378,13 @@ kubectl -n kube-system exec ds/cilium -- cilium status
 kubectl get ciliumnodes -o yaml | grep -A30 'huawei-cloud'
 ```
 
-期望看到：
+这里应该能看到：
 
 - `spec.huawei-cloud` 中有 instance、VPC、trunk interface、subnet、安全组等节点信息。
 - `status.huawei-cloud.subenis` 中逐步出现已分配的 SubENI。
 
-如果 `spec.huawei-cloud` 为空，优先检查 agent 的 `--huawei-cloud-trunk-interface`、子网、安全组配置，以及节点是否能访问华为云 metadata。
+如果 `spec.huawei-cloud` 为空，先查 agent 的 `--huawei-cloud-trunk-interface`、子网、安全组
+配置，再查节点能不能访问华为云 metadata。
 
 ### 11.3 检查 BPF map
 
@@ -392,14 +402,15 @@ kubectl -n hwc-test wait pod/curl --for=condition=Ready --timeout=120s
 kubectl -n kube-system exec ds/cilium -- cilium-dbg bpf map list | grep cilium_hwc
 ```
 
-期望看到：
+应该能看到：
 
 ```text
 cilium_hwc_srcip4
 cilium_hwc_vlan_mac
 ```
 
-如果 map 存在但没有条目，检查测试 Pod 是否已经分配到 HuaweiCloud SubENI/IP，以及 operator 是否把 SubENI 状态写入了 `CiliumNode.status.huawei-cloud`。
+如果 map 存在但没有条目，检查测试 Pod 是否已经拿到 HuaweiCloud SubENI/IP，再看
+operator 是否把 SubENI 状态写到了 `CiliumNode.status.huawei-cloud`。
 
 ### 11.4 验证 Pod 网络
 
@@ -411,7 +422,9 @@ kubectl -n hwc-test exec curl -- curl -k https://kubernetes.default.svc
 kubectl -n hwc-test exec curl -- curl -I https://www.huaweicloud.com
 ```
 
-如果集群启用了 NetworkPolicy，再做一次策略验证。这个 patch 的入方向设计是先去 VLAN，再回到 Cilium 原生 datapath，因此连接跟踪、NetworkPolicy 和 L7 proxy 逻辑应继续生效。
+如果集群启用了 NetworkPolicy，再做一次策略验证。这个 patch 的入方向处理方式是先去
+VLAN，再回到 Cilium 原生 datapath，所以连接跟踪、NetworkPolicy 和 L7 proxy 仍然应该
+生效。
 
 ### 11.5 删除 Pod 后验证回收
 
@@ -424,7 +437,7 @@ kubectl get ciliumnodes -o yaml | grep -A30 'huawei-cloud'
 
 ## 12. 升级已有安装
 
-如果集群已经运行 Cilium，需要确认当前 Cilium 版本和配置。推荐流程：
+如果集群已经在跑 Cilium，先确认当前版本和配置。推荐这样做：
 
 1. 记录当前 Helm values。
 2. 构建 HuaweiCloud patch 版本镜像。
@@ -447,11 +460,12 @@ helm upgrade cilium ./install/kubernetes/cilium \
   -f huaweicloud-values.yaml
 ```
 
-不要只用本文档里的最小 values 覆盖生产集群配置。生产集群通常还有 kube-proxy replacement、tunnel/routing、Hubble、MTU、policy 等已有配置。
+不要只拿本文档里的最小 values 覆盖生产配置。生产集群通常还配了 kube-proxy
+replacement、tunnel/routing、Hubble、MTU、policy 等参数，这些都要保留。
 
 ## 13. 回滚
 
-如果是 Helm upgrade 失败，先查看历史版本：
+Helm upgrade 失败时，先查看历史版本：
 
 ```bash
 helm -n kube-system history cilium
@@ -471,7 +485,8 @@ kubectl -n kube-system rollout status deploy/cilium-operator
 kubectl -n kube-system get pods -o wide
 ```
 
-如果已经创建了 SubENI，回滚前后需要确认这些云资源是否由旧版本继续管理。不能确认时，不要直接批量删除云上 SubENI，先根据 `CiliumNode.status.huawei-cloud` 和华为云控制台核对归属。
+如果已经创建了 SubENI，回滚前后要确认这些云资源由谁管理。没确认清楚前，不要直接批量
+删除云上 SubENI，先根据 `CiliumNode.status.huawei-cloud` 和华为云控制台核对归属。
 
 ## 14. 常见问题
 
@@ -483,7 +498,7 @@ kubectl -n kube-system get pods -o wide
 wrong baseline: got <commit>, expected d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 ```
 
-原因是当前 Cilium 源码不在指定基线。处理方式：
+这是因为当前 Cilium 源码不在指定基线。处理方式：
 
 ```bash
 git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
@@ -494,13 +509,13 @@ git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 
 ### 14.2 `refusing to apply patches on a dirty worktree`
 
-说明当前 Cilium 源码有未提交改动。处理方式是换一份干净源码，或者先提交自己的改动。
+这说明当前 Cilium 源码里有未提交改动。换一份干净源码，或者先提交自己的改动。
 
 ```bash
 git status --short
 ```
 
-不要为了省事在脏 worktree 上强行打 patch。后续冲突会更难判断。
+不要为了省事在脏 worktree 上强行打 patch。后面遇到冲突时，很难判断问题是谁引入的。
 
 ### 14.3 operator 没有按 HuaweiCloud 模式启动
 
@@ -568,7 +583,7 @@ kubectl -n kube-system logs ds/cilium | grep -i huaweicloud
 
 ### 14.8 Pod 入方向策略不生效
 
-这个 patch 的设计要求入方向流量去 VLAN 后回到 Cilium 原生 datapath。排查时重点看：
+这个 patch 要求入方向流量去 VLAN 后回到 Cilium 原生 datapath。排查时重点看：
 
 - 当前部署的 patch 是否是最新版本。
 - BPF 代码是否仍然存在直接 `redirect` 到 Pod 的旧逻辑。
@@ -577,7 +592,7 @@ kubectl -n kube-system logs ds/cilium | grep -i huaweicloud
 
 ## 15. 交付检查清单
 
-交付前建议逐项确认：
+交付前逐项确认：
 
 - patch 是从 `patch-archive/huaweicloud-v1.19.1` 分支获取。
 - Cilium 基线是 `d0d0c8792c3420b3a6739fa21e3a182827a0bbc6`。
