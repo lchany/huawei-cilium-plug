@@ -96,6 +96,7 @@ ls
 0001-huaweicloud-control-plane.patch
 0002-huaweicloud-datapath-runtime.patch
 0003-huaweicloud-generated-tests-docs.patch
+0004-huaweicloud-reliability-fixes.patch
 apply.sh
 series
 README.md

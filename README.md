@@ -33,6 +33,7 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── 0001-huaweicloud-control-plane.patch
 ├── 0002-huaweicloud-datapath-runtime.patch
 ├── 0003-huaweicloud-generated-tests-docs.patch
+├── 0004-huaweicloud-reliability-fixes.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
@@ -275,6 +276,19 @@ SubENI VLAN 流量。
 
 它主要用于保证代码生成、依赖 vendoring、测试覆盖和文档说明完整。
 
+### 0004-huaweicloud-reliability-fixes.patch
+
+审计后最小可靠性修复 patch。
+
+主要内容：
+
+- 修复 Huawei BPF 生成配置和 egress hook 的可重现接线。
+- 对 SubENI 创建、分页、网关元数据与失败回滚增加校验和收敛处理。
+- 对双 BPF map 更新/删除错误增加回滚和重试闭环。
+- 让 metadata 临时失败进入现有重试路径，并补充针对性回归测试。
+
+它不升级 HuaweiCloud SDK，也不改变已有三份 patch 的内容或顺序。
+
 ## 应用方式
 
 准备干净的 upstream Cilium 源码。该源码由使用方自行获取，本项目不提供：
@@ -291,7 +305,7 @@ git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 /path/to/patch-archive/apply.sh
 ```
 
-脚本会按 `series` 顺序应用三个 patch。
+脚本会按 `series` 顺序应用四个 patch。
 
 完整安装部署流程见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
 

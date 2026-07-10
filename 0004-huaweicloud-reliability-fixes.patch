@@ -1,0 +1,1383 @@
+From ebb658754ddacdc08ea21c6fbc43a54e8309edd9 Mon Sep 17 00:00:00 2001
+From: HuaweiCloud Cilium Patch Bot
+ <huaweicloud-cilium-patches@example.invalid>
+Date: Fri, 10 Jul 2026 14:32:08 +0800
+Subject: [PATCH] huaweicloud: harden SubENI lifecycle and patch reconciliation
+
+---
+ README_HUAWEICLOUD.md                         |   2 +
+ bpf/include/bpf/config/node.h                 |   3 -
+ bpf/lib/huaweicloud.h                         |   4 +-
+ pkg/datapath/config/config.go                 |   4 -
+ pkg/datapath/config/node_config.go            |   3 +-
+ pkg/endpointmanager/huaweicloud_subeni.go     | 102 ++++-
+ .../huaweicloud_subeni_test.go                |  16 +
+ pkg/huaweicloud/api/api.go                    | 366 ++++++++++++------
+ pkg/huaweicloud/api/api_validation_test.go    |  52 +++
+ pkg/huaweicloud/api/error.go                  |   3 +
+ pkg/huaweicloud/api/mock/mock.go              |   4 +-
+ pkg/huaweicloud/api/mock/mock_test.go         |  14 +-
+ pkg/huaweicloud/eni/instances_test.go         |   4 +-
+ pkg/huaweicloud/eni/node.go                   |   2 +-
+ pkg/huaweicloud/eni/node_test.go              |   7 +
+ pkg/huaweicloud/eni/types/types.go            |   2 +-
+ pkg/huaweicloud/eni/types/types_test.go       |   2 +-
+ pkg/huaweicloud/subenimap/manager.go          |  38 +-
+ pkg/huaweicloud/subenimap/manager_test.go     |  36 +-
+ pkg/nodediscovery/nodediscovery.go            |  20 +-
+ pkg/option/config.go                          |   2 +-
+ pkg/option/config_test.go                     |   6 +
+ 22 files changed, 505 insertions(+), 187 deletions(-)
+ create mode 100644 pkg/huaweicloud/api/api_validation_test.go
+
+diff --git a/README_HUAWEICLOUD.md b/README_HUAWEICLOUD.md
+index d13f029402..741acf43cd 100644
+--- a/README_HUAWEICLOUD.md
++++ b/README_HUAWEICLOUD.md
+@@ -449,6 +449,7 @@ helm install cilium ./install/kubernetes/cilium \
+   --set routingMode=native \
+   --set enableIPv4Masquerade=false \
+   --set endpointRoutes.enabled=true \
++  --set extraArgs[0]="--huawei-cloud-subnet-ids=<SUBNET_ID_1>,<SUBNET_ID_2>" \
+   --set operator.image.override=<YOUR_OPERATOR_IMAGE> \
+   --set operator.extraArgs[0]="--huawei-cloud-project-id=<PROJECT_ID>" \
+   --set operator.extraArgs[1]="--huawei-cloud-vpc-id=<YOUR_VPC_ID>"
+@@ -465,6 +466,7 @@ helm install cilium ./install/kubernetes/cilium \
+   --set routingMode=native \
+   --set enableIPv4Masquerade=false \
+   --set endpointRoutes.enabled=true \
++  --set extraArgs[0]="--huawei-cloud-subnet-ids=<SUBNET_ID_1>,<SUBNET_ID_2>" \
+   --set operator.image.override=<YOUR_OPERATOR_IMAGE> \
+   --set operator.extraArgs[0]="--huawei-cloud-access-key=<AK>" \
+   --set operator.extraArgs[1]="--huawei-cloud-secret-key=<SK>" \
+diff --git a/bpf/include/bpf/config/node.h b/bpf/include/bpf/config/node.h
+index 14edaebab4..2260c782d0 100644
+--- a/bpf/include/bpf/config/node.h
++++ b/bpf/include/bpf/config/node.h
+@@ -35,6 +35,3 @@ NODE_CONFIG(__u8, tracing_ip_option_type, "The IP option type to use for packet
+ NODE_CONFIG(bool, policy_deny_response_enabled, "Enable ICMP responses for policy-denied traffic")
+ 
+ NODE_CONFIG(bool, hybrid_routing_enabled, "Enable hybrid mode routing based on subnet IDs")
+-
+-NODE_CONFIG(__u32, hwc_trunk_ifindex, "HuaweiCloud trunk interface ifindex for SubENI VLAN handling")
+-#define HWC_TRUNK_IFINDEX CONFIG(hwc_trunk_ifindex)
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+index 287f54a55e..d0fc3016d7 100644
+--- a/bpf/lib/huaweicloud.h
++++ b/bpf/lib/huaweicloud.h
+@@ -92,7 +92,7 @@ hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
+ 	__u32 src_ip4 = 0;
+ 
+ 	/* Only process traffic on the trunk interface. */
+-	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++	if (ctx->ifindex != CONFIG(direct_routing_dev_ifindex))
+ 		return CTX_ACT_OK;
+ 
+ 	/* Only handle IPv4 for now; IPv6 is a future extension. */
+@@ -143,7 +143,7 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	struct ethhdr *eth;
+ 
+ 	/* Only process traffic on the trunk interface. */
+-	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++	if (ctx->ifindex != CONFIG(direct_routing_dev_ifindex))
+ 		return CTX_ACT_OK;
+ 
+ 	/* Packets without a VLAN tag are not SubENI traffic. */
+diff --git a/pkg/datapath/config/config.go b/pkg/datapath/config/config.go
+index b19b5d5d80..877217b743 100644
+--- a/pkg/datapath/config/config.go
++++ b/pkg/datapath/config/config.go
+@@ -6,7 +6,6 @@ package config
+ import (
+ 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
+ 	datapath "github.com/cilium/cilium/pkg/datapath/types"
+-	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/option"
+ )
+ 
+@@ -32,9 +31,6 @@ func NodeConfig(lnc *datapath.LocalNodeConfiguration) Node {
+ 
+ 	if lnc.DirectRoutingDevice != nil {
+ 		node.DirectRoutingDevIfIndex = uint32(lnc.DirectRoutingDevice.Index)
+-		if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+-			node.HuaweiCloudTrunkIfIndex = uint32(lnc.DirectRoutingDevice.Index)
+-		}
+ 	}
+ 
+ 	node.SupportsFIBLookupSkipNeigh = probes.HaveFibLookupSkipNeigh() == nil
+diff --git a/pkg/datapath/config/node_config.go b/pkg/datapath/config/node_config.go
+index b0d6ad866d..7a1bf5b6cb 100644
+--- a/pkg/datapath/config/node_config.go
++++ b/pkg/datapath/config/node_config.go
+@@ -15,7 +15,6 @@ type Node struct {
+ 	ClusterIDMax uint32 `config:"cluster_id_max"`
+ 	// Index of the interface used to connect nodes in the cluster.
+ 	DirectRoutingDevIfIndex uint32 `config:"direct_routing_dev_ifindex"`
+-	HuaweiCloudTrunkIfIndex uint32 `config:"hwc_trunk_ifindex"`
+ 	// Use jiffies (count of timer ticks since boot).
+ 	EnableJiffies bool `config:"enable_jiffies"`
+ 	// Enable hybrid mode routing based on subnet IDs.
+@@ -41,7 +40,7 @@ type Node struct {
+ }
+ 
+ func NewNode() *Node {
+-	return &Node{0x0, 0xff, 0x0, 0x0, false, false, 0x0, false,
++	return &Node{0x0, 0xff, 0x0, false, false, 0x0, false,
+ 		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+ 		[4]byte{0x0, 0x0, 0x0, 0x0},
+ 		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
+index 07ecc65d6f..868bc2bd46 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni.go
++++ b/pkg/endpointmanager/huaweicloud_subeni.go
+@@ -8,6 +8,7 @@ import (
+ 	"fmt"
+ 	"log/slog"
+ 	"net"
++	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+ 	"github.com/vishvananda/netlink"
+@@ -23,6 +24,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+ 	"github.com/cilium/cilium/pkg/option"
++	"github.com/cilium/cilium/pkg/time"
+ )
+ 
+ type huaweiCloudSubENIParams struct {
+@@ -44,6 +46,8 @@ type huaweiCloudSubENISubscriber struct {
+ 	logger    *slog.Logger
+ 	clientset client.Clientset
+ 	mapMgr    subENIMapUpdater
++	bindings  sync.Map
++	pending   sync.Map
+ }
+ 
+ type subENIEndpoint interface {
+@@ -85,12 +89,26 @@ func registerHuaweiCloudSubENIManager(p huaweiCloudSubENIParams) error {
+ 		mapMgr:    mapMgr,
+ 	}
+ 	p.Manager.Subscribe(subscriber)
+-	for _, ep := range p.Manager.GetEndpoints() {
+-		subscriber.upsertEndpoint(ep, "initial-sync")
+-	}
++	subscriber.reconcileEndpoints(p.Manager.GetEndpoints(), "initial-sync")
+ 
++	var cancel context.CancelFunc
++	var done chan struct{}
+ 	p.Lifecycle.Append(cell.Hook{
++		OnStart: func(cell.HookContext) error {
++			var ctx context.Context
++			ctx, cancel = context.WithCancel(context.Background())
++			done = make(chan struct{})
++			go func() {
++				defer close(done)
++				subscriber.run(ctx, p.Manager)
++			}()
++			return nil
++		},
+ 		OnStop: func(cell.HookContext) error {
++			if cancel != nil {
++				cancel()
++				<-done
++			}
+ 			p.Manager.Unsubscribe(subscriber)
+ 			mapMgr.Close()
+ 			return nil
+@@ -100,6 +118,44 @@ func registerHuaweiCloudSubENIManager(p huaweiCloudSubENIParams) error {
+ 	return nil
+ }
+ 
++func (s *huaweiCloudSubENISubscriber) run(ctx context.Context, manager EndpointManager) {
++	ticker := time.NewTicker(30 * time.Second)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++			s.reconcileEndpoints(manager.GetEndpoints(), "periodic-sync")
++			s.pending.Range(func(key, value any) bool {
++				if err := s.mapMgr.OnEndpointDelete(value.(*huaweiCloudEndpointInfo)); err != nil {
++					s.logger.Warn("Failed to retry HuaweiCloud SubENI BPF map deletion", logfields.Error, err)
++					return true
++				}
++				s.pending.Delete(key)
++				s.bindings.Delete(key)
++				return true
++			})
++		}
++	}
++}
++
++func (s *huaweiCloudSubENISubscriber) reconcileEndpoints(endpoints []*endpoint.Endpoint, reason string) {
++	if len(endpoints) == 0 {
++		return
++	}
++	nodeName := nodeTypes.GetName()
++	cn, err := s.clientset.CiliumV2().CiliumNodes().Get(context.Background(), nodeName, metav1.GetOptions{})
++	if err != nil {
++		s.logger.Warn("Failed to get CiliumNode for HuaweiCloud SubENI reconciliation", logfields.Error, err)
++		return
++	}
++	for _, ep := range endpoints {
++		info, err := subENIInfoForEndpoint(cn, ep)
++		s.programEndpoint(ep, info, err, reason)
++	}
++}
++
+ func (s *huaweiCloudSubENISubscriber) EndpointCreated(ep *endpoint.Endpoint) {
+ 	s.upsertEndpoint(ep, "created")
+ }
+@@ -109,29 +165,44 @@ func (s *huaweiCloudSubENISubscriber) EndpointRestored(ep *endpoint.Endpoint) {
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ endpoint.DeleteConfig) {
+-	info, err := s.resolveEndpointInfo(ep)
+-	if err != nil {
+-		s.logger.Warn("Failed to resolve HuaweiCloud SubENI endpoint info on delete",
+-			logfields.Error, err,
+-			logfields.EndpointID, ep.GetID(),
+-			logfields.IPv4, ep.GetIPv4Address(),
+-		)
+-		return
++	value, ok := s.bindings.Load(ep.GetID())
++	var info *huaweiCloudEndpointInfo
++	if ok {
++		info = value.(*huaweiCloudEndpointInfo)
++	} else {
++		var err error
++		info, err = s.resolveEndpointInfo(ep)
++		if err != nil {
++			s.logger.Warn("Failed to resolve HuaweiCloud SubENI endpoint info on delete",
++				logfields.Error, err,
++				logfields.EndpointID, ep.GetID(),
++				logfields.IPv4, ep.GetIPv4Address(),
++			)
++			return
++		}
+ 	}
+ 	if info == nil {
+ 		return
+ 	}
+ 	if err := s.mapMgr.OnEndpointDelete(info); err != nil {
++		s.pending.Store(ep.GetID(), info)
+ 		s.logger.Warn("Failed to delete HuaweiCloud SubENI BPF map entries",
+ 			logfields.Error, err,
+ 			logfields.EndpointID, ep.GetID(),
+ 			logfields.IPv4, ep.GetIPv4Address(),
+ 		)
++		return
+ 	}
++	s.bindings.Delete(ep.GetID())
++	s.pending.Delete(ep.GetID())
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
+ 	info, err := s.resolveEndpointInfo(ep)
++	s.programEndpoint(ep, info, err, reason)
++}
++
++func (s *huaweiCloudSubENISubscriber) programEndpoint(ep *endpoint.Endpoint, info *huaweiCloudEndpointInfo, err error, reason string) {
+ 	if err != nil {
+ 		s.logger.Warn("Failed to resolve HuaweiCloud SubENI endpoint info",
+ 			logfields.Error, err,
+@@ -151,6 +222,7 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reas
+ 			logfields.IPv4, ep.GetIPv4Address(),
+ 			slog.String("reason", reason),
+ 		)
++		return
+ 	}
+ 	if err := s.mapMgr.OnEndpointReady(info); err != nil {
+ 		s.logger.Warn("Failed to upsert HuaweiCloud SubENI BPF map entries",
+@@ -159,7 +231,10 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reas
+ 			logfields.IPv4, ep.GetIPv4Address(),
+ 			slog.String("reason", reason),
+ 		)
++		return
+ 	}
++	s.bindings.Store(ep.GetID(), info)
++	s.pending.Delete(ep.GetID())
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint) (*huaweiCloudEndpointInfo, error) {
+@@ -191,6 +266,9 @@ func subENIInfoForEndpoint(cn *cilium_v2.CiliumNode, ep subENIEndpoint) (*huawei
+ 		if subENI.PrivateIPAddress != ipv4 {
+ 			continue
+ 		}
++		if subENI.VlanID < 1 || subENI.VlanID > 4094 {
++			return nil, fmt.Errorf("invalid HuaweiCloud VLAN ID %d for %s", subENI.VlanID, ipv4)
++		}
+ 
+ 		parsedMAC, err := net.ParseMAC(subENI.MACAddress)
+ 		if err != nil {
+@@ -243,7 +321,7 @@ func parseOptionalIPv4(raw string) (net.IP, error) {
+ 
+ func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEndpointInfo) error {
+ 	if info == nil || info.gatewayIP == nil || len(info.gatewayMAC) == 0 || info.trunkInterface == "" {
+-		return nil
++		return fmt.Errorf("incomplete HuaweiCloud gateway neighbor metadata")
+ 	}
+ 
+ 	link, err := safenetlink.LinkByName(info.trunkInterface)
+diff --git a/pkg/endpointmanager/huaweicloud_subeni_test.go b/pkg/endpointmanager/huaweicloud_subeni_test.go
+index da2685b4da..9569fc9624 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni_test.go
++++ b/pkg/endpointmanager/huaweicloud_subeni_test.go
+@@ -66,3 +66,19 @@ func TestSubENIInfoForEndpointNoMatch(t *testing.T) {
+ 	require.NoError(t, err)
+ 	require.Nil(t, info)
+ }
++
++func TestSubENIInfoForEndpointRejectsInvalidVLAN(t *testing.T) {
++	ep := fakeSubENIEndpoint{ipv4: "192.168.0.199", id: 123, ifIndex: 55}
++	cn := &cilium_v2.CiliumNode{}
++	cn.Status.HuaweiCloud = &huaweiCloudTypes.ENIStatus{SubENIs: map[string]huaweiCloudTypes.SubENI{
++		"subeni-1": {PrivateIPAddress: ep.ipv4, MACAddress: "fa:16:3e:dd:35:fc"},
++	}}
++
++	_, err := subENIInfoForEndpoint(cn, ep)
++	require.ErrorContains(t, err, "invalid HuaweiCloud VLAN ID")
++}
++
++func TestEnsureGatewayNeighborRejectsIncompleteMetadata(t *testing.T) {
++	s := &huaweiCloudSubENISubscriber{}
++	require.Error(t, s.ensureGatewayNeighbor(&huaweiCloudEndpointInfo{}))
++}
+diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
+index a1720cf104..1060464d53 100644
+--- a/pkg/huaweicloud/api/api.go
++++ b/pkg/huaweicloud/api/api.go
+@@ -2,6 +2,7 @@ package api
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"net/netip"
+ 	"strconv"
+@@ -103,10 +104,49 @@ func NewClient(accessKey, secretKey, projectID, region, endpoint string) (*Clien
+ 	}, nil
+ }
+ 
++func validateCreateRequest(req CreateSubENIRequest) error {
++	if strings.TrimSpace(req.TrunkInterfaceID) == "" {
++		return fmt.Errorf("%w: trunk interface ID is required", ErrInvalidArgument)
++	}
++	if strings.TrimSpace(req.SubnetID) == "" {
++		return fmt.Errorf("%w: subnet ID is required", ErrInvalidArgument)
++	}
++	return nil
++}
++
++func validateSubENI(subENI *eniTypes.SubENI) error {
++	if subENI == nil || strings.TrimSpace(subENI.ID) == "" {
++		return errors.New("create response is missing sub-eni ID")
++	}
++	if subENI.VlanID < 1 || subENI.VlanID > 4094 {
++		return fmt.Errorf("create response has invalid VLAN ID %d", subENI.VlanID)
++	}
++	return nil
++}
++
++func (c *Client) rollbackCreatedSubENIs(ctx context.Context, ids []string, cause error) error {
++	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
++	defer cancel()
++
++	err := cause
++	for _, id := range ids {
++		if id == "" {
++			continue
++		}
++		if deleteErr := c.DeleteSubNetworkInterface(rollbackCtx, id); deleteErr != nil {
++			err = errors.Join(err, fmt.Errorf("rollback sub-eni %s: %w", id, deleteErr))
++		}
++	}
++	return err
++}
++
+ func (c *Client) CreateSubNetworkInterface(ctx context.Context, req CreateSubENIRequest) (string, *eniTypes.SubENI, error) {
+ 	if err := ctx.Err(); err != nil {
+ 		return "", nil, err
+ 	}
++	if err := validateCreateRequest(req); err != nil {
++		return "", nil, err
++	}
+ 	option := &vpcmodel.CreateSubNetworkInterfaceOption{VirsubnetId: req.SubnetID, ParentId: req.TrunkInterfaceID}
+ 	if len(req.SecurityGroupIDs) > 0 {
+ 		option.SecurityGroups = &req.SecurityGroupIDs
+@@ -123,8 +163,11 @@ func (c *Client) CreateSubNetworkInterface(ctx context.Context, req CreateSubENI
+ 	}
+ 
+ 	subENI := parseSubENI(response.SubNetworkInterface)
+-	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
+-		return "", nil, err
++	if err := validateSubENI(subENI); err != nil {
++		return "", nil, c.rollbackCreatedSubENIs(ctx, []string{subENI.ID}, err)
++	}
++	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil, nil); err != nil {
++		return "", nil, c.rollbackCreatedSubENIs(ctx, []string{subENI.ID}, err)
+ 	}
+ 	return subENI.ID, subENI, nil
+ }
+@@ -139,6 +182,9 @@ func (c *Client) BatchCreateSubNetworkInterfaces(ctx context.Context, count int,
+ 	if count > 10 {
+ 		return nil, fmt.Errorf("batch create count exceeds max 10")
+ 	}
++	if err := validateCreateRequest(req); err != nil {
++		return nil, err
++	}
+ 
+ 	option := &vpcmodel.BatchCreateSubNetworkInterfaceOption{VirsubnetId: req.SubnetID, ParentId: req.TrunkInterfaceID}
+ 	if len(req.SecurityGroupIDs) > 0 {
+@@ -156,13 +202,24 @@ func (c *Client) BatchCreateSubNetworkInterfaces(ctx context.Context, count int,
+ 		return []*eniTypes.SubENI{}, nil
+ 	}
+ 	result := make([]*eniTypes.SubENI, 0, len(*response.SubNetworkInterfaces))
++	ids := make([]string, 0, len(*response.SubNetworkInterfaces))
+ 	for _, item := range *response.SubNetworkInterfaces {
+ 		subENI := parseSubENI(&item)
+-		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
+-			return nil, err
+-		}
++		ids = append(ids, subENI.ID)
+ 		result = append(result, subENI)
+ 	}
++	for _, subENI := range result {
++		if err := validateSubENI(subENI); err != nil {
++			return nil, c.rollbackCreatedSubENIs(ctx, ids, err)
++		}
++	}
++	subnets := ipamTypes.SubnetMap{}
++	gatewayMACs := map[string]string{}
++	for _, subENI := range result {
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets, gatewayMACs); err != nil {
++			return nil, c.rollbackCreatedSubENIs(ctx, ids, err)
++		}
++	}
+ 
+ 	return result, nil
+ }
+@@ -171,6 +228,9 @@ func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string)
+ 	if err := ctx.Err(); err != nil {
+ 		return err
+ 	}
++	if strings.TrimSpace(subENIID) == "" {
++		return fmt.Errorf("%w: sub-eni ID is required", ErrInvalidArgument)
++	}
+ 	request := &vpcmodel.DeleteSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
+ 	c.limiter.Limit(ctx, "DeleteSubNetworkInterface")
+ 	_, err := c.vpcClient.DeleteSubNetworkInterface(request)
+@@ -181,6 +241,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+ 	}
++	if strings.TrimSpace(subENIID) == "" {
++		return nil, fmt.Errorf("%w: sub-eni ID is required", ErrInvalidArgument)
++	}
+ 	request := &vpcmodel.ShowSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
+ 	c.limiter.Limit(ctx, "ShowSubNetworkInterface")
+ 	response, err := c.vpcClient.ShowSubNetworkInterface(request)
+@@ -191,37 +254,77 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
+ 		return nil, fmt.Errorf("sub-eni %s not found", subENIID)
+ 	}
+ 	subENI := parseSubENI(response.SubNetworkInterface)
+-	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil, nil); err != nil {
+ 		return nil, err
+ 	}
+ 	return subENI, nil
+ }
+ 
++func collectPages[T any](ctx context.Context, fetch func(*string) ([]T, *string, error)) ([]T, error) {
++	var result []T
++	var marker *string
++	for {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		page, next, err := fetch(marker)
++		if err != nil {
++			return nil, err
++		}
++		result = append(result, page...)
++		if next == nil || strings.TrimSpace(*next) == "" {
++			return result, nil
++		}
++		if marker != nil && *next == *marker {
++			return nil, fmt.Errorf("pagination marker did not advance: %s", *next)
++		}
++		nextMarker := *next
++		marker = &nextMarker
++	}
++}
++
++func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []string) ([]vpcmodel.SubNetworkInterface, error) {
++	limit := int32(2000)
++	return collectPages(ctx, func(marker *string) ([]vpcmodel.SubNetworkInterface, *string, error) {
++		request := &vpcmodel.ListSubNetworkInterfacesRequest{Limit: &limit, Marker: marker}
++		if len(parentIDs) > 0 {
++			request.ParentId = &parentIDs
++		}
++		c.limiter.Limit(ctx, "ListSubNetworkInterfaces")
++		response, err := c.vpcClient.ListSubNetworkInterfaces(request)
++		if err != nil {
++			return nil, nil, normalizeAPIError(err)
++		}
++		var items []vpcmodel.SubNetworkInterface
++		if response.SubNetworkInterfaces != nil {
++			items = *response.SubNetworkInterfaces
++		}
++		var next *string
++		if response.PageInfo != nil {
++			next = response.PageInfo.NextMarker
++		}
++		return items, next, nil
++	})
++}
++
+ func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string) ([]*eniTypes.SubENI, error) {
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+ 	}
+-	request := &vpcmodel.ListSubNetworkInterfacesRequest{}
+-	limit := int32(2000)
+-	request.Limit = &limit
++	var parentIDs []string
+ 	if parentID != "" {
+-		parentIDs := []string{parentID}
+-		request.ParentId = &parentIDs
++		parentIDs = []string{parentID}
+ 	}
+-
+-	c.limiter.Limit(ctx, "ListSubNetworkInterfaces")
+-	response, err := c.vpcClient.ListSubNetworkInterfaces(request)
++	items, err := c.listSubNetworkInterfaces(ctx, parentIDs)
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
+-	}
+-
+-	if response.SubNetworkInterfaces == nil {
+-		return []*eniTypes.SubENI{}, nil
++		return nil, err
+ 	}
+-	result := make([]*eniTypes.SubENI, 0, len(*response.SubNetworkInterfaces))
+-	for _, item := range *response.SubNetworkInterfaces {
++	result := make([]*eniTypes.SubENI, 0, len(items))
++	subnets := ipamTypes.SubnetMap{}
++	gatewayMACs := map[string]string{}
++	for _, item := range items {
+ 		subENI := parseSubENI(&item)
+-		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets, gatewayMACs); err != nil {
+ 			return nil, err
+ 		}
+ 		result = append(result, subENI)
+@@ -230,9 +333,9 @@ func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string)
+ 	return result, nil
+ }
+ 
+-func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
++func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap, gatewayMACs map[string]string) error {
+ 	if subENI == nil || subENI.SubnetID == "" {
+-		return nil
++		return fmt.Errorf("%w: sub-eni subnet is empty", ErrGatewayNotReady)
+ 	}
+ 	if subENI.GatewayIP == "" || subENI.SubnetCIDR == "" {
+ 		gatewayIP, subnetCIDR, err := c.resolveSubENISubnetMetadata(ctx, subENI.SubnetID, subENI.PrivateIPAddress, cachedSubnets)
+@@ -246,7 +349,15 @@ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.Sub
+ 			subENI.SubnetCIDR = subnetCIDR
+ 		}
+ 	}
+-	if subENI.GatewayIP == "" || subENI.GatewayMAC != "" {
++	if subENI.GatewayIP == "" {
++		return fmt.Errorf("%w: no IPv4 gateway for subnet %s", ErrGatewayNotReady, subENI.SubnetID)
++	}
++	if subENI.GatewayMAC != "" {
++		return nil
++	}
++	gatewayKey := subENI.SubnetID + "/" + subENI.GatewayIP
++	if gatewayMAC := gatewayMACs[gatewayKey]; gatewayMAC != "" {
++		subENI.GatewayMAC = gatewayMAC
+ 		return nil
+ 	}
+ 
+@@ -265,10 +376,16 @@ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.Sub
+ 		return normalizeAPIError(err)
+ 	}
+ 	if response.Ports == nil || len(*response.Ports) == 0 {
+-		return nil
++		return fmt.Errorf("%w: gateway port not found for subnet %s", ErrGatewayNotReady, subENI.SubnetID)
+ 	}
+ 
+ 	subENI.GatewayMAC = (*response.Ports)[0].MacAddress
++	if strings.TrimSpace(subENI.GatewayMAC) == "" {
++		return fmt.Errorf("%w: gateway MAC is empty for subnet %s", ErrGatewayNotReady, subENI.SubnetID)
++	}
++	if gatewayMACs != nil {
++		gatewayMACs[gatewayKey] = subENI.GatewayMAC
++	}
+ 	return nil
+ }
+ 
+@@ -302,6 +419,13 @@ func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, priv
+ 	}
+ 
+ 	gatewayIP, subnetCIDR := selectIPv4SubnetCIDRAndGateway((*response.Virsubnets)[0].SubnetCidrs, privateIP)
++	if cachedSubnets != nil {
++		subnet := &ipamTypes.Subnet{ID: subnetID, GatewayIP: gatewayIP}
++		if prefix, err := netip.ParsePrefix(subnetCIDR); err == nil {
++			subnet.CIDR = prefix
++		}
++		cachedSubnets[subnetID] = subnet
++	}
+ 	return gatewayIP, subnetCIDR, nil
+ }
+ 
+@@ -357,23 +481,15 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
+ 		return instance, nil
+ 	}
+ 
+-	listRequest := &vpcmodel.ListSubNetworkInterfacesRequest{}
+-	limit := int32(2000)
+-	listRequest.Limit = &limit
+-	listRequest.ParentId = &parentPorts
+-
+-	c.limiter.Limit(ctx, "ListSubNetworkInterfaces")
+-	listResp, err := c.vpcClient.ListSubNetworkInterfaces(listRequest)
++	items, err := c.listSubNetworkInterfaces(ctx, parentPorts)
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
+-	}
+-
+-	if listResp.SubNetworkInterfaces == nil {
+-		return instance, nil
++		return nil, err
+ 	}
+-	for _, item := range *listResp.SubNetworkInterfaces {
++	subnets := ipamTypes.SubnetMap{}
++	gatewayMACs := map[string]string{}
++	for _, item := range items {
+ 		subENI := parseSubENI(&item)
+-		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets, gatewayMACs); err != nil {
+ 			return nil, err
+ 		}
+ 		instance.Interfaces[subENI.ID] = ipamTypes.InterfaceRevision{Resource: subENI}
+@@ -460,41 +576,46 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+ 		return nil, err
+ 	}
+ 	_ = vpcs
+-	_ = subnets
+ 
+ 	limit := int32(1000)
+-	serversReq := &ecsmodel.ListServersDetailsRequest{Limit: &limit}
+-	c.limiter.Limit(ctx, "ListServersDetails")
+-	serversResp, err := c.ecsClient.ListServersDetails(serversReq)
++	servers, err := collectPages(ctx, func(marker *string) ([]ecsmodel.ServerDetail, *string, error) {
++		request := &ecsmodel.ListServersDetailsRequest{Limit: &limit, Marker: marker}
++		c.limiter.Limit(ctx, "ListServersDetails")
++		response, err := c.ecsClient.ListServersDetails(request)
++		if err != nil {
++			return nil, nil, normalizeAPIError(err)
++		}
++		var items []ecsmodel.ServerDetail
++		if response.Servers != nil {
++			items = *response.Servers
++		}
++		if len(items) < int(limit) || items[len(items)-1].Id == "" {
++			return items, nil, nil
++		}
++		next := items[len(items)-1].Id
++		return items, &next, nil
++	})
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
++		return nil, err
+ 	}
+ 
+ 	parentToInstance := map[string]string{}
+-	if serversResp.Servers != nil {
+-		for _, server := range *serversResp.Servers {
+-			for _, portID := range getParentPortsFromServer(&server) {
+-				parentToInstance[portID] = server.Id
+-			}
++	for _, server := range servers {
++		for _, portID := range getParentPortsFromServer(&server) {
++			parentToInstance[portID] = server.Id
+ 		}
+ 	}
+ 
+-	listReq := &vpcmodel.ListSubNetworkInterfacesRequest{}
+-	listLimit := int32(2000)
+-	listReq.Limit = &listLimit
+-	c.limiter.Limit(ctx, "ListSubNetworkInterfaces")
+-	listResp, err := c.vpcClient.ListSubNetworkInterfaces(listReq)
++	items, err := c.listSubNetworkInterfaces(ctx, nil)
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
++		return nil, err
+ 	}
+ 
+ 	instances := ipamTypes.NewInstanceMap()
+-	if listResp.SubNetworkInterfaces == nil {
+-		return instances, nil
+-	}
+-	for _, item := range *listResp.SubNetworkInterfaces {
++	gatewayMACs := map[string]string{}
++	for _, item := range items {
+ 		subENI := parseSubENI(&item)
+-		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets); err != nil {
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets, gatewayMACs); err != nil {
+ 			return nil, err
+ 		}
+ 		instanceID := parentToInstance[subENI.ParentID]
+@@ -514,25 +635,34 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+ 	}
+-	request := &vpcmodel.ListVirsubnetsRequest{}
+ 	limit := int32(2000)
+-	request.Limit = &limit
+-	if vpcID != "" {
+-		vpcIDs := []string{vpcID}
+-		request.VpcId = &vpcIDs
+-	}
+-
+-	c.limiter.Limit(ctx, "ListVirsubnets")
+-	response, err := c.vpcClient.ListVirsubnets(request)
++	items, err := collectPages(ctx, func(marker *string) ([]vpcmodel.Virsubnet, *string, error) {
++		request := &vpcmodel.ListVirsubnetsRequest{Limit: &limit, Marker: marker}
++		if vpcID != "" {
++			vpcIDs := []string{vpcID}
++			request.VpcId = &vpcIDs
++		}
++		c.limiter.Limit(ctx, "ListVirsubnets")
++		response, err := c.vpcClient.ListVirsubnets(request)
++		if err != nil {
++			return nil, nil, normalizeAPIError(err)
++		}
++		var page []vpcmodel.Virsubnet
++		if response.Virsubnets != nil {
++			page = *response.Virsubnets
++		}
++		var next *string
++		if response.PageInfo != nil {
++			next = response.PageInfo.NextMarker
++		}
++		return page, next, nil
++	})
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
++		return nil, err
+ 	}
+ 
+ 	result := ipamTypes.SubnetMap{}
+-	if response.Virsubnets == nil {
+-		return result, nil
+-	}
+-	for _, item := range *response.Virsubnets {
++	for _, item := range items {
+ 		gatewayIP, subnetCIDR := selectIPv4SubnetCIDRAndGateway(item.SubnetCidrs, "")
+ 		subnet := &ipamTypes.Subnet{ID: item.Id, Name: item.Name, VirtualNetworkID: item.VpcId, AvailabilityZone: item.ZoneId, Tags: parseResponseTags(item.Tags), GatewayIP: gatewayIP}
+ 		if subnetCIDR != "" {
+@@ -550,21 +680,30 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+ 	}
+-	request := &vpcmodel.ListVpcsRequest{}
+ 	limit := int32(2000)
+-	request.Limit = &limit
+-
+-	c.limiter.Limit(ctx, "ListVpcs")
+-	response, err := c.vpcClient.ListVpcs(request)
++	items, err := collectPages(ctx, func(marker *string) ([]vpcmodel.Vpc, *string, error) {
++		request := &vpcmodel.ListVpcsRequest{Limit: &limit, Marker: marker}
++		c.limiter.Limit(ctx, "ListVpcs")
++		response, err := c.vpcClient.ListVpcs(request)
++		if err != nil {
++			return nil, nil, normalizeAPIError(err)
++		}
++		var page []vpcmodel.Vpc
++		if response.Vpcs != nil {
++			page = *response.Vpcs
++		}
++		var next *string
++		if response.PageInfo != nil {
++			next = response.PageInfo.NextMarker
++		}
++		return page, next, nil
++	})
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
++		return nil, err
+ 	}
+ 
+ 	result := ipamTypes.VirtualNetworkMap{}
+-	if response.Vpcs == nil {
+-		return result, nil
+-	}
+-	for _, item := range *response.Vpcs {
++	for _, item := range items {
+ 		result[item.Id] = &ipamTypes.VirtualNetwork{ID: item.Id, PrimaryCIDR: item.Cidr, CIDRs: append([]string(nil), item.ExtendCidrs...)}
+ 	}
+ 
+@@ -575,55 +714,36 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+ 	}
+-	request := &vpcmodel.ListSecurityGroupsRequest{}
+ 	limit := int32(2000)
+-	request.Limit = &limit
+-
+-	c.limiter.Limit(ctx, "ListSecurityGroups")
+-	response, err := c.vpcClient.ListSecurityGroups(request)
++	items, err := collectPages(ctx, func(marker *string) ([]vpcmodel.SecurityGroup, *string, error) {
++		request := &vpcmodel.ListSecurityGroupsRequest{Limit: &limit, Marker: marker}
++		c.limiter.Limit(ctx, "ListSecurityGroups")
++		response, err := c.vpcClient.ListSecurityGroups(request)
++		if err != nil {
++			return nil, nil, normalizeAPIError(err)
++		}
++		var page []vpcmodel.SecurityGroup
++		if response.SecurityGroups != nil {
++			page = *response.SecurityGroups
++		}
++		var next *string
++		if response.PageInfo != nil {
++			next = response.PageInfo.NextMarker
++		}
++		return page, next, nil
++	})
+ 	if err != nil {
+-		return nil, normalizeAPIError(err)
++		return nil, err
+ 	}
+ 
+ 	result := hwTypes.SecurityGroupMap{}
+-	if response.SecurityGroups == nil {
+-		return result, nil
+-	}
+-	for _, item := range *response.SecurityGroups {
++	for _, item := range items {
+ 		result[item.Id] = &hwTypes.SecurityGroup{ID: item.Id, VPCID: vpcID, Tags: parseResourceTags(item.Tags)}
+ 	}
+ 
+ 	return result, nil
+ }
+ 
+-func (c *Client) WaitSubENIActive(ctx context.Context, subENIID string) (*eniTypes.SubENI, error) {
+-	ticker := time.NewTicker(1 * time.Second)
+-	defer ticker.Stop()
+-	timeout := time.NewTimer(60 * time.Second)
+-	defer timeout.Stop()
+-
+-	for {
+-		subENI, err := c.GetSubNetworkInterface(ctx, subENIID)
+-		if err != nil {
+-			return nil, fmt.Errorf("wait sub-eni %s: %w", subENIID, err)
+-		}
+-		switch subENI.State {
+-		case "ACTIVE":
+-			return subENI, nil
+-		case "ERROR":
+-			return nil, fmt.Errorf("sub-eni %s entered ERROR state", subENIID)
+-		}
+-
+-		select {
+-		case <-ctx.Done():
+-			return nil, ctx.Err()
+-		case <-timeout.C:
+-			return nil, fmt.Errorf("timed out waiting for sub-eni %s to become ACTIVE", subENIID)
+-		case <-ticker.C:
+-		}
+-	}
+-}
+-
+ func parseSubENI(subENI *vpcmodel.SubNetworkInterface) *eniTypes.SubENI {
+ 	if subENI == nil {
+ 		return nil
+diff --git a/pkg/huaweicloud/api/api_validation_test.go b/pkg/huaweicloud/api/api_validation_test.go
+new file mode 100644
+index 0000000000..c8cbf10ff3
+--- /dev/null
++++ b/pkg/huaweicloud/api/api_validation_test.go
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	"github.com/stretchr/testify/require"
++)
++
++func TestValidateCreateRequest(t *testing.T) {
++	require.ErrorIs(t, validateCreateRequest(CreateSubENIRequest{}), ErrInvalidArgument)
++	require.ErrorIs(t, validateCreateRequest(CreateSubENIRequest{TrunkInterfaceID: "parent"}), ErrInvalidArgument)
++	require.NoError(t, validateCreateRequest(CreateSubENIRequest{TrunkInterfaceID: "parent", SubnetID: "subnet"}))
++}
++
++func TestValidateSubENI(t *testing.T) {
++	require.Error(t, validateSubENI(nil))
++	require.Error(t, validateSubENI(&eniTypes.SubENI{ID: "id", VlanID: 0}))
++	require.Error(t, validateSubENI(&eniTypes.SubENI{ID: "id", VlanID: 4095}))
++	require.NoError(t, validateSubENI(&eniTypes.SubENI{ID: "id", VlanID: 4094}))
++}
++
++func TestCollectPages(t *testing.T) {
++	items, err := collectPages(context.Background(), func(marker *string) ([]int, *string, error) {
++		if marker == nil {
++			next := "page-2"
++			return []int{1}, &next, nil
++		}
++		require.Equal(t, "page-2", *marker)
++		return []int{2}, nil, nil
++	})
++	require.NoError(t, err)
++	require.Equal(t, []int{1, 2}, items)
++}
++
++func TestCollectPagesRejectsRepeatedMarker(t *testing.T) {
++	_, err := collectPages(context.Background(), func(marker *string) ([]int, *string, error) {
++		next := "same"
++		return nil, &next, nil
++	})
++	require.ErrorContains(t, err, "did not advance")
++}
++
++func TestGatewayMetadataIsRequired(t *testing.T) {
++	err := (&Client{}).fillSubENIGatewayInfo(context.Background(), nil, nil, nil)
++	require.True(t, errors.Is(err, ErrGatewayNotReady))
++}
+diff --git a/pkg/huaweicloud/api/error.go b/pkg/huaweicloud/api/error.go
+index b5c05fa804..8f5b91f56d 100644
+--- a/pkg/huaweicloud/api/error.go
++++ b/pkg/huaweicloud/api/error.go
+@@ -28,6 +28,9 @@ var (
+ 
+ 	// ErrNotFound is returned when the requested resource does not exist (HTTP 404).
+ 	ErrNotFound = errors.New("not found")
++
++	// ErrGatewayNotReady is returned while the subnet gateway metadata is incomplete.
++	ErrGatewayNotReady = errors.New("gateway not ready")
+ )
+ 
+ // normalizeAPIError converts a HuaweiCloud SDK ServiceResponseError into one of the
+diff --git a/pkg/huaweicloud/api/mock/mock.go b/pkg/huaweicloud/api/mock/mock.go
+index 187c6e18e8..50e7189668 100644
+--- a/pkg/huaweicloud/api/mock/mock.go
++++ b/pkg/huaweicloud/api/mock/mock.go
+@@ -77,7 +77,7 @@ func (a *API) AddSubENI(instanceID string, subENI *eniTypes.SubENI) {
+ 		cloned.ID = uuid.NewString()
+ 	}
+ 	if cloned.State == "" {
+-		cloned.State = "ACTIVE"
++		cloned.State = "NORMAL"
+ 	}
+ 
+ 	a.subENIs[cloned.ID] = cloned
+@@ -191,7 +191,7 @@ func (a *API) CreateSubNetworkInterface(ctx context.Context, req hwAPI.CreateSub
+ 		GatewayIP:        subnet.GatewayIP,
+ 		SubnetID:         req.SubnetID,
+ 		SecurityGroups:   append([]string(nil), req.SecurityGroupIDs...),
+-		State:            "ACTIVE",
++		State:            "NORMAL",
+ 		ParentID:         req.TrunkInterfaceID,
+ 		VPCID:            subnet.VirtualNetworkID,
+ 	}
+diff --git a/pkg/huaweicloud/api/mock/mock_test.go b/pkg/huaweicloud/api/mock/mock_test.go
+index 8a472c237c..868ef77b17 100644
+--- a/pkg/huaweicloud/api/mock/mock_test.go
++++ b/pkg/huaweicloud/api/mock/mock_test.go
+@@ -46,7 +46,7 @@ func TestSubENILifecycle(t *testing.T) {
+ 	assert.Equal(t, subENIID, created.ID)
+ 	assert.Equal(t, "subnet-1", created.SubnetID)
+ 	assert.Equal(t, "parent-1", created.ParentID)
+-	assert.Equal(t, "ACTIVE", created.State)
++	assert.Equal(t, "NORMAL", created.State)
+ 	assert.Equal(t, []string{"sg-1"}, created.SecurityGroups)
+ 
+ 	loaded, err := api.GetSubNetworkInterface(ctx, subENIID)
+@@ -81,7 +81,7 @@ func TestBatchCreateSubNetworkInterfaces(t *testing.T) {
+ 		require.NotNil(t, subENI)
+ 		assert.Equal(t, "subnet-1", subENI.SubnetID)
+ 		assert.Equal(t, "parent-2", subENI.ParentID)
+-		assert.Equal(t, "ACTIVE", subENI.State)
++		assert.Equal(t, "NORMAL", subENI.State)
+ 		assert.Equal(t, []string{"sg-1", "sg-2"}, subENI.SecurityGroups)
+ 		ids[subENI.ID] = struct{}{}
+ 	}
+@@ -104,23 +104,23 @@ func TestAddSubENIAndGetSubENIs(t *testing.T) {
+ 		ParentID:         "parent-seeded",
+ 		VPCID:            "vpc-1",
+ 		SecurityGroups:   []string{"sg-1"},
+-		State:            "ACTIVE",
++		State:            "NORMAL",
+ 	}
+ 
+ 	api.AddSubENI("instance-1", seed)
+ 
+-	seed.State = "ERROR"
++	seed.State = "UNBOUND"
+ 	seed.SecurityGroups[0] = "sg-2"
+ 
+ 	first := api.GetSubENIs("instance-1")
+ 	require.Len(t, first, 1)
+ 	require.NotNil(t, first["subeni-seeded"])
+-	assert.Equal(t, "ACTIVE", first["subeni-seeded"].State)
++	assert.Equal(t, "NORMAL", first["subeni-seeded"].State)
+ 	assert.Equal(t, []string{"sg-1"}, first["subeni-seeded"].SecurityGroups)
+ 
+-	first["subeni-seeded"].State = "ERROR"
++	first["subeni-seeded"].State = "UNBOUND"
+ 	second := api.GetSubENIs("instance-1")
+-	assert.Equal(t, "ACTIVE", second["subeni-seeded"].State)
++	assert.Equal(t, "NORMAL", second["subeni-seeded"].State)
+ 
+ 	instance, err := api.GetInstance(ctx, "instance-1")
+ 	require.NoError(t, err)
+diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
+index c523a98d05..9021acdd03 100644
+--- a/pkg/huaweicloud/eni/instances_test.go
++++ b/pkg/huaweicloud/eni/instances_test.go
+@@ -10,11 +10,11 @@ import (
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 
+-	"github.com/cilium/hive/hivetest"
+ 	"github.com/cilium/cilium/pkg/huaweicloud/api/mock"
+ 	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	hwTypes "github.com/cilium/cilium/pkg/huaweicloud/types"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++	"github.com/cilium/hive/hivetest"
+ )
+ 
+ func newTestManager(t *testing.T) (*InstancesManager, *mock.API) {
+@@ -42,7 +42,7 @@ func TestInstancesResync(t *testing.T) {
+ 		PrivateIPAddress: "10.0.1.1",
+ 		SubnetID:         "subnet-1",
+ 		ParentID:         "parent-1",
+-		State:            "ACTIVE",
++		State:            "NORMAL",
+ 	})
+ 
+ 	ts := mgr.Resync(context.Background())
+diff --git a/pkg/huaweicloud/eni/node.go b/pkg/huaweicloud/eni/node.go
+index 903c8b5f92..ec2d08232a 100644
+--- a/pkg/huaweicloud/eni/node.go
++++ b/pkg/huaweicloud/eni/node.go
+@@ -479,7 +479,7 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]s
+ 		return securityGroups, nil
+ 	}
+ 
+-	return nil, errors.New("failed to get security group ids")
++	return nil, nil
+ }
+ 
+ func (n *Node) getParentENIID() string {
+diff --git a/pkg/huaweicloud/eni/node_test.go b/pkg/huaweicloud/eni/node_test.go
+index b477c8ff14..dd02cdee34 100644
+--- a/pkg/huaweicloud/eni/node_test.go
++++ b/pkg/huaweicloud/eni/node_test.go
+@@ -87,6 +87,13 @@ func TestNodeCreateInterfaceRequiresParentENI(t *testing.T) {
+ 	assert.Equal(t, unableToDetermineParentENI, errStr)
+ }
+ 
++func TestGetSecurityGroupIDsAllowsCloudDefault(t *testing.T) {
++	node, _ := newTestNode(t)
++	groups, err := node.getSecurityGroupIDs(context.Background(), eniTypes.Spec{})
++	require.NoError(t, err)
++	require.Empty(t, groups)
++}
++
+ func TestNodeCreateInterface(t *testing.T) {
+ 	node, _ := newTestNode(t)
+ 	seedParentENI(node, "parent-1")
+diff --git a/pkg/huaweicloud/eni/types/types.go b/pkg/huaweicloud/eni/types/types.go
+index 775f745740..b79230fc16 100644
+--- a/pkg/huaweicloud/eni/types/types.go
++++ b/pkg/huaweicloud/eni/types/types.go
+@@ -115,7 +115,7 @@ type SubENI struct {
+ 	// +optional
+ 	SecurityGroups []string `json:"security-group-ids,omitempty"`
+ 
+-	// State is the current state of the Sub-ENI (ACTIVE, BUILD, DOWN, ERROR)
++	// State is the current state of the Sub-ENI (NORMAL or UNBOUND).
+ 	//
+ 	// +optional
+ 	State string `json:"state,omitempty"`
+diff --git a/pkg/huaweicloud/eni/types/types_test.go b/pkg/huaweicloud/eni/types/types_test.go
+index 82dfd09e9c..f68bb20e35 100644
+--- a/pkg/huaweicloud/eni/types/types_test.go
++++ b/pkg/huaweicloud/eni/types/types_test.go
+@@ -53,7 +53,7 @@ func TestDeepCopy_SubENI(t *testing.T) {
+ 		ID:               "sub-eni-1",
+ 		PrivateIPAddress: "10.0.1.5",
+ 		SecurityGroups:   []string{"sg-1", "sg-2"},
+-		State:            "ACTIVE",
++		State:            "NORMAL",
+ 		VlanID:           100,
+ 	}
+ 
+diff --git a/pkg/huaweicloud/subenimap/manager.go b/pkg/huaweicloud/subenimap/manager.go
+index 192f4d8cef..98d771d250 100644
+--- a/pkg/huaweicloud/subenimap/manager.go
++++ b/pkg/huaweicloud/subenimap/manager.go
+@@ -4,6 +4,7 @@
+ package subenimap
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"log/slog"
+ 	"net"
+@@ -159,15 +160,17 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+ 		LxcID:   uint16(ep.GetID()), //nolint:gosec // LXC IDs fit in uint16
+ 	}
+ 	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
+-		return fmt.Errorf("OnEndpointReady: update %s key=%s: %w", vlanMACMapName, vlanKey, err)
++		_, rollbackErr := m.srcIPMap.Delete(srcKey)
++		return errors.Join(
++			fmt.Errorf("OnEndpointReady: update %s key=%s: %w", vlanMACMapName, vlanKey, err),
++			wrapMapError("rollback", srcIPMapName, rollbackErr),
++		)
+ 	}
+ 
+ 	return nil
+ }
+ 
+-// OnEndpointDelete removes the entries for the given endpoint from both BPF
+-// maps on a best-effort basis (individual delete errors are logged but not
+-// returned).
++// OnEndpointDelete removes the entries for the given endpoint from both BPF maps.
+ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
+ 	addrBytes, err := parseIPv4(ep.GetIPv4Address())
+ 	if err != nil {
+@@ -187,24 +190,19 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
+ 		return fmt.Errorf("OnEndpointDelete: %w", err)
+ 	}
+ 
+-	// best-effort: log errors but do not propagate them.
+-	if _, err := m.srcIPMap.Delete(&SrcIPKey4{Addr: addrBytes}); err != nil {
+-		m.logger.Warn("failed to delete srcip entry",
+-			slog.String("map", srcIPMapName),
+-			slog.String("addr", ep.GetIPv4Address()),
+-			slog.Any("error", err),
+-		)
+-	}
++	_, srcErr := m.srcIPMap.Delete(&SrcIPKey4{Addr: addrBytes})
++	_, vlanErr := m.vlanMACMap.Delete(&VLANMACKey{VlanID: vlanID, MAC: macArr})
++	return errors.Join(
++		wrapMapError("delete", srcIPMapName, srcErr),
++		wrapMapError("delete", vlanMACMapName, vlanErr),
++	)
++}
+ 
+-	if _, err := m.vlanMACMap.Delete(&VLANMACKey{VlanID: vlanID, MAC: macArr}); err != nil {
+-		m.logger.Warn("failed to delete vlan-mac entry",
+-			slog.String("map", vlanMACMapName),
+-			slog.String("addr", ep.GetIPv4Address()),
+-			slog.Any("error", err),
+-		)
++func wrapMapError(operation, mapName string, err error) error {
++	if err == nil {
++		return nil
+ 	}
+-
+-	return nil
++	return fmt.Errorf("%s %s: %w", operation, mapName, err)
+ }
+ 
+ // Close releases any resources held by the manager.
+diff --git a/pkg/huaweicloud/subenimap/manager_test.go b/pkg/huaweicloud/subenimap/manager_test.go
+index 3eb578d4ed..30db133fde 100644
+--- a/pkg/huaweicloud/subenimap/manager_test.go
++++ b/pkg/huaweicloud/subenimap/manager_test.go
+@@ -4,6 +4,7 @@
+ package subenimap
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"log/slog"
+ 	"testing"
+@@ -21,7 +22,9 @@ type fakeMapEntry struct {
+ }
+ 
+ type fakeMap struct {
+-	entries map[string]bpf.MapValue
++	entries   map[string]bpf.MapValue
++	updateErr error
++	deleteErr error
+ }
+ 
+ func newFakeMap() *fakeMap {
+@@ -29,11 +32,17 @@ func newFakeMap() *fakeMap {
+ }
+ 
+ func (f *fakeMap) Update(key bpf.MapKey, value bpf.MapValue) error {
++	if f.updateErr != nil {
++		return f.updateErr
++	}
+ 	f.entries[key.String()] = value
+ 	return nil
+ }
+ 
+ func (f *fakeMap) Delete(key bpf.MapKey) (bool, error) {
++	if f.deleteErr != nil {
++		return false, f.deleteErr
++	}
+ 	k := key.String()
+ 	if _, ok := f.entries[k]; !ok {
+ 		return false, nil
+@@ -204,6 +213,19 @@ func TestOnEndpointReady_InvalidIP(t *testing.T) {
+ 	}
+ }
+ 
++func TestOnEndpointReady_RollsBackFirstMap(t *testing.T) {
++	mgr, srcIPFake, vlanMACFake := newTestManager(t)
++	vlanMACFake.updateErr = errors.New("injected update failure")
++	ep := &fakeEndpoint{ipv4: "10.0.1.5", id: 42, ifIndex: 7, vlanID: 100}
++
++	if err := mgr.OnEndpointReady(ep); err == nil {
++		t.Fatal("expected update error")
++	}
++	if len(srcIPFake.entries) != 0 {
++		t.Fatal("srcip entry was not rolled back")
++	}
++}
++
+ // TestOnEndpointDelete_BestEffortOnMissingEntry verifies that deleting a
+ // non-existent endpoint does not return an error.
+ func TestOnEndpointDelete_BestEffortOnMissingEntry(t *testing.T) {
+@@ -222,6 +244,18 @@ func TestOnEndpointDelete_BestEffortOnMissingEntry(t *testing.T) {
+ 	}
+ }
+ 
++func TestOnEndpointDelete_ReturnsBackendErrors(t *testing.T) {
++	mgr, srcIPFake, vlanMACFake := newTestManager(t)
++	srcIPFake.deleteErr = errors.New("src delete failed")
++	vlanMACFake.deleteErr = errors.New("vlan delete failed")
++	ep := &fakeEndpoint{ipv4: "172.16.0.1", id: 5, vlanID: 50}
++
++	err := mgr.OnEndpointDelete(ep)
++	if !errors.Is(err, srcIPFake.deleteErr) || !errors.Is(err, vlanMACFake.deleteErr) {
++		t.Fatalf("expected both delete errors, got %v", err)
++	}
++}
++
+ // ---------------------------------------------------------------------------
+ // internal helpers
+ // ---------------------------------------------------------------------------
+diff --git a/pkg/nodediscovery/nodediscovery.go b/pkg/nodediscovery/nodediscovery.go
+index b689ddc570..b4f42dab66 100644
+--- a/pkg/nodediscovery/nodediscovery.go
++++ b/pkg/nodediscovery/nodediscovery.go
+@@ -268,6 +268,7 @@ func (n *NodeDiscovery) updateCiliumNodeResource(ctx context.Context, ln *node.L
+ 				logfields.Error, err,
+ 				logfields.Retries, retryCount,
+ 			)
++			time.Sleep(backoffDuration)
+ 			continue
+ 		}
+ 
+@@ -593,11 +594,17 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
+ 		}
+ 
+ 	case ipamOption.IPAMHuaweiCloud:
++		if option.Config.RoutingMode != option.RoutingModeNative {
++			return fmt.Errorf("HuaweiCloud IPAM requires native routing mode")
++		}
++		if strings.TrimSpace(n.config.HuaweiCloudTrunkInterface) == "" {
++			return fmt.Errorf("HuaweiCloud trunk interface is required")
++		}
+ 		nodeResource.Spec.HuaweiCloud = &huaweiCloudTypes.Spec{}
+ 
+ 		huaweiInstanceID, err := huaweiCloudMetadata.GetInstanceID(ctx)
+ 		if err != nil {
+-			logging.Fatal(n.logger, "Unable to retrieve InstanceID of own ECS instance", logfields.Error, err)
++			return fmt.Errorf("retrieve HuaweiCloud instance ID: %w", err)
+ 		}
+ 		if huaweiInstanceID == "" {
+ 			return errors.New("InstanceID of own ECS instance is empty")
+@@ -605,15 +612,15 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
+ 
+ 		huaweiInstanceType, err := huaweiCloudMetadata.GetInstanceType(ctx)
+ 		if err != nil {
+-			logging.Fatal(n.logger, "Unable to retrieve InstanceType of own ECS instance", logfields.Error, err)
++			return fmt.Errorf("retrieve HuaweiCloud instance type: %w", err)
+ 		}
+ 		huaweiVPCID, err := huaweiCloudMetadata.GetVPCID(ctx)
+ 		if err != nil {
+-			logging.Fatal(n.logger, "Unable to retrieve VPC ID of own ECS instance", logfields.Error, err)
++			return fmt.Errorf("retrieve HuaweiCloud VPC ID: %w", err)
+ 		}
+ 		huaweiZoneID, err := huaweiCloudMetadata.GetZoneID(ctx)
+ 		if err != nil {
+-			logging.Fatal(n.logger, "Unable to retrieve Zone ID of own ECS instance", logfields.Error, err)
++			return fmt.Errorf("retrieve HuaweiCloud zone ID: %w", err)
+ 		}
+ 
+ 		nodeResource.Spec.InstanceID = huaweiInstanceID
+@@ -624,7 +631,7 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
+ 
+ 		trunkInterfaceID, err := huaweiCloudMetadata.GetTrunkInterfaceID(ctx)
+ 		if err != nil {
+-			logging.Fatal(n.logger, "Unable to retrieve TrunkInterfaceID from instance metadata", logfields.Error, err)
++			return fmt.Errorf("retrieve HuaweiCloud trunk interface ID: %w", err)
+ 		}
+ 
+ 		nodeResource.Spec.HuaweiCloud.TrunkMode = true
+@@ -640,6 +647,9 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
+ 		if c := n.cniConfigManager.GetCustomNetConf(); c != nil {
+ 			applyHuaweiCloudNetConf(nodeResource.Spec.HuaweiCloud, c.HuaweiCloud)
+ 		}
++		if len(nodeResource.Spec.HuaweiCloud.Subnets) == 0 {
++			return fmt.Errorf("at least one HuaweiCloud subnet ID is required")
++		}
+ 	}
+ 
+ 	return nil
+diff --git a/pkg/option/config.go b/pkg/option/config.go
+index 668cdc9774..96c4208e19 100644
+--- a/pkg/option/config.go
++++ b/pkg/option/config.go
+@@ -1957,7 +1957,7 @@ func (c *DaemonConfig) TunnelingEnabled() bool {
+ // devices to implement some features.
+ func (c *DaemonConfig) AreDevicesRequired(kprCfg kpr.KPRConfig, wireguardEnabled, ipsecEnabled bool) bool {
+ 	return kprCfg.KubeProxyReplacement || c.EnableBPFMasquerade || c.EnableHostFirewall || wireguardEnabled ||
+-		c.EnableL2Announcements || c.ForceDeviceRequired || ipsecEnabled
++		c.EnableL2Announcements || c.ForceDeviceRequired || ipsecEnabled || c.IPAM == ipamOption.IPAMHuaweiCloud
+ }
+ 
+ // NeedEgressOnWireGuardDevice returns true if the agent needs to attach
+diff --git a/pkg/option/config_test.go b/pkg/option/config_test.go
+index fed08a1b72..829da3ff01 100644
+--- a/pkg/option/config_test.go
++++ b/pkg/option/config_test.go
+@@ -22,9 +22,15 @@ import (
+ 	"github.com/cilium/cilium/pkg/cidr"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++	"github.com/cilium/cilium/pkg/kpr"
+ 	"github.com/cilium/cilium/pkg/util"
+ )
+ 
++func TestAreDevicesRequiredHuaweiCloud(t *testing.T) {
++	cfg := &DaemonConfig{IPAM: ipamOption.IPAMHuaweiCloud}
++	require.True(t, cfg.AreDevicesRequired(kpr.KPRConfig{}, false, false))
++}
++
+ func TestValidateIPv6ClusterAllocCIDR(t *testing.T) {
+ 	valid1 := &DaemonConfig{
+ 		IPv6ClusterAllocCIDR: "fdfd::/64",
+-- 
+2.43.0
+
