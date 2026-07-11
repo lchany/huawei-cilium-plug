@@ -1,0 +1,536 @@
+From 2a7178b309c8aa83f0039c5bb6071e70fb30b4ef Mon Sep 17 00:00:00 2001
+From: HuaweiCloud Cilium Patch Bot
+ <huaweicloud-cilium-patches@example.invalid>
+Date: Sat, 11 Jul 2026 09:07:31 +0800
+Subject: [PATCH] huaweicloud: wire SubENI VLAN datapath
+
+---
+ bpf/Makefile                        |   1 +
+ bpf/bpf_host.c                      |  23 +++++
+ bpf/include/bpf/helpers_skb.h       |   4 +
+ bpf/lib/common.h                    |   3 +
+ bpf/lib/huaweicloud.h               | 133 ++++++++++++++++++++++++++++
+ daemon/cmd/daemon.go                |  10 ++-
+ daemon/cmd/daemon_main.go           |  24 +++--
+ daemon/cmd/ipam.go                  |   5 +-
+ pkg/datapath/iptables/iptables.go   |   5 +-
+ pkg/datapath/linux/config/config.go |  12 +++
+ pkg/datapath/linux/devices.go       |   4 +-
+ pkg/datapath/loader/loader.go       |   3 +-
+ pkg/endpoint/endpoint.go            |   2 +-
+ pkg/monitor/api/drop.go             |   3 +
+ plugins/cilium-cni/cilium-cni.go    |   2 +-
+ plugins/cilium-cni/types/types.go   |   2 +
+ 16 files changed, 219 insertions(+), 17 deletions(-)
+ create mode 100644 bpf/lib/huaweicloud.h
+
+diff --git a/bpf/Makefile b/bpf/Makefile
+index d8ea360bf6..64461bd171 100644
+--- a/bpf/Makefile
++++ b/bpf/Makefile
+@@ -152,6 +152,7 @@ bpf_overlay.o: bpf_overlay.ll
+ 	$(QUIET) ${LLC} ${LLC_FLAGS} -filetype=obj -o $@ $(patsubst %.o,%.ll,$@)
+ 
+ HOST_OPTIONS = $(LXC_OPTIONS) \
++	-DENABLE_IPV4:-DENABLE_HUAWEICLOUD_VLAN:-DHWC_TRUNK_IFINDEX: \
+ 	-DENABLE_IPV4:-DENABLE_IPV6:-DENCAP_IFINDEX:-DTUNNEL_MODE:-DENABLE_HOST_FIREWALL: \
+ 	-DENABLE_IPV4:-DENABLE_IPV6:-DENCAP_IFINDEX:-DTUNNEL_MODE:-DPOLICY_VERDICT_NOTIFY:-DENABLE_SOCKET_LB_UDP:-DENABLE_SOCKET_LB_TCP:-DENABLE_HOST_FIREWALL: \
+ 	-DENABLE_IPV4:-DENABLE_IPV6:-DENCAP_IFINDEX:-DTUNNEL_MODE:-DPOLICY_VERDICT_NOTIFY:-DENABLE_SOCKET_LB_UDP:-DENABLE_SOCKET_LB_TCP:-DENABLE_DSR: \
+diff --git a/bpf/bpf_host.c b/bpf/bpf_host.c
+index 5b955a8a6d..661c4dfa08 100644
+--- a/bpf/bpf_host.c
++++ b/bpf/bpf_host.c
+@@ -32,6 +32,9 @@
+ #endif
+ 
+ #include "lib/common.h"
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++#include "lib/huaweicloud.h"
++#endif
+ #include "lib/edt.h"
+ #include "lib/arp.h"
+ #include "lib/maps.h"
+@@ -953,6 +956,14 @@ __section("from-netdev")
+ int from_netdev(struct __ctx_buff *ctx)
+ {
+ 	__u32 __maybe_unused vlan_id;
++	int ret __maybe_unused;
++
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	ret = hwc_from_netdev(ctx);
++	if (IS_ERR(ret))
++		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
++					      METRIC_INGRESS);
++#endif
+ 
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 */
+@@ -1001,6 +1012,11 @@ int to_netdev(struct __ctx_buff *ctx __maybe_unused)
+ 	__u32 __maybe_unused vlan_id;
+ 	int ret = CTX_ACT_OK;
+ 
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	if (!proto)
++		validate_ethertype(ctx, &proto);
++#endif
++
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 */
+ 	if (ctx->vlan_present) {
+@@ -1064,6 +1080,13 @@ out:
+ 					      METRIC_EGRESS);
+ #endif /* ENABLE_HOST_FIREWALL */
+ 
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	ret = hwc_to_netdev(ctx, proto);
++	if (IS_ERR(ret))
++		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
++					      METRIC_EGRESS);
++#endif
++
+ #if defined(ENABLE_BANDWIDTH_MANAGER)
+ 	ret = edt_sched_departure(ctx);
+ 	/* No send_drop_notify_error() here given we're rate-limiting. */
+diff --git a/bpf/include/bpf/helpers_skb.h b/bpf/include/bpf/helpers_skb.h
+index d4bce19723..b72a13f6c5 100644
+--- a/bpf/include/bpf/helpers_skb.h
++++ b/bpf/include/bpf/helpers_skb.h
+@@ -24,6 +24,10 @@ static int BPF_FUNC(skb_load_bytes, struct __sk_buff *skb, __u32 off,
+ static int BPF_FUNC(skb_store_bytes, struct __sk_buff *skb, __u32 off,
+ 		    const void *from, __u32 len, __u32 flags);
+ 
++static int BPF_FUNC(skb_vlan_push, struct __sk_buff *skb, __be16 vlan_proto,
++		    __u16 vlan_tci);
++static int BPF_FUNC(skb_vlan_pop, struct __sk_buff *skb);
++
+ static int BPF_FUNC(l3_csum_replace, struct __sk_buff *skb, __u32 off,
+ 		    __u32 from, __u32 to, __u32 flags);
+ static int BPF_FUNC(l4_csum_replace, struct __sk_buff *skb, __u32 off,
+diff --git a/bpf/lib/common.h b/bpf/lib/common.h
+index dc7e23fc9d..62708b3e17 100644
+--- a/bpf/lib/common.h
++++ b/bpf/lib/common.h
+@@ -474,6 +474,9 @@ enum {
+ #define DROP_VLAN_FILTERED	-182
+ #define DROP_INVALID_VNI	-183
+ #define DROP_INVALID_TC_BUFFER  -184
++#define DROP_HWC_VLAN_PUSH_FAIL -185
++#define DROP_HWC_VLAN_POP_FAIL -186
++#define DROP_HWC_MAC_REWRITE_FAIL -187
+ #define DROP_NO_NODE_ID		-197
+ 
+ #define NAT_PUNT_TO_STACK	DROP_NAT_NOT_NEEDED
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+new file mode 100644
+index 0000000000..5e6dc30513
+--- /dev/null
++++ b/bpf/lib/huaweicloud.h
+@@ -0,0 +1,133 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/* Copyright Authors of Cilium */
++
++#pragma once
++
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++
++#include <linux/ip.h>
++
++#include "common.h"
++#include "eth.h"
++#include "drop.h"
++
++struct hwc_srcip_key4 {
++	__u32 addr;
++};
++
++struct hwc_srcip_key6 {
++	__u8 addr[16];
++};
++
++struct hwc_subeni_info {
++	__u16 vlan_id;
++	__u8 mac[6];
++	__u16 pad;
++	__u16 reserved;
++	__u32 lxc_id;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_srcip_key4);
++	__type(value, struct hwc_subeni_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_srcip4 __section_maps_btf;
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_srcip_key6);
++	__type(value, struct hwc_subeni_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_srcip6 __section_maps_btf;
++
++struct hwc_vlan_mac_key {
++	__u16 vlan_id;
++	__u8 mac[6];
++};
++
++struct hwc_ep_info {
++	__u32 ifindex;
++	__u16 lxc_id;
++	__u16 flags;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_vlan_mac_key);
++	__type(value, struct hwc_ep_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_vlan_mac __section_maps_btf;
++
++static __always_inline int
++hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
++{
++	struct hwc_subeni_info *info;
++	__u32 src_ip4 = 0;
++	struct hwc_srcip_key4 key = {};
++
++	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++		return CTX_ACT_OK;
++	if (proto != bpf_htons(ETH_P_IP))
++		return CTX_ACT_OK;
++
++	if (ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, saddr),
++			   &src_ip4, sizeof(src_ip4)) < 0)
++		return CTX_ACT_OK;
++
++	key.addr = src_ip4;
++	info = map_lookup_elem(&cilium_hwc_srcip4, &key);
++	if (!info)
++		return CTX_ACT_OK;
++
++	if (eth_store_saddr(ctx, info->mac, 0) < 0)
++		return DROP_HWC_MAC_REWRITE_FAIL;
++
++	if (skb_vlan_push(ctx, bpf_htons(ETH_P_8021Q), info->vlan_id) < 0)
++		return DROP_HWC_VLAN_PUSH_FAIL;
++
++	return CTX_ACT_OK;
++}
++
++static __always_inline int
++hwc_from_netdev(struct __ctx_buff *ctx)
++{
++	struct hwc_vlan_mac_key key __align_stack_8 = {};
++	struct hwc_ep_info *ep;
++	void *data, *data_end;
++	struct ethhdr *eth;
++
++	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++		return CTX_ACT_OK;
++	if (!ctx->vlan_present)
++		return CTX_ACT_OK;
++
++	data = (void *)(long)ctx->data;
++	data_end = (void *)(long)ctx->data_end;
++	eth = data;
++	if ((void *)(eth + 1) > data_end)
++		return DROP_INVALID;
++
++	key.vlan_id = ctx->vlan_tci & 0xfff;
++	key.mac[0] = eth->h_dest[0];
++	key.mac[1] = eth->h_dest[1];
++	key.mac[2] = eth->h_dest[2];
++	key.mac[3] = eth->h_dest[3];
++	key.mac[4] = eth->h_dest[4];
++	key.mac[5] = eth->h_dest[5];
++
++	ep = map_lookup_elem(&cilium_hwc_vlan_mac, &key);
++	if (!ep)
++		return CTX_ACT_OK;
++
++	if (skb_vlan_pop(ctx) < 0)
++		return DROP_HWC_VLAN_POP_FAIL;
++
++	ctx_change_type(ctx, PACKET_HOST);
++	return CTX_ACT_OK;
++}
++
++#endif
+diff --git a/daemon/cmd/daemon.go b/daemon/cmd/daemon.go
+index 816731c08f..e5ed54ce10 100644
+--- a/daemon/cmd/daemon.go
++++ b/daemon/cmd/daemon.go
+@@ -297,7 +297,7 @@ func (d *Daemon) restoreCiliumHostIPs(ipv6 bool, fromK8s net.IP) {
+ 		case ipamOption.IPAMCRD:
+ 			// The native routing CIDR is the pod CIDR in CRD mode.
+ 			cidrs = []*cidr.CIDR{option.Config.GetIPv4NativeRoutingCIDR()}
+-		case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++		case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 			// d.startIPAM() has already been called at this stage to initialize sharedNodeStore with ownNode info
+ 			// needed for GetVpcCIDRs()
+ 			cidrs = d.ipam.GetVpcCIDRs()
+@@ -718,6 +718,12 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
+ 		log.WithError(err).Error("error while opening/creating BPF maps")
+ 		return nil, nil, fmt.Errorf("error while opening/creating BPF maps: %w", err)
+ 	}
++	if cleanup, err := endpointmanager.RegisterHuaweiCloudSubENIManager(d.endpointManager); err != nil {
++		log.WithError(err).Error("error while registering HuaweiCloud SubENI manager")
++		return nil, nil, fmt.Errorf("error while registering HuaweiCloud SubENI manager: %w", err)
++	} else if cleanup != nil {
++		cleaner.cleanupFuncs.Add(cleanup)
++	}
+ 	// Upsert restored CIDRs after the new ipcache has been opened above
+ 	if len(restoredCIDRidentities) > 0 {
+ 		d.ipcache.UpsertGeneratedIdentities(restoredCIDRidentities, nil)
+@@ -1146,7 +1152,7 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
+ 	// Trigger refresh and update custom resource in the apiserver with all restored endpoints.
+ 	// Trigger after nodeDiscovery.StartDiscovery to avoid custom resource update conflict.
+ 	if option.Config.IPAM == ipamOption.IPAMCRD || option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure ||
+-		option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMClusterPoolV2 {
++		option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud || option.Config.IPAM == ipamOption.IPAMClusterPoolV2 {
+ 		if option.Config.EnableIPv6 {
+ 			d.ipam.IPv6Allocator.RestoreFinished()
+ 		}
+diff --git a/daemon/cmd/daemon_main.go b/daemon/cmd/daemon_main.go
+index eb6bb737c0..a9eceaa2b3 100644
+--- a/daemon/cmd/daemon_main.go
++++ b/daemon/cmd/daemon_main.go
+@@ -153,6 +153,10 @@ func skipInit(basePath string) bool {
+ 	}
+ }
+ 
++func usesEgressMultiHomeIPRuleCompat(ipamMode string) bool {
++	return ipamMode == ipamOption.IPAMAzure || ipamMode == ipamOption.IPAMHuaweiCloud
++}
++
+ func init() {
+ 	setupSleepBeforeFatal()
+ 	initializeFlags()
+@@ -490,6 +494,15 @@ func initializeFlags() {
+ 	flags.String(option.IPAM, ipamOption.IPAMClusterPool, "Backend to use for IPAM")
+ 	option.BindEnv(option.IPAM)
+ 
++	flags.String(option.HuaweiCloudTrunkInterface, "eth0", "HuaweiCloud trunk ENI interface name used for Sub-ENI VLAN mode")
++	option.BindEnv(option.HuaweiCloudTrunkInterface)
++
++	flags.StringSlice(option.HuaweiCloudSubnetIDs, []string{}, "Ordered list of subnet IDs for HuaweiCloud Sub-ENI creation")
++	option.BindEnv(option.HuaweiCloudSubnetIDs)
++
++	flags.StringSlice(option.HuaweiCloudSecurityGroupIDs, []string{}, "Security group IDs to attach to HuaweiCloud Sub-ENIs")
++	option.BindEnv(option.HuaweiCloudSecurityGroupIDs)
++
+ 	flags.String(option.CNIChainingMode, "", "Enable CNI chaining with the specified plugin")
+ 	option.BindEnv(option.CNIChainingMode)
+ 
+@@ -1528,15 +1541,12 @@ func initEnv(cmd *cobra.Command) {
+ 		}
+ 	}
+ 
+-	if option.Config.IPAM == ipamOption.IPAMAzure {
++	if usesEgressMultiHomeIPRuleCompat(option.Config.IPAM) {
+ 		option.Config.EgressMultiHomeIPRuleCompat = true
+-		log.WithFields(logrus.Fields{
+-			"URL": "https://github.com/cilium/cilium/issues/14705",
+-		}).Infof(
+-			"Auto-set %q to `true` because the Azure datapath has not been migrated over to a new scheme. "+
+-				"A future version of Cilium will support a newer Azure datapath. "+
+-				"Connectivity is not affected.",
++		log.Infof(
++			"Auto-set %q to `true` because the %s datapath uses the trunk interface routing-table scheme.",
+ 			option.EgressMultiHomeIPRuleCompat,
++			option.Config.IPAM,
+ 		)
+ 	}
+ 
+diff --git a/daemon/cmd/ipam.go b/daemon/cmd/ipam.go
+index bef3b11ffb..92d55126ce 100644
+--- a/daemon/cmd/ipam.go
++++ b/daemon/cmd/ipam.go
+@@ -254,6 +254,7 @@ func (d *Daemon) allocateDatapathIPs(family types.NodeAddressingFamily) (routerI
+ 
+ 	if (option.Config.IPAM == ipamOption.IPAMENI ||
+ 		option.Config.IPAM == ipamOption.IPAMAlibabaCloud ||
++		option.Config.IPAM == ipamOption.IPAMHuaweiCloud ||
+ 		option.Config.IPAM == ipamOption.IPAMAzure) && result != nil {
+ 		var routingInfo *linuxrouting.RoutingInfo
+ 		routingInfo, err = linuxrouting.NewRoutingInfo(result.GatewayIP, result.CIDRs,
+@@ -301,7 +302,7 @@ func (d *Daemon) allocateHealthIPs() error {
+ 			// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the ENI MAC addr
+ 			// in order to set up rules and routes on the local node to direct
+ 			// endpoint traffic out of the ENIs.
+-			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 				var err error
+ 				if d.healthEndpointRouting, err = parseRoutingInfo(result); err != nil {
+ 					log.WithError(err).Warn("Unable to allocate health information for ENI")
+@@ -375,7 +376,7 @@ func (d *Daemon) allocateIngressIPs() error {
+ 			// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the
+ 			// ENI MAC addr in order to set up rules and routes on the local node to
+ 			// direct ingress traffic out of the ENIs.
+-			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 				if ingressRouting, err := parseRoutingInfo(result); err != nil {
+ 					log.WithError(err).Warn("Unable to allocate ingress information for ENI")
+ 				} else {
+diff --git a/pkg/datapath/iptables/iptables.go b/pkg/datapath/iptables/iptables.go
+index b35944b752..0c4f034756 100644
+--- a/pkg/datapath/iptables/iptables.go
++++ b/pkg/datapath/iptables/iptables.go
+@@ -959,7 +959,8 @@ func getDeliveryInterface(ifName string) string {
+ 		return "lxc+"
+ 
+ 	case option.Config.IPAM == ipamOption.IPAMENI ||
+-		option.Config.IPAM == ipamOption.IPAMAlibabaCloud:
++		option.Config.IPAM == ipamOption.IPAMAlibabaCloud ||
++		option.Config.IPAM == ipamOption.IPAMHuaweiCloud:
+ 		return "lxc+"
+ 
+ 	default:
+@@ -1454,7 +1455,7 @@ func (m *IptablesManager) installRules(ifName string) error {
+ 	// and route them back the same way even if the pod responding is using
+ 	// the IP of a different interface. Please see note in Reinitialize()
+ 	// in pkg/datapath/loader for more details.
+-	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 		if err := m.addCiliumENIRules(); err != nil {
+ 			return fmt.Errorf("cannot install rules for ENI multi-node NodePort: %w", err)
+ 		}
+diff --git a/pkg/datapath/linux/config/config.go b/pkg/datapath/linux/config/config.go
+index 71ee9d3f53..fca95a7bc5 100644
+--- a/pkg/datapath/linux/config/config.go
++++ b/pkg/datapath/linux/config/config.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/link"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	"github.com/cilium/cilium/pkg/identity"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/labels"
+ 	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -207,6 +208,17 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
+ 		cDefinesMap["ENABLE_IPV4"] = "1"
+ 	}
+ 
++	if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++		cDefinesMap["ENABLE_HUAWEICLOUD_VLAN"] = "1"
++		trunkIfIndex, err := link.GetIfIndex(option.Config.HuaweiCloudTrunkInterface)
++		if err != nil {
++			return err
++		}
++		cDefinesMap["HWC_TRUNK_IFINDEX"] = fmt.Sprintf("%d", trunkIfIndex)
++	} else {
++		cDefinesMap["HWC_TRUNK_IFINDEX"] = "0"
++	}
++
+ 	if option.Config.EnableIPv6 {
+ 		cDefinesMap["ENABLE_IPV6"] = "1"
+ 	}
+diff --git a/pkg/datapath/linux/devices.go b/pkg/datapath/linux/devices.go
+index 1fa6b07109..a7da67dd1b 100644
+--- a/pkg/datapath/linux/devices.go
++++ b/pkg/datapath/linux/devices.go
+@@ -18,6 +18,7 @@ import (
+ 
+ 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
+ 	"github.com/cilium/cilium/pkg/defaults"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -406,7 +407,8 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
+ func (dm *DeviceManager) AreDevicesRequired() bool {
+ 	return option.Config.EnableNodePort ||
+ 		option.Config.EnableHostFirewall ||
+-		option.Config.EnableBandwidthManager
++		option.Config.EnableBandwidthManager ||
++		option.Config.IPAM == ipamOption.IPAMHuaweiCloud
+ }
+ 
+ // expandDevices expands all wildcard device names to concrete devices.
+diff --git a/pkg/datapath/loader/loader.go b/pkg/datapath/loader/loader.go
+index 09575332f1..0f7b2b4a92 100644
+--- a/pkg/datapath/loader/loader.go
++++ b/pkg/datapath/loader/loader.go
+@@ -22,6 +22,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	"github.com/cilium/cilium/pkg/elf"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -241,7 +242,7 @@ func (l *Loader) reloadHostDatapath(ctx context.Context, ep datapath.Endpoint, o
+ 		symbols = append(symbols, symbolFromHostNetdevEp)
+ 		directions = append(directions, dirIngress)
+ 		if option.Config.EnableNodePort || option.Config.EnableHostFirewall ||
+-			option.Config.EnableBandwidthManager {
++			option.Config.EnableBandwidthManager || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 			interfaceNames = append(interfaceNames, device)
+ 			symbols = append(symbols, symbolToHostNetdevEp)
+ 			directions = append(directions, dirEgress)
+diff --git a/pkg/endpoint/endpoint.go b/pkg/endpoint/endpoint.go
+index 0f7e1083fb..fb15a7c8cb 100644
+--- a/pkg/endpoint/endpoint.go
++++ b/pkg/endpoint/endpoint.go
+@@ -2159,7 +2159,7 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
+ 		}
+ 	}
+ 
+-	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 		e.getLogger().WithFields(logrus.Fields{
+ 			"ep":     e.GetID(),
+ 			"ipAddr": e.GetIPv4Address(),
+diff --git a/pkg/monitor/api/drop.go b/pkg/monitor/api/drop.go
+index 13bc0d84e2..d7992606aa 100644
+--- a/pkg/monitor/api/drop.go
++++ b/pkg/monitor/api/drop.go
+@@ -80,6 +80,9 @@ var errors = map[uint8]string{
+ 	182: "VLAN traffic disallowed by VLAN filter",
+ 	183: "Incorrect VNI from VTEP",
+ 	184: "Failed to update or lookup TC buffer",
++	185: "HuaweiCloud: VLAN push failed",
++	186: "HuaweiCloud: VLAN pop failed",
++	187: "HuaweiCloud: MAC rewrite failed",
+ 	197: "No node ID found",
+ }
+ 
+diff --git a/plugins/cilium-cni/cilium-cni.go b/plugins/cilium-cni/cilium-cni.go
+index 5eca17daeb..91e49107d1 100644
+--- a/plugins/cilium-cni/cilium-cni.go
++++ b/plugins/cilium-cni/cilium-cni.go
+@@ -560,7 +560,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
+ 	}
+ 
+ 	switch conf.IpamMode {
+-	case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++	case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 		err = interfaceAdd(ipConfig, ipam.IPV4, conf)
+ 		if err != nil {
+ 			err = fmt.Errorf("unable to setup interface datapath: %s", err)
+diff --git a/plugins/cilium-cni/types/types.go b/plugins/cilium-cni/types/types.go
+index e84e949968..e7f3b2f0f3 100644
+--- a/plugins/cilium-cni/types/types.go
++++ b/plugins/cilium-cni/types/types.go
+@@ -16,6 +16,7 @@ import (
+ 	alibabaCloudTypes "github.com/cilium/cilium/pkg/alibabacloud/eni/types"
+ 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
+ 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+ )
+ 
+@@ -28,6 +29,7 @@ type NetConf struct {
+ 	Azure        azureTypes.AzureSpec   `json:"azure,omitempty"`
+ 	IPAM         IPAM                   `json:"ipam,omitempty"` // Shadows the JSON field "ipam" in cniTypes.NetConf.
+ 	AlibabaCloud alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
++	HuaweiCloud  huaweiCloudTypes.Spec  `json:"huawei-cloud,omitempty"`
+ 	EnableDebug  bool                   `json:"enable-debug"`
+ 	LogFormat    string                 `json:"log-format"`
+ 	LogFile      string                 `json:"log-file"`
+-- 
+2.43.0
+
