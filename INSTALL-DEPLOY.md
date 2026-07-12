@@ -239,6 +239,15 @@ repository 直接写成 `operator-huaweicloud`，Chart 会生成错误的双后�
 
 ## 9. Helm 安装
 
+Chart 本身不携带这版源码生成的 CRD 清单；安装前必须先应用源码中的 CRD。否则
+`CiliumNode` 等资源无法被 API Server 识别，Operator 和 Agent 无法正常工作。
+
+```bash
+cd "$WORKDIR/cilium"
+kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2/
+kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2alpha1/
+```
+
 先检查渲染结果：
 
 ```bash
@@ -268,7 +277,7 @@ helm upgrade --install cilium ./install/kubernetes/cilium \
 kubectl -n kube-system rollout status ds/cilium --timeout=5m
 kubectl -n kube-system rollout status deploy/cilium-operator --timeout=5m
 kubectl get ciliumnodes
-kubectl get ciliumnode "$(hostname)" -o yaml
+kubectl get ciliumnodes -o yaml
 ```
 
 检查 Operator 日志中的密钥脱敏：
