@@ -15,13 +15,21 @@
 节点必须是支持 SubENI 的华为云 ECS。部署账号需要查询 ECS、VPC、虚拟子网、安全组
 和端口，并有创建、查询、删除 SubENI 的权限。
 
-源码、Go 缓存、临时目录和镜像缓存会占用较多空间。建议把工作目录和容器运行时的
-数据目录放到挂载盘。
+源码、Go 缓存、临时目录、镜像层和导出的 tar 包只能放在挂载盘，不能写入系统盘。
+Docker 的 data-root 也必须位于同一块挂载盘；只把源码放到挂载盘并不能避免 BuildKit
+把镜像层写入系统盘。
 
 ```bash
 export WORKDIR=/mnt/cilium-v1.12.19-huaweicloud
 mkdir -p "$WORKDIR"
+
+findmnt -T "$WORKDIR" -o SOURCE,TARGET,FSTYPE
+docker info --format 'DockerRoot={{.DockerRootDir}}'
+findmnt -T "$(docker info --format '{{.DockerRootDir}}')" -o SOURCE,TARGET,FSTYPE
 ```
+
+上述两个 `findmnt` 命令必须显示同一个非根挂载设备。若任一位置属于 `/`，先迁移
+Docker data-root，再开始构建。
 
 ## 2. 获取 patch 分支
 
@@ -80,46 +88,32 @@ git log --oneline --max-count=6
 
 ## 5. 编译和测试
 
-把 Go 缓存和临时文件放在工作目录：
+归档提供了 `build-local.sh`，它会在开始前校验工作目录和 Docker data-root 是否处于
+同一块非根挂载盘；不满足条件会直接退出。脚本会清理上一轮的 Go 缓存、临时目录、
+导出镜像和 BuildKit 缓存，再运行定向测试、构建镜像并导出校验和。
 
 ```bash
-cd "$WORKDIR/cilium"
-rm -rf "$WORKDIR/.cache/go-build" "$WORKDIR/.tmp"
-mkdir -p "$WORKDIR/.cache/go-build" "$WORKDIR/.tmp"
-export GOCACHE="$WORKDIR/.cache/go-build"
-export GOTMPDIR="$WORKDIR/.tmp"
-export TMPDIR="$WORKDIR/.tmp"
+chmod +x "$WORKDIR/huawei-cilium-patches/build-local.sh"
+"$WORKDIR/huawei-cilium-patches/build-local.sh" "$WORKDIR"
 ```
 
-先运行 HuaweiCloud 相关测试：
+成功后，构建状态、日志和镜像产物都位于 `$WORKDIR`：
 
 ```bash
-go test -mod=vendor ./pkg/huaweicloud/...
-go test -mod=vendor -tags=ipam_provider_huaweicloud ./pkg/ipam/... ./operator/...
+cat "$WORKDIR/build.status"
+cat "$WORKDIR/images/SHA256SUMS"
 ```
-
-构建二进制：
-
-```bash
-make build-container
-make -C operator cilium-operator-huaweicloud
-```
-
-每次重新构建前删除旧产物，避免把上一轮二进制装进镜像。Docker 的 data-root 和
-Buildx 存储不受 `GOCACHE` 控制，需要另外确认它们也位于容量足够的磁盘。
 
 ## 6. 构建镜像
 
-将镜像仓库和 tag 换成实际值：
+默认构建输出为本地镜像和 `$WORKDIR/images/` 下的 tar 包。需要使用目标镜像仓库名称时，
+在执行构建脚本前指定仓库、命名空间和 tag：
 
 ```bash
 export DOCKER_REGISTRY=registry.example.com
 export DOCKER_DEV_ACCOUNT=network
 export DOCKER_IMAGE_TAG=v1.12.19-huaweicloud
-export DOCKER_FLAGS=--push
-
-make docker-cilium-image
-make docker-operator-huaweicloud-image
+"$WORKDIR/huawei-cilium-patches/build-local.sh" "$WORKDIR"
 ```
 
 最终应有 Agent 和 HuaweiCloud Operator 两个镜像：

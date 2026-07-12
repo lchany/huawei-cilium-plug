@@ -25,6 +25,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
 ├── series
 ├── apply.sh
+├── build-local.sh
 ├── INSTALL-DEPLOY.md
 └── README.md
 ```
