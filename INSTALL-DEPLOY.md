@@ -147,7 +147,7 @@ OPERATOR_IMAGE=registry.example.com/network/operator-huaweicloud:v1.12.19-huawei
 
 docker image inspect "$OPERATOR_IMAGE" \
   --format '{{json .Config.Cmd}}'
-docker run --rm "$OPERATOR_IMAGE" --help >/dev/null
+docker run --rm "$OPERATOR_IMAGE" /usr/bin/cilium-operator --help >/dev/null
 ```
 
 第一条命令必须输出：
@@ -155,6 +155,10 @@ docker run --rm "$OPERATOR_IMAGE" --help >/dev/null
 ```text
 ["/usr/bin/cilium-operator"]
 ```
+
+Operator 镜像使用 `CMD` 而不是 `ENTRYPOINT`。因此不能直接在镜像名后追加
+`--help`，否则 Docker 会用 `--help` 覆盖整个默认命令；验证二进制时必须像上面一样
+显式写出 `/usr/bin/cilium-operator`。
 
 如果输出仍包含 `${OPERATOR_VARIANT}`，说明没有应用 `series` 中的 `0004` patch，
 该镜像不可用于部署，应清理旧二进制、镜像和 BuildKit 缓存后重新构建。
