@@ -114,6 +114,11 @@ export DOCKER_REGISTRY=registry.example.com
 export DOCKER_DEV_ACCOUNT=network
 export DOCKER_IMAGE_TAG=v1.12.19-huaweicloud
 "$WORKDIR/huawei-cilium-patches/build-local.sh" "$WORKDIR"
+
+# 登录信息由当前用户的 Docker 配置管理；构建脚本不会读取或保存凭据。
+docker login "$DOCKER_REGISTRY"
+docker push "$DOCKER_REGISTRY/$DOCKER_DEV_ACCOUNT/cilium:$DOCKER_IMAGE_TAG"
+docker push "$DOCKER_REGISTRY/$DOCKER_DEV_ACCOUNT/operator-huaweicloud:$DOCKER_IMAGE_TAG"
 ```
 
 最终应有 Agent 和 HuaweiCloud Operator 两个镜像：
