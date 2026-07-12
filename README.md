@@ -22,6 +22,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0002-huaweicloud-datapath-runtime.patch
 ├── 0003-huaweicloud-generated-tests-dependencies.patch
 ├── 0004-images-fix-operator-runtime-command-expansion.patch
+├── 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
@@ -50,12 +51,19 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 `${OPERATOR_VARIANT}` 字面量路径的问题。最终镜像统一使用
 `/usr/bin/cilium-operator`，并在部署文档中提供构建后验证步骤。
 
+### 0005：保留 Helm variant 启动路径
+
+Helm 的 HuaweiCloud Operator Deployment 会显式执行
+`cilium-operator-huaweicloud`。本 patch 在保留通用
+`/usr/bin/cilium-operator` 默认命令的同时，也保留 variant 二进制路径，确保两种
+启动方式均可用。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 4 个 patch"]
+    patches["按 series 应用 5 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]

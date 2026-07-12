@@ -1,0 +1,25 @@
+From 0d3ddd6da44ba13da713e0ecb77dc8d9572b8231 Mon Sep 17 00:00:00 2001
+From: HuaweiCloud Cilium Patch Bot
+ <huaweicloud-cilium-patches@example.invalid>
+Date: Sat, 11 Jul 2026 10:53:22 +0800
+Subject: [PATCH] images: retain variant operator binary for Helm command
+
+---
+ images/operator/Dockerfile | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/images/operator/Dockerfile b/images/operator/Dockerfile
+index ea38511d..c42253df 100644
+--- a/images/operator/Dockerfile
++++ b/images/operator/Dockerfile
+@@ -66,6 +66,7 @@ ARG OPERATOR_VARIANT
+ LABEL maintainer="maintainer@cilium.io"
+ COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ COPY --from=gops /out/${TARGETOS}/${TARGETARCH}/bin/gops /bin/gops
++COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/usr/bin/cilium-${OPERATOR_VARIANT} /usr/bin/cilium-${OPERATOR_VARIANT}
+ COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/usr/bin/cilium-${OPERATOR_VARIANT} /usr/bin/cilium-operator
+ COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/LICENSE.all /LICENSE.all
+ WORKDIR /
+-- 
+2.43.0
+

@@ -32,7 +32,7 @@ git clone --branch patch-archive/huaweicloud-v1.12.19 \
   huawei-cilium-patches
 ```
 
-目录中应有 4 个编号 patch、`series`、`apply.sh` 和两份文档。
+目录中应有 5 个编号 patch、`series`、`apply.sh` 和两份文档。
 
 ## 3. 获取 Cilium v1.12.19
 
@@ -69,10 +69,10 @@ a1d7fbd43b563c809330b1c3e28165a3e7ff43aa
 "$WORKDIR/huawei-cilium-patches/apply.sh"
 ```
 
-成功后会新增 4 个提交：
+成功后会新增 5 个提交：
 
 ```bash
-git log --oneline --max-count=5
+git log --oneline --max-count=6
 ```
 
 如果 `git am` 失败，先执行 `git am --abort`。确认源码基线和工作区状态后再重试；不要
@@ -137,8 +137,11 @@ registry.example.com/network/operator-huaweicloud:v1.12.19-huaweicloud
 字面量的不存在路径。
 
 本归档通过 `0004-images-fix-operator-runtime-command-expansion.patch` 修复该问题：构建时
-仍按 variant 选择 `cilium-operator-huaweicloud`，最终镜像内统一安装为
+仍按 variant 选择 `cilium-operator-huaweicloud`，最终镜像内安装稳定的
 `/usr/bin/cilium-operator`，并把默认启动命令固定为该路径。
+随后 `0005-images-retain-variant-operator-binary-for-Helm-comma.patch` 保留
+`/usr/bin/cilium-operator-huaweicloud`，因为 Helm Deployment 会显式使用该 variant
+命令。两个路径都必须存在。
 
 构建完成后必须检查镜像配置并实际启动二进制：
 
@@ -148,6 +151,7 @@ OPERATOR_IMAGE=registry.example.com/network/operator-huaweicloud:v1.12.19-huawei
 docker image inspect "$OPERATOR_IMAGE" \
   --format '{{json .Config.Cmd}}'
 docker run --rm "$OPERATOR_IMAGE" /usr/bin/cilium-operator --help >/dev/null
+docker run --rm "$OPERATOR_IMAGE" /usr/bin/cilium-operator-huaweicloud --help >/dev/null
 ```
 
 第一条命令必须输出：
@@ -192,7 +196,7 @@ image:
 operator:
   replicas: 1
   image:
-    repository: registry.example.com/network/operator-huaweicloud
+    repository: registry.example.com/network/operator
     tag: v1.12.19-huaweicloud
     pullPolicy: IfNotPresent
 
@@ -220,6 +224,11 @@ ipv4NativeRoutingCIDR: "<VPC IPv4 CIDR>"
 enableIPv4Masquerade: true
 egressMasqueradeInterfaces: "eth0"
 ```
+
+`operator.image.repository` 必须是不带云厂商后缀的基础仓库名。Chart 会根据
+`huaweicloud.enabled: true` 自动拼接 `-huaweicloud`，因此上述配置实际拉取的是
+`registry.example.com/network/operator-huaweicloud:v1.12.19-huaweicloud`。若把
+repository 直接写成 `operator-huaweicloud`，Chart 会生成错误的双后缀镜像名。
 
 `huaweicloud.trunkInterface` 和 `egressMasqueradeInterfaces` 必须填写同一张实际 trunk
 网卡。SubENI Pod 地址不属于 Cilium 默认 PodCIDR；缺少出口 masquerade 配置时，Pod
