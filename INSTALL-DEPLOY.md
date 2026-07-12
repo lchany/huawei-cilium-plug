@@ -32,7 +32,7 @@ git clone --branch patch-archive/huaweicloud-v1.12.19 \
   huawei-cilium-patches
 ```
 
-目录中应有 3 个编号 patch、`series`、`apply.sh` 和两份文档。
+目录中应有 4 个编号 patch、`series`、`apply.sh` 和两份文档。
 
 ## 3. 获取 Cilium v1.12.19
 
@@ -69,10 +69,10 @@ a1d7fbd43b563c809330b1c3e28165a3e7ff43aa
 "$WORKDIR/huawei-cilium-patches/apply.sh"
 ```
 
-成功后会新增 3 个提交：
+成功后会新增 4 个提交：
 
 ```bash
-git log --oneline --max-count=4
+git log --oneline --max-count=5
 ```
 
 如果 `git am` 失败，先执行 `git am --abort`。确认源码基线和工作区状态后再重试；不要
@@ -128,6 +128,36 @@ make docker-operator-huaweicloud-image
 registry.example.com/network/cilium:v1.12.19-huaweicloud
 registry.example.com/network/operator-huaweicloud:v1.12.19-huaweicloud
 ```
+
+### Operator 默认启动命令修复与验证
+
+官方 Cilium `v1.12.19` 基线的 `images/operator/Dockerfile` 使用 JSON 格式的
+`CMD ["/usr/bin/cilium-${OPERATOR_VARIANT}"]`。JSON/exec 格式的 `CMD` 不会在容器
+启动时展开构建参数，因此镜像默认启动会尝试执行一个包含 `${OPERATOR_VARIANT}`
+字面量的不存在路径。
+
+本归档通过 `0004-images-fix-operator-runtime-command-expansion.patch` 修复该问题：构建时
+仍按 variant 选择 `cilium-operator-huaweicloud`，最终镜像内统一安装为
+`/usr/bin/cilium-operator`，并把默认启动命令固定为该路径。
+
+构建完成后必须检查镜像配置并实际启动二进制：
+
+```bash
+OPERATOR_IMAGE=registry.example.com/network/operator-huaweicloud:v1.12.19-huaweicloud
+
+docker image inspect "$OPERATOR_IMAGE" \
+  --format '{{json .Config.Cmd}}'
+docker run --rm "$OPERATOR_IMAGE" --help >/dev/null
+```
+
+第一条命令必须输出：
+
+```text
+["/usr/bin/cilium-operator"]
+```
+
+如果输出仍包含 `${OPERATOR_VARIANT}`，说明没有应用 `series` 中的 `0004` patch，
+该镜像不可用于部署，应清理旧二进制、镜像和 BuildKit 缓存后重新构建。
 
 ## 7. 确认 trunk 网卡
 

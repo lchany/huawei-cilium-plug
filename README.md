@@ -21,6 +21,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0001-huaweicloud-control-plane.patch
 ├── 0002-huaweicloud-datapath-runtime.patch
 ├── 0003-huaweicloud-generated-tests-dependencies.patch
+├── 0004-images-fix-operator-runtime-command-expansion.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
@@ -43,12 +44,18 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 包含华为云 Go SDK vendor、Go 依赖、CRD/DeepCopy 生成文件、CI 构建配置和测试程序。
 这一组体积最大，主要原因是 vendor SDK，不代表有同等规模的手写业务代码。
 
+### 0004：Operator 镜像启动修复
+
+修复 upstream Cilium `v1.12.19` Operator 镜像默认启动命令包含未展开的
+`${OPERATOR_VARIANT}` 字面量路径的问题。最终镜像统一使用
+`/usr/bin/cilium-operator`，并在部署文档中提供构建后验证步骤。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 3 个 patch"]
+    patches["按 series 应用 4 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]
@@ -70,5 +77,5 @@ git rev-parse HEAD
 ## 更新 patch
 
 不要直接手改 patch 文件。先在独立开发分支修改和测试源码，再按控制面、数据面、
-依赖/生成物/测试三个职责重新生成 patch。每次更新后都要在干净基线上运行
+依赖/生成物/测试和独立修复等职责重新生成 patch。每次更新后都要在干净基线上运行
 `apply.sh`，并比较重放结果和已验证源码树。
