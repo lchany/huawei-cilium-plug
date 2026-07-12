@@ -15,6 +15,37 @@
 节点必须是支持 SubENI 的华为云 ECS。部署账号需要查询 ECS、VPC、虚拟子网、安全组
 和端口，并有创建、查询、删除 SubENI 的权限。
 
+### Kubernetes 镜像仓库不可达时的处理
+
+若节点访问 `registry.k8s.io` 超时，先从可访问的镜像仓库预拉取控制平面镜像，并在
+初始化时显式指定同一镜像仓库。不要让 `kubeadm init` 持续重试超时的默认仓库。
+
+```bash
+K8S_VERSION=v1.24.13
+K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers
+
+kubeadm config images pull \
+  --kubernetes-version="$K8S_VERSION" \
+  --image-repository="$K8S_IMAGE_REPOSITORY" \
+  --cri-socket=unix:///run/containerd/containerd.sock
+
+kubeadm init \
+  --kubernetes-version="$K8S_VERSION" \
+  --image-repository="$K8S_IMAGE_REPOSITORY" \
+  --apiserver-advertise-address="<控制平面私网 IP>" \
+  --cri-socket=unix:///run/containerd/containerd.sock
+```
+
+工作节点加入前，如果 kubeadm 仍尝试从 `registry.k8s.io` 拉取 kube-proxy，可预拉取并
+给本地镜像加上默认仓库标签，再执行正常的 `kubeadm join`：
+
+```bash
+crictl pull "$K8S_IMAGE_REPOSITORY/kube-proxy:$K8S_VERSION"
+ctr -n k8s.io images tag \
+  "$K8S_IMAGE_REPOSITORY/kube-proxy:$K8S_VERSION" \
+  "registry.k8s.io/kube-proxy:$K8S_VERSION"
+```
+
 源码、Go 缓存、临时目录、镜像层和导出的 tar 包只能放在挂载盘，不能写入系统盘。
 Docker 的 data-root 也必须位于同一块挂载盘；只把源码放到挂载盘并不能避免 BuildKit
 把镜像层写入系统盘。
@@ -277,7 +308,11 @@ kubectl -n kube-system rollout status ds/cilium --timeout=5m
 kubectl -n kube-system rollout status deploy/cilium-operator --timeout=5m
 kubectl get ciliumnodes
 kubectl get ciliumnodes -o yaml
+kubectl -n kube-system exec ds/cilium -- cilium status --verbose
 ```
+
+Cilium `v1.12` 的 `cilium status` 不支持 `--wait` 参数。不要把该参数用于本版本的
+自动检查；DaemonSet 和 Deployment 的 rollout status 已负责等待就绪。
 
 检查 Operator 日志中的密钥脱敏：
 
@@ -296,4 +331,8 @@ iptables-save -t nat | grep 'cilium masquerade non-cluster'
 
 规则中的出口网卡应与 `trunkInterface` 相同，目标排除 CIDR 应是实际 VPC CIDR。最后
 创建普通 Pod，验证 SubENI IP、ClusterIP Service、集群 DNS、NetworkPolicy 和公网
-访问。只看到 Pod Running 不代表数据面已经完整通过。
+访问。只看到 Pod Running 不代表数据面已经完整通过。若测试 Pod 被固定调度到带污点的
+控制平面，请同时容忍历史 `node-role.kubernetes.io/master:NoSchedule` 和
+`node-role.kubernetes.io/control-plane:NoSchedule`；不同 Kubernetes 版本可能同时存在
+这两个污点。基于 BusyBox `httpd` 做 HTTP 验证时，应先创建可返回 200 的首页，避免把
+404 响应误判为网络不通。
