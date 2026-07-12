@@ -1,0 +1,38 @@
+# 复制为 huawei-values.yaml 后再填写尖括号中的实际值。
+# 此文件不包含任何凭据，可以提交到版本库；huawei-values.yaml 不可以。
+image:
+  repository: registry.example.com/network/cilium
+  tag: v1.12.19-huaweicloud
+  pullPolicy: IfNotPresent
+
+operator:
+  replicas: 1
+  image:
+    # 不要加 -huaweicloud；Chart 会自动追加该后缀。
+    repository: registry.example.com/network/operator
+    tag: v1.12.19-huaweicloud
+    pullPolicy: IfNotPresent
+
+ipam:
+  mode: huaweicloud
+
+huaweicloud:
+  enabled: true
+  accessKey: "<AK>"
+  secretKey: "<SK>"
+  projectID: "<项目 ID>"
+  region: "<区域，例如 cn-south-1>"
+  vpcID: "<VPC ID>"
+  trunkInterface: "<trunk 网卡，例如 eth0>"
+  subnetIDs:
+    - "<SubENI 子网 ID>"
+  securityGroupIDs:
+    - "<安全组 ID>"
+  subENITags: {}
+  releaseExcessIPs: false
+
+tunnel: disabled
+kubeProxyReplacement: disabled
+ipv4NativeRoutingCIDR: "<VPC IPv4 CIDR>"
+enableIPv4Masquerade: true
+egressMasqueradeInterfaces: "<与 trunkInterface 相同的网卡>"

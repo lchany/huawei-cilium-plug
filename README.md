@@ -26,6 +26,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── series
 ├── apply.sh
 ├── build-local.sh
+├── huaweicloud-values.example.yaml
 ├── INSTALL-DEPLOY.md
 └── README.md
 ```
@@ -81,7 +82,9 @@ git rev-parse HEAD
 /path/to/huawei-cilium-patches/apply.sh
 ```
 
-完整步骤见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
+从准备、构建、镜像分发到验收的完整步骤见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
+部署配置从 [huaweicloud-values.example.yaml](huaweicloud-values.example.yaml) 复制，填写
+实际云资源后使用；不要提交包含 AK/SK 的 values 文件。
 
 ## 更新 patch
 

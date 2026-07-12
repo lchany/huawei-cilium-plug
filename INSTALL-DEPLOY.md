@@ -3,6 +3,21 @@
 本文说明如何把 HuaweiCloud patch 应用到 upstream Cilium `v1.12.19`，构建镜像并
 部署到华为云 Kubernetes 集群。
 
+## 使用顺序
+
+按下面顺序执行，不要跳步：
+
+1. 准备挂载盘、构建工具和具备 SubENI 权限的云账号。
+2. 获取固定版本的 Cilium 源码并应用 patch。
+3. 构建并校验 Agent、Operator 镜像。
+4. 选择镜像仓库分发或离线导入其中一种方式。
+5. 确认 Kubernetes 集群节点均为 `Ready`，再填写 values、安装 CRD 和 Helm Chart。
+6. 按部署后检查和数据面验收逐项确认。
+
+本文不负责替代现有的 Kubernetes 节点基线安装流程。执行 Helm 安装前，必须已有一个
+可用的 Kubernetes `v1.24` 集群、可工作的 `kubectl` context，以及已安装的
+containerd、kubeadm、kubelet 和 kube-proxy。
+
 ## 1. 前置条件
 
 准备以下工具：
@@ -123,7 +138,14 @@ git log --oneline --max-count=6
 同一块非根挂载盘；不满足条件会直接退出。脚本会清理上一轮的 Go 缓存、临时目录、
 导出镜像和 BuildKit 缓存，再运行定向测试、构建镜像并导出校验和。
 
+默认镜像名使用 `localhost/huaweicloud`。若计划推送到私有仓库，请在首次执行构建脚本
+前设置下面三个变量；这样只需要构建一次。
+
 ```bash
+export DOCKER_REGISTRY=registry.example.com
+export DOCKER_DEV_ACCOUNT=network
+export DOCKER_IMAGE_TAG=v1.12.19-huaweicloud
+
 chmod +x "$WORKDIR/huawei-cilium-patches/build-local.sh"
 "$WORKDIR/huawei-cilium-patches/build-local.sh" "$WORKDIR"
 ```
@@ -135,29 +157,43 @@ cat "$WORKDIR/build.status"
 cat "$WORKDIR/images/SHA256SUMS"
 ```
 
-## 6. 构建镜像
+仅当 `build.status` 内容为 `SUCCESS` 且两份 tar 都出现在 `SHA256SUMS` 中时，才进入
+下一步。失败时先查看 `$WORKDIR/logs/` 中同名日志；不要拿上一轮的镜像继续部署。
 
-默认构建输出为本地镜像和 `$WORKDIR/images/` 下的 tar 包。需要使用目标镜像仓库名称时，
-在执行构建脚本前指定仓库、命名空间和 tag：
+## 6. 分发镜像
+
+构建完成后选择一种分发方式即可。不要同时推送和离线导入，以免排障时无法判断实际使用
+的是哪一份镜像。
+
+### 方式 A：推送到镜像仓库
 
 ```bash
-export DOCKER_REGISTRY=registry.example.com
-export DOCKER_DEV_ACCOUNT=network
-export DOCKER_IMAGE_TAG=v1.12.19-huaweicloud
-"$WORKDIR/huawei-cilium-patches/build-local.sh" "$WORKDIR"
-
 # 登录信息由当前用户的 Docker 配置管理；构建脚本不会读取或保存凭据。
 docker login "$DOCKER_REGISTRY"
 docker push "$DOCKER_REGISTRY/$DOCKER_DEV_ACCOUNT/cilium:$DOCKER_IMAGE_TAG"
 docker push "$DOCKER_REGISTRY/$DOCKER_DEV_ACCOUNT/operator-huaweicloud:$DOCKER_IMAGE_TAG"
 ```
 
-最终应有 Agent 和 HuaweiCloud Operator 两个镜像：
+Helm values 中应使用以下两个镜像名：
 
 ```text
 registry.example.com/network/cilium:v1.12.19-huaweicloud
 registry.example.com/network/operator-huaweicloud:v1.12.19-huaweicloud
 ```
+
+### 方式 B：离线导入
+
+将 `$WORKDIR/images/` 中的两份 tar 复制到每个 Kubernetes 节点后执行：
+
+```bash
+ctr -n k8s.io images import cilium-v1.12.19-huaweicloud.tar
+ctr -n k8s.io images import operator-huaweicloud-v1.12.19-huaweicloud.tar
+ctr -n k8s.io images ls | grep -E 'localhost/huaweicloud/(cilium|operator-huaweicloud)'
+```
+
+离线方式的 values 使用 `localhost/huaweicloud/cilium` 和
+`localhost/huaweicloud/operator` 作为两个基础仓库名，并保持 `pullPolicy: IfNotPresent`。
+Operator 的实际镜像名仍由 Chart 自动追加 `-huaweicloud`。
 
 ### Operator 默认启动命令修复与验证
 
@@ -214,46 +250,29 @@ MAC 和系统网卡 MAC 对照后再填写，不能只取第一张网卡。
 
 ## 8. 准备 Helm values
 
-创建权限为 `0600` 的临时文件 `huaweicloud-values.yaml`。AK/SK 不要放在命令行或
-提交到 Git。
+从无密示例创建权限为 `0600` 的临时文件。AK/SK 不要放在命令行、Shell 历史或 Git
+提交中。
 
-```yaml
-image:
-  repository: registry.example.com/network/cilium
-  tag: v1.12.19-huaweicloud
-  pullPolicy: IfNotPresent
-
-operator:
-  replicas: 1
-  image:
-    repository: registry.example.com/network/operator
-    tag: v1.12.19-huaweicloud
-    pullPolicy: IfNotPresent
-
-ipam:
-  mode: huaweicloud
-
-huaweicloud:
-  enabled: true
-  accessKey: "<AK>"
-  secretKey: "<SK>"
-  projectID: "<项目 ID>"
-  region: "cn-south-1"
-  vpcID: "<VPC ID>"
-  trunkInterface: "eth0"
-  subnetIDs:
-    - "<SubENI 子网 ID>"
-  securityGroupIDs:
-    - "<安全组 ID>"
-  subENITags: {}
-  releaseExcessIPs: false
-
-tunnel: disabled
-kubeProxyReplacement: disabled
-ipv4NativeRoutingCIDR: "<VPC IPv4 CIDR>"
-enableIPv4Masquerade: true
-egressMasqueradeInterfaces: "eth0"
+```bash
+cd "$WORKDIR"
+umask 077
+cp huawei-cilium-patches/huaweicloud-values.example.yaml huawei-values.yaml
+chmod 600 huawei-values.yaml
+${EDITOR:-vi} huawei-values.yaml
 ```
+
+必须填写的字段如下：
+
+| 字段 | 填写内容 | 获取或校验方式 |
+| --- | --- | --- |
+| `image.repository` | Agent 镜像基础仓库 | 与第 6 节选择的分发方式一致 |
+| `operator.image.repository` | 不带 `-huaweicloud` 的 Operator 基础仓库 | 例如 `registry.example.com/network/operator` |
+| `accessKey` / `secretKey` | 有 SubENI 权限的云账号凭据 | 不要提交此文件 |
+| `projectID`、`region`、`vpcID` | 当前云项目、区域和 VPC | 与节点所属网络一致 |
+| `trunkInterface` | 第 7 节确认的网卡 | 常见为 `eth0`，不能猜测 |
+| `subnetIDs`、`securityGroupIDs` | 用于 SubENI 的子网和安全组 | 安全组必须允许工作负载需要的流量 |
+| `ipv4NativeRoutingCIDR` | VPC IPv4 CIDR | 不能填写 Pod CIDR |
+| `egressMasqueradeInterfaces` | 与 `trunkInterface` 相同的网卡 | 用于 Pod 出网 SNAT |
 
 `operator.image.repository` 必须是不带云厂商后缀的基础仓库名。Chart 会根据
 `huaweicloud.enabled: true` 自动拼接 `-huaweicloud`，因此上述配置实际拉取的是
@@ -267,7 +286,25 @@ repository 直接写成 `operator-huaweicloud`，Chart 会生成错误的双后�
 生产环境先保持 `releaseExcessIPs: false`。开启后，Operator 会按水位线和释放延迟
 回收空闲 SubENI；先在测试节点观察一个完整回收周期。
 
+保存后先确认文件权限和占位符：
+
+```bash
+stat -c '%a %n' huawei-values.yaml
+if grep -nE '<(AK|SK|项目 ID|VPC ID|SubENI 子网 ID|安全组 ID)' huawei-values.yaml; then
+  echo '仍有未填写的占位符'
+  exit 1
+fi
+```
+
 ## 9. Helm 安装
+
+先确认目标集群可用；任一节点不是 `Ready` 时先修复 Kubernetes，再安装 Cilium。
+
+```bash
+kubectl config current-context
+kubectl get nodes
+kubectl get --raw='/readyz?verbose'
+```
 
 Chart 本身不携带这版源码生成的 CRD 清单；安装前必须先应用源码中的 CRD。否则
 `CiliumNode` 等资源无法被 API Server 识别，Operator 和 Agent 无法正常工作。
@@ -288,7 +325,7 @@ helm template cilium ./install/kubernetes/cilium \
   -f huaweicloud-values.yaml >/dev/null
 ```
 
-确认当前 kubectl context 后安装：
+渲染成功后安装：
 
 ```bash
 kubectl config current-context
@@ -296,6 +333,7 @@ helm upgrade --install cilium ./install/kubernetes/cilium \
   --namespace kube-system \
   --create-namespace \
   -f huaweicloud-values.yaml
+helm status cilium --namespace kube-system
 ```
 
 安装完成后删除本地临时 values 文件。集群中的 `cilium-huaweicloud` Secret 仍由 Helm
@@ -313,6 +351,10 @@ kubectl -n kube-system exec ds/cilium -- cilium status --verbose
 
 Cilium `v1.12` 的 `cilium status` 不支持 `--wait` 参数。不要把该参数用于本版本的
 自动检查；DaemonSet 和 Deployment 的 rollout status 已负责等待就绪。
+
+通过标准：所有节点为 `Ready`，`cilium` DaemonSet 的 `DESIRED`、`CURRENT`、`READY`
+和 `AVAILABLE` 数值一致，Operator 为 `1/1` Ready，且 `cilium status` 显示
+`Cilium: Ok`、`Kubernetes: Ok` 和可达的 Cluster health。
 
 检查 Operator 日志中的密钥脱敏：
 
@@ -336,3 +378,18 @@ iptables-save -t nat | grep 'cilium masquerade non-cluster'
 `node-role.kubernetes.io/control-plane:NoSchedule`；不同 Kubernetes 版本可能同时存在
 这两个污点。基于 BusyBox `httpd` 做 HTTP 验证时，应先创建可返回 200 的首页，避免把
 404 响应误判为网络不通。
+
+## 11. 常见问题排查
+
+| 现象 | 优先检查 | 处理方向 |
+| --- | --- | --- |
+| `kubeadm init` 卡在拉取镜像 | containerd 日志是否访问 `registry.k8s.io` 超时 | 按第 1 节的镜像仓库处理预拉取后重新执行 |
+| Cilium Pod `ImagePullBackOff` | values 中镜像名、节点本地镜像、镜像仓库凭据 | 离线方式重新导入两份 tar；仓库方式确认镜像已推送 |
+| Cilium Pod `CrashLoopBackOff` | `kubectl -n kube-system logs ds/cilium --previous` | 对照 trunk 网卡、VPC CIDR、子网和安全组 ID |
+| 没有 `CiliumNode` 或 Operator 报资源不存在 | CRD 是否已应用 | 重新执行第 9 节的两个 `kubectl apply -f` 命令 |
+| Pod 为 Running 但无法访问 DNS 或公网 | SNAT 规则、`egressMasqueradeInterfaces`、VPC CIDR | 确认第 10 节 NAT 规则出口为 trunk 网卡 |
+| Pod 无法分配地址 | Operator 日志、云账号权限、子网剩余地址 | 检查 SubENI 创建/查询权限和安全组、子网配置 |
+
+收集问题信息时不要直接粘贴包含 AK/SK 的 values 文件或 Helm release Secret。可优先提供
+`kubectl get pods -A -o wide`、Cilium/Operator 脱敏日志、`CiliumNode` 状态和第 10 节
+的 SNAT 输出。
