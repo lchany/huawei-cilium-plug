@@ -24,8 +24,10 @@ huaweicloud:
   region: "<区域，例如 cn-south-1>"
   vpcID: "<VPC ID>"
   trunkInterface: "<trunk 网卡，例如 eth0>"
+  # subnetIDs 与 subnetTags 二选一；配置 subnetIDs 时它的优先级更高。
   subnetIDs:
     - "<SubENI 子网 ID>"
+  subnetTags: {}
   securityGroupIDs:
     - "<安全组 ID>"
   subENITags: {}

@@ -10,7 +10,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 - upstream tag：`v1.12.19`
 - upstream commit：`a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`
-- 已验证适配提交：`ea640a4709d2f1959ff97dc53d91a8eda20e960a`
+- 已验证适配提交：`ec24eea1fdad3a2ee0319de706d1d9e024840a3f`
 
 `apply.sh` 默认检查完整基线 commit，避免把 patch 应用到其他 Cilium 版本。
 
@@ -23,6 +23,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0003-huaweicloud-generated-tests-dependencies.patch
 ├── 0004-images-fix-operator-runtime-command-expansion.patch
 ├── 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
+├── 0006-huaweicloud-support-subnet-selection-by-tags.patch
 ├── series
 ├── apply.sh
 ├── build-local.sh
@@ -60,12 +61,18 @@ Helm 的 HuaweiCloud Operator Deployment 会显式执行
 `/usr/bin/cilium-operator` 默认命令的同时，也保留 variant 二进制路径，确保两种
 启动方式均可用。
 
+### 0006：按标签选择 SubENI 子网
+
+为 Agent 和 Helm 增加华为云子网标签配置，写入 `CiliumNode.Spec.HuaweiCloud.SubnetTags`
+并由 Operator 在同 VPC、同可用区内筛选子网。保留 CNI NetConf 的节点级配置方式，补充
+单文件、conflist、字段合并和标签筛选回归测试。显式 `subnetIDs` 的优先级高于标签。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 5 个 patch"]
+    patches["按 series 应用 6 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]
@@ -85,6 +92,10 @@ git rev-parse HEAD
 从准备、构建、镜像分发到验收的完整步骤见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
 部署配置从 [huaweicloud-values.example.yaml](huaweicloud-values.example.yaml) 复制，填写
 实际云资源后使用；不要提交包含 AK/SK 的 values 文件。
+
+华为云子网既可以通过 `huaweicloud.subnetIDs` 指定，也可以通过
+`huaweicloud.subnetTags` 按标签选择；同时配置时子网 ID 优先。节点级差异化配置可通过
+CNI NetConf 的 `huawei-cloud.subnet-tags` 设置，完整步骤见部署文档。
 
 ## 更新 patch
 

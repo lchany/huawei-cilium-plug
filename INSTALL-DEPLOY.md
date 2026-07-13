@@ -270,7 +270,8 @@ ${EDITOR:-vi} huawei-values.yaml
 | `accessKey` / `secretKey` | 有 SubENI 权限的云账号凭据 | 不要提交此文件 |
 | `projectID`、`region`、`vpcID` | 当前云项目、区域和 VPC | 与节点所属网络一致 |
 | `trunkInterface` | 第 7 节确认的网卡 | 常见为 `eth0`，不能猜测 |
-| `subnetIDs`、`securityGroupIDs` | 用于 SubENI 的子网和安全组 | 安全组必须允许工作负载需要的流量 |
+| `subnetIDs` 或 `subnetTags` | 按 ID 或标签选择用于 SubENI 的子网 | 二选一；同时填写时 `subnetIDs` 优先 |
+| `securityGroupIDs` | SubENI 使用的安全组 | 必须允许工作负载需要的流量 |
 | `ipv4NativeRoutingCIDR` | VPC IPv4 CIDR | 不能填写 Pod CIDR |
 | `egressMasqueradeInterfaces` | 与 `trunkInterface` 相同的网卡 | 用于 Pod 出网 SNAT |
 
@@ -285,6 +286,49 @@ repository 直接写成 `operator-huaweicloud`，Chart 会生成错误的双后�
 
 生产环境先保持 `releaseExcessIPs: false`。开启后，Operator 会按水位线和释放延迟
 回收空闲 SubENI；先在测试节点观察一个完整回收周期。
+
+### 8.1 按标签选择 SubENI 子网
+
+所有节点使用同一组规则时，直接在 `huawei-values.yaml` 中配置 `subnetTags`。先在华为云
+控制台确认目标子网已经设置对应标签，然后把 `subnetIDs` 设为空；否则显式子网 ID 会
+优先，标签不会参与选择。
+
+```yaml
+huaweicloud:
+  subnetIDs: []
+  subnetTags:
+    network-role: pod
+```
+
+安装或升级后，确认标签已经进入 `CiliumNode`。以下命令应在每个节点的输出中看到
+`subnetTags`，且键值与 values 一致：
+
+```bash
+kubectl get ciliumnodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.huaweiCloud.subnetTags}{"\n"}{end}'
+```
+
+如果不同节点必须使用不同标签，也可以使用节点本地 CNI 配置。此方式只适用于明确由
+运维管理 CNI 文件的环境，并且必须同时让 agent 读取该文件：
+
+```yaml
+cni:
+  customConf: true
+  readCniConf: /host/etc/cni/net.d/04-cilium-cni-eni.conf
+```
+
+对应的 `/etc/cni/net.d/04-cilium-cni-eni.conf` 在 `cilium-cni` 配置对象中增加：
+
+```json
+"huawei-cloud": {
+  "subnet-tags": {
+    "network-role": "pod"
+  }
+}
+```
+
+修改 CNI 文件后需要滚动重启 Cilium agent，再执行上面的 `CiliumNode` 检查命令。仅修改
+文件但不配置 `readCniConf` 不会生效。单文件 `.conf` 和包含 `cilium-cni` 插件的
+`.conflist` 均支持该字段。
 
 保存后先确认文件权限和占位符：
 
