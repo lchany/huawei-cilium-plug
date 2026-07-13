@@ -375,6 +375,51 @@ extraArgs:
 
 如果使用华为云默认安全组，删除 `--huawei-cloud-security-group-ids=...` 这一行；如果指定安全组，保留该行并填入实际 ID。
 
+### 9.1 按子网标签选择 SubENI 子网
+
+需要按标签而不是固定 ID 选择子网时，在每个节点的 Cilium CNI 配置中设置
+`huawei-cloud.subnet-tags`。下面以宿主机
+`/etc/cni/net.d/04-cilium-cni-eni.conf` 为例；先确保该文件已经由运维系统分发到所有
+目标节点。
+
+```json
+{
+  "cniVersion": "0.3.1",
+  "name": "cilium",
+  "type": "cilium-cni",
+  "huawei-cloud": {
+    "subnet-tags": {
+      "network-role": "pod"
+    }
+  }
+}
+```
+
+Helm values 必须让 Agent 读取宿主机文件，同时关闭自动覆盖自定义 CNI 配置：
+
+```yaml
+cni:
+  customConf: true
+  readCniConf: /host/etc/cni/net.d/04-cilium-cni-eni.conf
+```
+
+按标签选择时，从 `extraArgs` 删除 `--huawei-cloud-subnet-ids=...`。如果 ID 和标签同时
+存在，显式 `subnet-ids` 优先，标签不会参与筛选。安全组仍可继续通过
+`--huawei-cloud-security-group-ids` 指定。
+
+配置文件也可以是 `.conflist`；此时把相同的 `huawei-cloud` 对象放在
+`plugins` 数组中 `type: cilium-cni` 的插件对象内，并让 `cni.readCniConf` 指向该文件。
+
+安装或滚动重启 Agent 后检查：
+
+```bash
+kubectl get ciliumnodes -o yaml | grep -A12 'subnet-tags'
+```
+
+预期每个节点的 `spec.huawei-cloud.subnet-tags` 都与 CNI 文件一致。再创建 Pod，并在华为云
+控制台或 API 中确认新 SubENI 位于标签匹配、VPC 和可用区均正确的子网。仅修改宿主机
+CNI 文件但不设置 `cni.readCniConf` 不会生效。
+
 使用自定义 endpoint 时，在 `operator.extraEnv` 里再加：
 
 ```yaml

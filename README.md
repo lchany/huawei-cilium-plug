@@ -34,9 +34,11 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── 0002-huaweicloud-datapath-runtime.patch
 ├── 0003-huaweicloud-generated-tests-docs.patch
 ├── 0004-huaweicloud-reliability-fixes.patch
+├── 0005-huaweicloud-enable-subnet-tag-only-selection.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
+├── TEST-PLAN.md
 └── README.md
 ```
 
@@ -290,6 +292,18 @@ SubENI VLAN 流量。
 
 它不升级 HuaweiCloud SDK，也不改变已有三份 patch 的内容或顺序。
 
+### 0005-huaweicloud-enable-subnet-tag-only-selection.patch
+
+修复 HuaweiCloud CNI NetConf 已能解析 `subnet-tags`，但 NodeDiscovery 仍强制要求
+`subnet-ids`，导致标签选择在真实部署中不可达的问题。
+
+主要内容：
+
+- 允许只配置 `huawei-cloud.subnet-tags` 作为子网选择条件。
+- ID 和标签都为空时继续拒绝启动，避免无约束选择子网。
+- 同时配置 ID 和标签时保持显式 `subnet-ids` 优先的兼容行为。
+- 增加标签独立配置、空配置拒绝和 ID 优先级回归测试。
+
 ## 应用方式
 
 准备干净的 upstream Cilium 源码。该源码由使用方自行获取，本项目不提供：
@@ -306,7 +320,7 @@ git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 /path/to/patch-archive/apply.sh
 ```
 
-脚本会按 `series` 顺序应用四个 patch。
+脚本会按 `series` 顺序应用五个 patch。
 
 完整安装部署流程见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
 

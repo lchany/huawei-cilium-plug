@@ -1,0 +1,143 @@
+From 767960a76c6a342d6714a8545798c458b1fdee73 Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 10:57:43 +0800
+Subject: [PATCH] huaweicloud: enable subnet tag only selection
+
+---
+ pkg/huaweicloud/eni/instances_test.go   | 11 ++++--
+ pkg/nodediscovery/nodediscovery.go      | 11 ++++--
+ pkg/nodediscovery/nodediscovery_test.go | 47 ++++++++++++++++++++-----
+ 3 files changed, 55 insertions(+), 14 deletions(-)
+
+diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
+index 9021acdd..dcb6cd2a 100644
+--- a/pkg/huaweicloud/eni/instances_test.go
++++ b/pkg/huaweicloud/eni/instances_test.go
+@@ -20,8 +20,8 @@ import (
+ func newTestManager(t *testing.T) (*InstancesManager, *mock.API) {
+ 	mockAPI := mock.NewAPI(
+ 		[]*ipamTypes.Subnet{
+-			{ID: "subnet-1", VirtualNetworkID: "vpc-1", AvailabilityZone: "cn-north-4a", AvailableAddresses: 100},
+-			{ID: "subnet-2", VirtualNetworkID: "vpc-1", AvailabilityZone: "cn-north-4a", AvailableAddresses: 200},
++			{ID: "subnet-1", VirtualNetworkID: "vpc-1", AvailabilityZone: "cn-north-4a", AvailableAddresses: 100, Tags: ipamTypes.Tags{"role": "pod"}},
++			{ID: "subnet-2", VirtualNetworkID: "vpc-1", AvailabilityZone: "cn-north-4a", AvailableAddresses: 200, Tags: ipamTypes.Tags{"role": "node"}},
+ 		},
+ 		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1", PrimaryCIDR: "10.0.0.0/16"}},
+ 		[]*hwTypes.SecurityGroup{
+@@ -70,10 +70,15 @@ func TestInstancesFindOneSubnet(t *testing.T) {
+ 	require.NotNil(t, subnet)
+ 	assert.Equal(t, "subnet-2", subnet.ID)
+ 
+-	spec.Subnets = []string{"subnet-1"}
++	spec.SubnetTags = map[string]string{"role": "pod"}
+ 	subnet = mgr.FindOneSubnet(spec, 1)
+ 	require.NotNil(t, subnet)
+ 	assert.Equal(t, "subnet-1", subnet.ID)
++
++	spec.Subnets = []string{"subnet-2"}
++	subnet = mgr.FindOneSubnet(spec, 1)
++	require.NotNil(t, subnet)
++	assert.Equal(t, "subnet-2", subnet.ID, "explicit subnet IDs must take precedence over tags")
+ }
+ 
+ func TestInstancesDeleteInstance(t *testing.T) {
+diff --git a/pkg/nodediscovery/nodediscovery.go b/pkg/nodediscovery/nodediscovery.go
+index b4f42dab..70c964bb 100644
+--- a/pkg/nodediscovery/nodediscovery.go
++++ b/pkg/nodediscovery/nodediscovery.go
+@@ -647,14 +647,21 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
+ 		if c := n.cniConfigManager.GetCustomNetConf(); c != nil {
+ 			applyHuaweiCloudNetConf(nodeResource.Spec.HuaweiCloud, c.HuaweiCloud)
+ 		}
+-		if len(nodeResource.Spec.HuaweiCloud.Subnets) == 0 {
+-			return fmt.Errorf("at least one HuaweiCloud subnet ID is required")
++		if err := validateHuaweiCloudSubnetSelection(nodeResource.Spec.HuaweiCloud); err != nil {
++			return err
+ 		}
+ 	}
+ 
+ 	return nil
+ }
+ 
++func validateHuaweiCloudSubnetSelection(spec *huaweiCloudTypes.Spec) error {
++	if spec == nil || (len(spec.Subnets) == 0 && len(spec.SubnetTags) == 0) {
++		return fmt.Errorf("at least one HuaweiCloud subnet ID or subnet tag is required")
++	}
++	return nil
++}
++
+ func applyHuaweiCloudNetConf(dst *huaweiCloudTypes.Spec, src huaweiCloudTypes.Spec) {
+ 	if dst == nil {
+ 		return
+diff --git a/pkg/nodediscovery/nodediscovery_test.go b/pkg/nodediscovery/nodediscovery_test.go
+index 1737c150..a6d7bb28 100644
+--- a/pkg/nodediscovery/nodediscovery_test.go
++++ b/pkg/nodediscovery/nodediscovery_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
+ 
+ 	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ )
+@@ -24,15 +25,15 @@ func TestApplyHuaweiCloudNetConfOnlyOverridesResourceSelection(t *testing.T) {
+ 	}
+ 
+ 	applyHuaweiCloudNetConf(dst, huaweiCloudTypes.Spec{
+-		InstanceID:       "instance-from-netconf",
+-		InstanceType:     "wrong-type",
+-		VPCID:            "wrong-vpc",
+-		AvailabilityZone: "wrong-az",
+-		TrunkInterfaceID: "wrong-trunk-id",
+-		TrunkInterface:   "wrong-trunk-interface",
+-		Subnets:          []string{"subnet-netconf"},
+-		SubnetTags:       map[string]string{"role": "pod"},
+-		SecurityGroups:   []string{"sg-netconf"},
++		InstanceID:        "instance-from-netconf",
++		InstanceType:      "wrong-type",
++		VPCID:             "wrong-vpc",
++		AvailabilityZone:  "wrong-az",
++		TrunkInterfaceID:  "wrong-trunk-id",
++		TrunkInterface:    "wrong-trunk-interface",
++		Subnets:           []string{"subnet-netconf"},
++		SubnetTags:        map[string]string{"role": "pod"},
++		SecurityGroups:    []string{"sg-netconf"},
+ 		SecurityGroupTags: map[string]string{"role": "worker"},
+ 	})
+ 
+@@ -47,3 +48,31 @@ func TestApplyHuaweiCloudNetConfOnlyOverridesResourceSelection(t *testing.T) {
+ 	assert.Equal(t, []string{"sg-netconf"}, dst.SecurityGroups)
+ 	assert.Equal(t, map[string]string{"role": "worker"}, dst.SecurityGroupTags)
+ }
++
++func TestValidateHuaweiCloudSubnetSelection(t *testing.T) {
++	tests := []struct {
++		name    string
++		spec    *huaweiCloudTypes.Spec
++		wantErr bool
++	}{
++		{name: "nil spec", wantErr: true},
++		{name: "empty selection", spec: &huaweiCloudTypes.Spec{}, wantErr: true},
++		{name: "subnet IDs", spec: &huaweiCloudTypes.Spec{Subnets: []string{"subnet-1"}}},
++		{name: "subnet tags only", spec: &huaweiCloudTypes.Spec{SubnetTags: map[string]string{"role": "pod"}}},
++		{name: "IDs take precedence over tags", spec: &huaweiCloudTypes.Spec{
++			Subnets:    []string{"subnet-1"},
++			SubnetTags: map[string]string{"role": "pod"},
++		}},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			err := validateHuaweiCloudSubnetSelection(tt.spec)
++			if tt.wantErr {
++				require.Error(t, err)
++				return
++			}
++			require.NoError(t, err)
++		})
++	}
++}
+-- 
+2.43.0
+

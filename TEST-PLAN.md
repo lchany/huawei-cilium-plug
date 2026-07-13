@@ -239,9 +239,9 @@ kubectl -n kube-system exec ds/cilium -- cilium-dbg map get cilium_hwc_vlan_mac
 
 **步骤**：
 
-1. 为目标子网添加唯一测试标签。
-2. 配置 `cni.customConf: true` 和正确的 `cni.readCniConf`。
-3. 在 `cilium-cni` 对象中加入：
+1. 为目标子网添加唯一测试标签，并确保另一个可用子网不含该标签。
+2. 配置 `cni.customConf: true` 和正确的 `cni.readCniConf`，删除所有 `subnet-ids` 参数。
+3. 分别使用独立 `.conf` 和包含 `cilium-cni` 插件的 `.conflist`，加入：
 
 ```json
 "huawei-cloud": {
@@ -249,10 +249,12 @@ kubectl -n kube-system exec ds/cilium -- cilium-dbg map get cilium_hwc_vlan_mac
 }
 ```
 
-4. 重启 Agent，确认 `CiliumNode.spec.huawei-cloud.subnet-tags`，再创建 Pod。
-5. 同时配置 `subnet-ids` 与不一致标签，验证显式 ID 优先。
+4. 重启 Agent，确认 `CiliumNode.spec.huawei-cloud.subnet-tags`，再创建 Pod并核对云侧子网。
+5. 同时删除 ID 和标签，确认 Agent 明确拒绝无约束子网选择。
+6. 同时配置 `subnet-ids` 与不一致标签，验证显式 ID 优先。
 
-**预期**：仅标签配置时选择匹配子网；同时配置时按显式 ID；不匹配时不得静默选错子网。
+**预期**：`.conf`、`.conflist` 仅标签配置均选择匹配子网；空配置失败且错误明确；同时
+配置时按显式 ID；不匹配时不得静默选错子网。
 
 ### HWC-P0-16 安全组选择
 
