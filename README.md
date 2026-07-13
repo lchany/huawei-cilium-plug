@@ -43,6 +43,7 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 - `series`：patch 应用顺序。
 - `apply.sh`：在干净的 Cilium 源码树中按 `series` 应用 patch。
 - `INSTALL-DEPLOY.md`：从应用 patch、构建镜像到 Helm 部署的完整安装部署文档。
+- `TEST-PLAN.md`：覆盖功能、可靠性、升级回滚、性能和长稳的真实环境测试用例。
 
 ## Patch 管理流程
 
