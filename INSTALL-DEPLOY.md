@@ -367,6 +367,36 @@ kubectl -n kube-system create secret generic cilium-huaweicloud \
 
 生产环境请改用 Secret YAML、SealedSecret 或外部密钥系统管理。
 
+### 8.1 受控测试前备份和恢复 Secret
+
+凭证故障演练必须在隔离窗口执行。备份文件包含可还原的编码字段，应限制权限，禁止输出到
+终端、测试报告或版本库：
+
+```bash
+BACKUP=/run/cilium-huaweicloud-secret-backup.yaml
+umask 077
+kubectl -n kube-system get secret cilium-huaweicloud -o yaml > "$BACKUP"
+chmod 600 "$BACKUP"
+```
+
+Secret 在演练期间被修改后，旧备份中的 `resourceVersion` 已过期。不要直接执行
+`kubectl apply -f "$BACKUP"`：冲突诊断可能把 patch 中的编码字段回显到终端。恢复前先把
+备份的版本号替换为当前值，再使用 `replace`：
+
+```bash
+CURRENT_RV=$(kubectl -n kube-system get secret cilium-huaweicloud \
+  -o jsonpath='{.metadata.resourceVersion}')
+sed -i -E "s/^  resourceVersion: .*/  resourceVersion: \"$CURRENT_RV\"/" "$BACKUP"
+kubectl replace -f "$BACKUP" >/dev/null
+kubectl -n kube-system rollout restart deployment/cilium-operator
+kubectl -n kube-system rollout status deployment/cilium-operator --timeout=180s
+shred -u "$BACKUP"
+```
+
+恢复后以 Operator 成功同步 VPC/SubENI 为准，不能只看 Pod Ready。若任何真实 AK/SK、
+base64 编码值或请求签名进入终端、日志或工单，立即停止测试并在云 IAM 侧轮换凭证；删除
+日志不能替代轮换。
+
 ## 9. 编写 Helm values
 
 创建 `huaweicloud-values.yaml`：
