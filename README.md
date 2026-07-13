@@ -10,7 +10,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 - upstream tag：`v1.12.19`
 - upstream commit：`a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`
-- 当前 patch 数量：9
+- 当前 patch 数量：10
 
 `apply.sh` 默认检查完整基线 commit，避免把 patch 应用到其他 Cilium 版本。
 
@@ -27,6 +27,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
 ├── 0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
 ├── 0009-huaweicloud-require-external-operator-credentials.patch
+├── 0010-huaweicloud-populate-subnet-available-addresses.patch
 ├── series
 ├── apply.sh
 ├── build-local.sh
@@ -92,12 +93,18 @@ Helm 的 HuaweiCloud Operator Deployment 会显式执行
 生成包含 AK/SK 的 Secret。部署前必须创建 Secret，并通过 `huaweicloud.existingSecret`
 引用；Secret 或键不存在时 Operator Pod 会明确启动失败。
 
+### 0010：同步子网真实可用地址数
+
+通过华为云 V1/V2 子网接口读取 `available_ip_address_count`，再与 V3 Virsubnet 的标签、
+VPC 和可用区信息合并，填充 `ipamTypes.Subnet.AvailableAddresses`。容量为 0 或小于本次
+申请量的子网不再参与选择；多个候选子网选择真实剩余地址最多的一个。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 9 个 patch"]
+    patches["按 series 应用 10 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]

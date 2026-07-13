@@ -86,7 +86,7 @@ git clone --branch patch-archive/huaweicloud-v1.12.19 \
   huawei-cilium-patches
 ```
 
-目录中应有 9 个编号 patch、`series`、`apply.sh`、部署示例和问题记录。
+目录中应有 10 个编号 patch、`series`、`apply.sh`、部署示例和问题记录。
 
 ## 3. 获取 Cilium v1.12.19
 
@@ -123,10 +123,10 @@ a1d7fbd43b563c809330b1c3e28165a3e7ff43aa
 "$WORKDIR/huawei-cilium-patches/apply.sh"
 ```
 
-成功后会新增 9 个提交：
+成功后会新增 10 个提交：
 
 ```bash
-git log --oneline --max-count=10
+git log --oneline --max-count=11
 ```
 
 如果 `git am` 失败，先执行 `git am --abort`。确认源码基线和工作区状态后再重试；不要

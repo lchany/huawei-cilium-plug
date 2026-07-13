@@ -7,3 +7,4 @@
 0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
 0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
 0009-huaweicloud-require-external-operator-credentials.patch
+0010-huaweicloud-populate-subnet-available-addresses.patch

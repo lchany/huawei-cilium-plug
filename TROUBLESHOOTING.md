@@ -16,6 +16,7 @@ v1.12.19 的实现和接口。
 | used-IP 状态合并后残留 | 不存在；本版本使用整对象 `UpdateStatus()` | 不移植对应修复 |
 | NetConf 无法设置 `SubnetTags` | 已由 0006 修复，支持 `.conf`、`.conflist` 和字段合并 | 保留 0006，不重复修改 |
 | AK/SK 进入 Helm values 和 release | 存在；原 Chart 从 values 生成 Secret | 0009 改为引用预创建 Secret |
+| 子网 `AvailableAddresses` 始终为 0 | 存在；V3 Virsubnet 转换遗漏真实容量 | 0010 从 V1/V2 子网接口同步可用地址数 |
 
 ## VLAN 入方向问题
 
@@ -103,4 +104,35 @@ Kubernetes Secret。这样凭据会进入 values 和 Helm release。v1.12.19 Ope
 - 现象：未配置 Git 身份时 `git am` 失败；一次重试进入部分应用状态。
 - 处理：先 `git am --abort`，配置明确的提交身份后从干净基线重放。`apply.sh` 也提供
   非自动化名称的安全回退身份。
-- 状态：已从 upstream `v1.12.19` 固定提交按 `series` 重放全部 9 个 patch，工作区干净。
+- 状态：已从 upstream `v1.12.19` 固定提交重放全部 10 个 patch，重放源码树与修复源码树一致。
+
+## 子网容量未赋值
+
+### 客户反馈
+
+`InstancesManager.FindOneSubnet()` 使用 `Subnet.AvailableAddresses` 判断容量，但生产
+`GetSubnets()` 原先构造 `ipamTypes.Subnet` 时没有给该字段赋值，因此所有真实子网均为
+Go 默认值 `0`。原判断又把 `0` 解释为“容量未知但可使用”，导致容量不足过滤和按剩余
+地址择优实际失效。
+
+### 为什么原测试没有发现
+
+- mock 测试直接手工设置 `AvailableAddresses: 10/20`，没有经过生产 API 转换；
+- 缺陷用例 `TestFindOneSubnetAcceptsUnknownCapacity` 明确要求容量为 0 时仍选择子网；
+- 真实环境使用了尚有容量的明确子网，未执行容量耗尽和多子网容量择优场景。
+
+### 修复
+
+0010 使用同一已鉴权 VPC 客户端调用 `/v1/{project_id}/subnets`，读取华为云返回的
+`available_ip_address_count`，再按子网 ID 与 V3 Virsubnet 数据合并。没有容量记录、
+容量为负或接口失败时本轮同步失败，不使用猜测值继续分配。容量为 0 或小于
+`toAllocate` 的子网不再参与选择。
+
+### 测试状态
+
+- 已删除 `TestFindOneSubnetAcceptsUnknownCapacity`；
+- 已验证 HTTP 请求路径、Project ID、VPC 过滤参数和容量字段反序列化；
+- 已直接调用完整 `GetSubnets()` 验证容量进入生产 `Subnet` 对象；
+- 已验证零容量、容量不足、多子网择优和显式子网容量不足；
+- `go test ./pkg/huaweicloud/api ./pkg/huaweicloud/eni` 已通过；
+- 尚未在真实华为云环境制造子网耗尽场景，不能标记为“已实际验证”。
