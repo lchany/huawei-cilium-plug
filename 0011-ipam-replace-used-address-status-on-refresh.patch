@@ -1,0 +1,80 @@
+From 592648fcfe51c42c39a663a5e62b25e2bfd3378e Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 18:27:49 +0800
+Subject: [PATCH] ipam: replace used address status on refresh
+
+---
+ pkg/ipam/crd.go      | 15 +++++++++------
+ pkg/ipam/crd_test.go | 19 +++++++------------
+ 2 files changed, 16 insertions(+), 18 deletions(-)
+
+diff --git a/pkg/ipam/crd.go b/pkg/ipam/crd.go
+index 51306fd1..7a37e3dd 100644
+--- a/pkg/ipam/crd.go
++++ b/pkg/ipam/crd.go
+@@ -606,16 +606,19 @@ func (n *nodeStore) refreshNode() error {
+ 		return err
+ 	}
+ 
+-	_, err = n.clientset.CiliumV2().CiliumNodes().Patch(context.TODO(), node.Name, k8sTypes.MergePatchType, patch, metav1.PatchOptions{}, "status")
++	_, err = n.clientset.CiliumV2().CiliumNodes().Patch(context.TODO(), node.Name, k8sTypes.JSONPatchType, patch, metav1.PatchOptions{}, "status")
+ 	return err
+ }
+ 
+ func buildNodeIPAMUsedStatusPatch(used ipamTypes.AllocationMap) ([]byte, error) {
+-	return json.Marshal(map[string]any{
+-		"status": map[string]any{
+-			"ipam": map[string]any{
+-				"used": used,
+-			},
++	// A JSON merge patch cannot remove addresses that disappeared from a map:
++	// omitted keys are retained in the object stored by the API server. Replace
++	// the complete used map so released addresses are removed from CiliumNode.
++	return json.Marshal([]map[string]any{
++		{
++			"op":    "add",
++			"path":  "/status/ipam/used",
++			"value": used,
+ 		},
+ 	})
+ }
+diff --git a/pkg/ipam/crd_test.go b/pkg/ipam/crd_test.go
+index 4eefa4c5..c34cec7a 100644
+--- a/pkg/ipam/crd_test.go
++++ b/pkg/ipam/crd_test.go
+@@ -229,25 +229,20 @@ func TestIPMasq(t *testing.T) {
+ 	ipMasqAgent.Stop()
+ }
+ 
+-func TestBuildNodeIPAMUsedStatusPatchOnlyIncludesUsed(t *testing.T) {
++func TestBuildNodeIPAMUsedStatusPatchReplacesUsed(t *testing.T) {
+ 	patch, err := buildNodeIPAMUsedStatusPatch(ipamTypes.AllocationMap{
+ 		"192.168.0.100": {Owner: "health", Resource: "subeni-1"},
+ 	})
+ 	require.NoError(t, err)
+ 
+-	var decoded map[string]any
++	var decoded []map[string]any
+ 	require.NoError(t, json.Unmarshal(patch, &decoded))
+-	status, ok := decoded["status"].(map[string]any)
++	require.Len(t, decoded, 1)
++	assert.Equal(t, "add", decoded[0]["op"])
++	assert.Equal(t, "/status/ipam/used", decoded[0]["path"])
++	used, ok := decoded[0]["value"].(map[string]any)
+ 	require.True(t, ok)
+-	require.Len(t, status, 1)
+-
+-	ipamStatus, ok := status["ipam"].(map[string]any)
+-	require.True(t, ok)
+-	require.Len(t, ipamStatus, 1)
+-	_, hasUsed := ipamStatus["used"]
+-	assert.True(t, hasUsed)
+-	_, hasHuaweiCloud := status["huawei-cloud"]
+-	assert.False(t, hasHuaweiCloud)
++	assert.Contains(t, used, "192.168.0.100")
+ }
+ 
+ func TestAzureIPMasq(t *testing.T) {
+-- 
+2.43.0
+

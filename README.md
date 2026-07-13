@@ -36,16 +36,25 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── 0004-huaweicloud-reliability-fixes.patch
 ├── 0005-huaweicloud-enable-subnet-tag-only-selection.patch
 ├── 0006-huaweicloud-secure-operator-credential-injection.patch
+├── 0007-huaweicloud-handle-inline-VLAN-ingress-frames.patch
+├── 0008-huaweicloud-prefer-inline-VLAN-headers.patch
+├── 0009-huaweicloud-strip-duplicate-VLAN-representations.patch
+├── 0010-huaweicloud-process-VLAN-on-attached-interface.patch
+├── 0011-ipam-replace-used-address-status-on-refresh.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
 ├── TEST-PLAN.md
+├── TEST-RESULTS.md
+├── TROUBLESHOOTING.md
 └── README.md
 ```
 
 - `series`：patch 应用顺序。
 - `apply.sh`：在干净的 Cilium 源码树中按 `series` 应用 patch。
 - `INSTALL-DEPLOY.md`：从应用 patch、构建镜像到 Helm 部署的完整安装部署文档。
+- `TROUBLESHOOTING.md`：真实构建和部署中遇到的问题、修复方法及验证状态。
+- `TEST-RESULTS.md`：真实环境已执行、部分执行和未执行用例的验收记录。
 - `TEST-PLAN.md`：覆盖功能、可靠性、升级回滚、性能和长稳的真实环境测试用例。
 
 ## Patch 管理流程
@@ -316,6 +325,18 @@ SubENI VLAN 流量。
 - 将 AK/SK 标记为敏感配置，Operator 启动配置日志固定显示 `<redacted>`。
 - 增加环境变量优先级和日志脱敏回归测试。
 - 更新源码内的 Helm/Secret 部署说明，禁止将 AK/SK 放入 `operator.extraArgs`。
+
+### 0007 至 0010：HuaweiCloud VLAN 入站与接口选择修复
+
+这组 patch 修复真实环境发现的数据面问题：兼容线内 VLAN 与 VLAN 元数据并存，避免已处理报文再次进入通用 VLAN 过滤，并使用 BPF 程序实际挂载网卡的 `interface_ifindex`，确保未启用 KPR 的 native-routing 场景也能执行 SubENI 入站和出站处理。
+
+问题现象、排查证据和验证命令见 `TROUBLESHOOTING.md`。
+
+### 0011-ipam-replace-used-address-status-on-refresh.patch
+
+修复 Pod 删除后 `CiliumNode.status.ipam.used` 仍保留旧 IP 的问题。Agent 现在整体替换
+`used` 映射，使已释放地址能够从 Kubernetes 状态中删除；预分配的 SubENI 仍保留在
+`spec.ipam.pool`，可供后续 Pod 复用。
 
 ## 应用方式
 

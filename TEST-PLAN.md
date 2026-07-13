@@ -34,7 +34,7 @@
 ### 2.2 本地产物
 
 ```bash
-export ARTIFACT_DIR=/home/lchych/leicheng/disk1/cilium-v1.19.1-huaweicloud/artifacts
+export ARTIFACT_DIR=<MOUNT_PATH>/cilium-v1.19.1-huaweicloud/artifacts
 cd "$ARTIFACT_DIR"
 sha256sum -c SHA256SUMS
 ```
@@ -43,8 +43,10 @@ sha256sum -c SHA256SUMS
 
 - `images/cilium-v1.19.1-huaweicloud-amd64.tar`
 - `images/operator-huaweicloud-v1.19.1-huaweicloud-amd64.tar`
-- `helm/cilium-1.19.1.tgz`
-- `bin/cilium-agent`、`bin/cilium-cni`、`bin/cilium-operator-huaweicloud`
+- `chart/cilium-1.19.1.tgz`
+
+本交付以正式容器镜像为准，不要求额外提供裸二进制。二进制入口应在镜像内按
+`HWC-P0-01` 验证。
 
 ### 2.3 测试变量
 
@@ -157,8 +159,9 @@ kubectl get ciliumnodes -o yaml
 
 **目标**：验证真实业务常用出口路径。
 
-**步骤**：从 Pod 查询 Kubernetes DNS，访问同 VPC 地址、跨子网地址和允许访问的公网
-地址；记录源地址和回包。
+**步骤**：从 Pod 使用末尾带点号的绝对域名查询 Kubernetes DNS，访问同 VPC 地址、跨
+子网地址和允许访问的公网地址；记录源地址和回包。另用不存在的域名验证上游 DNS 时，应
+单独记录上游 DNS 可达性，不得把搜索域或上游超时误判为集群内 DNS 故障。
 
 **预期**：DNS 正常；内网路由正确；公网行为符合 masquerade 配置；无单向通或回包丢失。
 
@@ -188,6 +191,7 @@ kubectl get ciliumnodes -o yaml
 **目标**：验证 endpoint egress policy 与 VLAN 封装顺序正确。
 
 **步骤**：应用默认拒绝 egress，分别放行 DNS、指定 Pod、指定 CIDR/端口并逐项验证。
+DNS 放行断言使用末尾带点号的集群内绝对域名，并同时确认一个未放行的 TCP 目标超时。
 
 **预期**：允许流量正常封装发送；拒绝流量在 Cilium datapath 被丢弃并可观测。
 
@@ -370,6 +374,9 @@ AK/SK 不得出现在 Pod 参数、启动日志、测试日志或归档证据中
 ### HWC-P1-17 节点排空与重新调度
 
 对节点执行 cordon/drain，将测试工作负载迁移到其他节点，然后 uncordon。
+
+执行前先计算其余可调度节点的 SubENI/IP 剩余容量。若测试目标包含容量不足分支，应明确
+断言 Pod 保持等待、错误信息清楚且无半创建资源；随后恢复节点调度并验证自动收敛。
 
 **预期**：旧节点资源正确释放/保留，新节点正确分配；业务只出现调度允许范围内的中断。
 

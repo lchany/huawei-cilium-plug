@@ -1,0 +1,84 @@
+From bb5767464cc36b813ff3eca7b6f04c386aa1a14c Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 17:42:38 +0800
+Subject: [PATCH 4/4] huaweicloud: process VLAN on attached interface
+
+---
+ bpf/bpf_host.c        | 6 ++++--
+ bpf/lib/huaweicloud.h | 9 +++++----
+ 2 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/bpf/bpf_host.c b/bpf/bpf_host.c
+index 8111a034..457f26f1 100644
+--- a/bpf/bpf_host.c
++++ b/bpf/bpf_host.c
+@@ -1202,10 +1202,12 @@ int cil_from_netdev(struct __ctx_buff *ctx)
+ 	int ret;
+ 
+ #ifdef ENABLE_HUAWEICLOUD_VLAN
++	bool hwc_vlan_handled = false;
++
+ 	/* HuaweiCloud SubENI ingress: intercept VLAN-tagged SubENI packets
+ 	 * before the generic VLAN filter drops them.
+ 	 */
+-	ret = hwc_from_netdev(ctx);
++	ret = hwc_from_netdev(ctx, &hwc_vlan_handled);
+ 	if (ret == CTX_ACT_REDIRECT)
+ 		return ret;
+ 	if (IS_ERR(ret))
+@@ -1215,7 +1217,7 @@ int cil_from_netdev(struct __ctx_buff *ctx)
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 * We will see the packet again in from-netdev@eth0.vlanXXX.
+ 	 */
+-	if (ctx->vlan_present) {
++	if (!hwc_vlan_handled && ctx->vlan_present) {
+ 		__u32 vlan_id = ctx->vlan_tci & 0xfff;
+ 
+ 		if (vlan_id) {
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+index 4785b42a..0aaee786 100644
+--- a/bpf/lib/huaweicloud.h
++++ b/bpf/lib/huaweicloud.h
+@@ -97,7 +97,7 @@ hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
+ 	__u32 src_ip4 = 0;
+ 
+ 	/* Only process traffic on the trunk interface. */
+-	if (ctx->ifindex != CONFIG(direct_routing_dev_ifindex))
++	if (ctx->ifindex != CONFIG(interface_ifindex))
+ 		return CTX_ACT_OK;
+ 
+ 	/* Only handle IPv4 for now; IPv6 is a future extension. */
+@@ -140,7 +140,7 @@ hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
+  * returned as CTX_ACT_OK so the caller can continue with default processing.
+  */
+ static __always_inline int
+-hwc_from_netdev(struct __ctx_buff *ctx)
++hwc_from_netdev(struct __ctx_buff *ctx, bool *handled)
+ {
+ 	struct hwc_vlan_mac_key key __align_stack_8 = {};
+ 	struct hwc_ep_info *ep;
+@@ -151,7 +151,8 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	bool metadata_vlan;
+ 
+ 	/* Only process traffic on the trunk interface. */
+-	if (ctx->ifindex != CONFIG(direct_routing_dev_ifindex))
++	*handled = false;
++	if (ctx->ifindex != CONFIG(interface_ifindex))
+ 		return CTX_ACT_OK;
+ 
+ 	/* Validate Ethernet header bounds. */
+@@ -189,10 +190,10 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	key.mac[3] = eth->h_dest[3];
+ 	key.mac[4] = eth->h_dest[4];
+ 	key.mac[5] = eth->h_dest[5];
+-
+ 	ep = map_lookup_elem(&cilium_hwc_vlan_mac, &key);
+ 	if (!ep)
+ 		return CTX_ACT_OK; /* Unknown (VLAN, MAC) — continue default path. */
++	*handled = true;
+ 
+ 	/*
+ 	 * Some drivers expose VLAN metadata while retaining the inline header.
+-- 
+2.43.0
+

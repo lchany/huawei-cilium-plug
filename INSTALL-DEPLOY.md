@@ -120,10 +120,17 @@ ls
 0004-huaweicloud-reliability-fixes.patch
 0005-huaweicloud-enable-subnet-tag-only-selection.patch
 0006-huaweicloud-secure-operator-credential-injection.patch
+0007-huaweicloud-handle-inline-VLAN-ingress-frames.patch
+0008-huaweicloud-prefer-inline-VLAN-headers.patch
+0009-huaweicloud-strip-duplicate-VLAN-representations.patch
+0010-huaweicloud-process-VLAN-on-attached-interface.patch
+0011-ipam-replace-used-address-status-on-refresh.patch
 apply.sh
 series
 README.md
 INSTALL-DEPLOY.md
+TEST-PLAN.md
+TROUBLESHOOTING.md
 ```
 
 `series` 决定 patch 应用顺序。部署时不要修改它。
@@ -207,19 +214,34 @@ d0d0c8792c342 upstream v1.19.1 baseline
 
 ## 6. 编译检查
 
-下列命令会编译 Cilium。执行前清理上一次的编译缓存；源码目录、缓存和临时目录都在挂载盘的 `$WORKDIR` 内。
+下列命令会编译 Cilium。首次构建需要完整编译；修复后的日常构建按影响范围执行，不必每次
+全量重建。Agent、BPF 或 CNI 变化只重建 Agent，Operator 变化只重建 Operator，Chart
+变化只重新打包 Chart。公共代码或版本依赖同时影响多个组件时，再重建对应的全部组件。
+
+重新构建前删除受影响组件的旧制品和旧镜像标签，防止误发旧版本。Go、Docker/BuildKit
+缓存可保留以降低 CPU、内存和耗时，但缓存目录必须仍位于挂载盘。源码、缓存和临时目录都
+放在 `$WORKDIR` 内：
 
 ```bash
 cd "$WORKDIR/cilium"
-git clean -ffdx
-rm -rf "$WORKDIR/.cache/go-build" "$WORKDIR/.tmp"
+rm -rf "$WORKDIR/.tmp"
 mkdir -p "$WORKDIR/.cache/go-build" "$WORKDIR/.tmp"
 export GOCACHE="$WORKDIR/.cache/go-build"
 export GOTMPDIR="$WORKDIR/.tmp"
 export TMPDIR="$WORKDIR/.tmp"
 
-make build-container
-make build-container-operator-huaweicloud
+export GOMAXPROCS=2
+
+docker build --target release \
+  --build-arg 'MODIFIERS=EXTRA_GO_BUILD_FLAGS=-p=2' \
+  -f images/cilium/Dockerfile \
+  -t <Agent 镜像名> .
+
+docker build --target release \
+  --build-arg 'MODIFIERS=EXTRA_GO_BUILD_FLAGS=-p=2' \
+  --build-arg OPERATOR_VARIANT=operator-huaweicloud \
+  -f images/operator/Dockerfile \
+  -t <Operator 镜像名> .
 ```
 
 再做 HuaweiCloud 相关单测：
@@ -229,10 +251,10 @@ go test -mod=vendor ./pkg/huaweicloud/...
 go test -mod=vendor -tags ipam_provider_huaweicloud ./pkg/ipam/allocator/huaweicloud/...
 ```
 
-完成检查后删除临时 Go 缓存；编译出的二进制仍在 `$WORKDIR/cilium`，不会写入系统盘。
+完成检查后删除临时目录。保留挂载盘 Go 缓存可加速后续增量构建；空间不足时再清理它。
 
 ```bash
-rm -rf "$WORKDIR/.cache/go-build" "$WORKDIR/.tmp"
+rm -rf "$WORKDIR/.tmp"
 ```
 
 本机没有完整 Cilium 构建环境时，可以交给 CI 或镜像流水线。无论用哪种方式，operator 镜像必须包含：
@@ -573,7 +595,7 @@ kubectl -n hwc-test wait pod/curl --for=condition=Ready --timeout=120s
 查看 BPF map：
 
 ```bash
-kubectl -n kube-system exec ds/cilium -- cilium-dbg bpf map list | grep cilium_hwc
+kubectl -n kube-system exec ds/cilium -- cilium-dbg map list | grep cilium_hwc
 ```
 
 应该能看到：
@@ -591,21 +613,37 @@ operator 是否把 SubENI 状态写到了 `CiliumNode.status.huawei-cloud`。
 在测试 Pod 里验证 DNS、Service 和外部访问：
 
 ```bash
-kubectl -n hwc-test exec curl -- nslookup kubernetes.default.svc.cluster.local
+kubectl -n hwc-test exec curl -- nslookup kubernetes.default.svc.cluster.local.
 kubectl -n hwc-test exec curl -- curl -k https://kubernetes.default.svc
 kubectl -n hwc-test exec curl -- curl -I https://www.huaweicloud.com
 ```
 
 集群启用了 NetworkPolicy 时，再执行一条允许与一条拒绝规则，确认策略仍生效。入方向流量去 VLAN 后会回到 Cilium 原生 datapath。
 
+DNS 验证建议使用末尾带点号的绝对域名。若节点配置了额外搜索域，不带末尾点号的名称会
+依次拼接搜索域；上游 DNS 不可达时，正确的集群内记录也可能因为前序查询超时而被误判为
+不可达。可同时查看 Pod 的 `/etc/resolv.conf` 和 CoreDNS 日志确认。
+
 ### 11.5 删除 Pod 后验证回收
 
 ```bash
+POD_IP=$(kubectl -n hwc-test get pod curl -o jsonpath='{.status.podIP}')
 kubectl -n hwc-test delete pod curl
-kubectl get ciliumnodes -o yaml | grep -A30 'huawei-cloud'
+kubectl get ciliumnodes -o go-template='{{range .items}}{{.metadata.name}}{{"\n"}}{{range $ip,$v := .status.ipam.used}}  {{$ip}} {{$v.owner}}{{"\n"}}{{end}}{{end}}'
 ```
 
-观察 SubENI/IP 状态是否回收，BPF map 中对应 Pod IP 的条目是否删除。
+确认 `$POD_IP` 已从 `status.ipam.used` 和两张 BPF map 删除。地址仍出现在
+`spec.ipam.pool` 或 `status.huawei-cloud.subenis` 不代表泄漏：这通常是满足
+`pre-allocate` 水位线而保留的可复用 SubENI。只有仍标记为 used、BPF 条目残留，或云侧
+数量长期超过配置水位线时，才按泄漏处理。
+
+### 11.6 排空节点前检查 SubENI 容量
+
+节点排空会把普通工作负载集中到其余可调度节点。执行 `kubectl drain` 前，先核对目标节点的
+实例规格 SubENI 上限、`CiliumNode.spec.ipam.pool`、`status.ipam.used` 和待迁移 Pod 数量。
+剩余节点容量不足时，新 Pod 会保持 `ContainerCreating` 并报告 `no IPs currently available`；
+这时应恢复原节点调度或扩充合规容量，不要反复删除 Pod，也不要把实例配额错误当成 CNI
+故障。排空结束后必须执行 `kubectl uncordon <node>`，并确认工作负载和 IPAM 状态收敛。
 
 ## 12. 升级已有安装
 

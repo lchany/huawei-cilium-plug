@@ -1,0 +1,91 @@
+From b2dbeb51e8834d45a41ae5f40e3ab1abbaf0fbaa Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 15:41:21 +0800
+Subject: [PATCH 1/4] huaweicloud: handle inline VLAN ingress frames
+
+---
+ bpf/lib/huaweicloud.h                         | 30 +++++++++++++++----
+ .../cilium/templates/cilium-configmap.yaml    |  6 ++++
+ 2 files changed, 31 insertions(+), 5 deletions(-)
+
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+index d0fc3016..545fb931 100644
+--- a/bpf/lib/huaweicloud.h
++++ b/bpf/lib/huaweicloud.h
+@@ -66,6 +66,11 @@ struct hwc_ep_info {
+ 	__u16 flags;
+ };
+ 
++struct hwc_vlan_hdr {
++	__be16 tci;
++	__be16 encapsulated_proto;
++};
++
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_HASH);
+ 	__type(key, struct hwc_vlan_mac_key);
+@@ -141,15 +146,12 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	struct hwc_ep_info *ep;
+ 	void *data, *data_end;
+ 	struct ethhdr *eth;
++	__u16 vlan_id;
+ 
+ 	/* Only process traffic on the trunk interface. */
+ 	if (ctx->ifindex != CONFIG(direct_routing_dev_ifindex))
+ 		return CTX_ACT_OK;
+ 
+-	/* Packets without a VLAN tag are not SubENI traffic. */
+-	if (!ctx->vlan_present)
+-		return CTX_ACT_OK;
+-
+ 	/* Validate Ethernet header bounds. */
+ 	data     = (void *)(long)ctx->data;
+ 	data_end = (void *)(long)ctx->data_end;
+@@ -157,8 +159,26 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	if ((void *)(eth + 1) > data_end)
+ 		return DROP_INVALID;
+ 
++	/*
++	 * Depending on the NIC driver and its offload capabilities, Linux exposes
++	 * the VLAN either as skb metadata or leaves the 802.1Q header inline. Huawei
++	 * Cloud virtio devices can use the latter representation, so support both.
++	 */
++	if (ctx->vlan_present) {
++		vlan_id = ctx->vlan_tci & 0x0fff;
++	} else if (eth->h_proto == bpf_htons(ETH_P_8021Q) ||
++		   eth->h_proto == bpf_htons(ETH_P_8021AD)) {
++		struct hwc_vlan_hdr *vlan = (void *)(eth + 1);
++
++		if ((void *)(vlan + 1) > data_end)
++			return DROP_INVALID;
++		vlan_id = bpf_ntohs(vlan->tci) & 0x0fff;
++	} else {
++		return CTX_ACT_OK;
++	}
++
+ 	/* Build the lookup key from VLAN ID and destination MAC. */
+-	key.vlan_id = ctx->vlan_tci & 0xfff;
++	key.vlan_id = vlan_id;
+ 	key.mac[0] = eth->h_dest[0];
+ 	key.mac[1] = eth->h_dest[1];
+ 	key.mac[2] = eth->h_dest[2];
+diff --git a/install/kubernetes/cilium/templates/cilium-configmap.yaml b/install/kubernetes/cilium/templates/cilium-configmap.yaml
+index a3a38c09..f21d9f15 100644
+--- a/install/kubernetes/cilium/templates/cilium-configmap.yaml
++++ b/install/kubernetes/cilium/templates/cilium-configmap.yaml
+@@ -649,6 +649,12 @@ data:
+   enable-endpoint-routes: "true"
+   auto-create-cilium-node-resource: "true"
+ {{- end }}
++
++{{- if eq $ipam "huaweicloud" }}
++  # Huawei Cloud SubENI addresses are local endpoint addresses and require
++  # host routes so node-local traffic reaches the endpoint veth directly.
++  enable-endpoint-routes: "true"
++{{- end }}
+ {{- if .Values.alibabacloud.nodeSpec.vSwitches }}
+   alibabacloud-vswitches: {{ .Values.alibabacloud.nodeSpec.vSwitches | join "," | quote }}
+ {{- end }}
+-- 
+2.43.0
+

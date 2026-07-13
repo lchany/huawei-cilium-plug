@@ -1,0 +1,51 @@
+From 37e2b26e02dd0160fd012a0dfd43539c30cf4e8b Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 17:20:26 +0800
+Subject: [PATCH 3/4] huaweicloud: strip duplicate VLAN representations
+
+---
+ bpf/lib/huaweicloud.h | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+index ba894ec6..4785b42a 100644
+--- a/bpf/lib/huaweicloud.h
++++ b/bpf/lib/huaweicloud.h
+@@ -147,6 +147,8 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	void *data, *data_end;
+ 	struct ethhdr *eth;
+ 	__u16 vlan_id;
++	bool inline_vlan = false;
++	bool metadata_vlan;
+ 
+ 	/* Only process traffic on the trunk interface. */
+ 	if (ctx->ifindex != CONFIG(direct_routing_dev_ifindex))
+@@ -172,6 +174,7 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 		if ((void *)(vlan + 1) > data_end)
+ 			return DROP_INVALID;
+ 		vlan_id = bpf_ntohs(vlan->tci) & 0x0fff;
++		inline_vlan = true;
+ 	} else if (ctx->vlan_present) {
+ 		vlan_id = ctx->vlan_tci & 0x0fff;
+ 	} else {
+@@ -191,7 +194,16 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	if (!ep)
+ 		return CTX_ACT_OK; /* Unknown (VLAN, MAC) — continue default path. */
+ 
+-	/* Strip the VLAN tag before handing off to the endpoint. */
++	/*
++	 * Some drivers expose VLAN metadata while retaining the inline header.
++	 * The first pop clears metadata in that case; a second pop removes the
++	 * inline 802.1Q header.
++	 */
++	metadata_vlan = ctx->vlan_present;
++	if (inline_vlan && metadata_vlan && skb_vlan_pop(ctx) < 0)
++		return DROP_HWC_VLAN_POP_FAIL;
++
++	/* Strip the remaining VLAN tag before handing off to the endpoint. */
+ 	if (skb_vlan_pop(ctx) < 0)
+ 		return DROP_HWC_VLAN_POP_FAIL;
+ 
+-- 
+2.43.0
+

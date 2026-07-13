@@ -4,3 +4,8 @@
 0004-huaweicloud-reliability-fixes.patch
 0005-huaweicloud-enable-subnet-tag-only-selection.patch
 0006-huaweicloud-secure-operator-credential-injection.patch
+0007-huaweicloud-handle-inline-VLAN-ingress-frames.patch
+0008-huaweicloud-prefer-inline-VLAN-headers.patch
+0009-huaweicloud-strip-duplicate-VLAN-representations.patch
+0010-huaweicloud-process-VLAN-on-attached-interface.patch
+0011-ipam-replace-used-address-status-on-refresh.patch

@@ -1,0 +1,37 @@
+From 5d4d4ac7b909617d5072aed3f1a9c3ab677c96e2 Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 17:04:35 +0800
+Subject: [PATCH 2/4] huaweicloud: prefer inline VLAN headers
+
+---
+ bpf/lib/huaweicloud.h | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+index 545fb931..ba894ec6 100644
+--- a/bpf/lib/huaweicloud.h
++++ b/bpf/lib/huaweicloud.h
+@@ -164,15 +164,16 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	 * the VLAN either as skb metadata or leaves the 802.1Q header inline. Huawei
+ 	 * Cloud virtio devices can use the latter representation, so support both.
+ 	 */
+-	if (ctx->vlan_present) {
+-		vlan_id = ctx->vlan_tci & 0x0fff;
+-	} else if (eth->h_proto == bpf_htons(ETH_P_8021Q) ||
+-		   eth->h_proto == bpf_htons(ETH_P_8021AD)) {
++	/* Prefer the inline header when both representations are observable. */
++	if (eth->h_proto == bpf_htons(ETH_P_8021Q) ||
++	    eth->h_proto == bpf_htons(ETH_P_8021AD)) {
+ 		struct hwc_vlan_hdr *vlan = (void *)(eth + 1);
+ 
+ 		if ((void *)(vlan + 1) > data_end)
+ 			return DROP_INVALID;
+ 		vlan_id = bpf_ntohs(vlan->tci) & 0x0fff;
++	} else if (ctx->vlan_present) {
++		vlan_id = ctx->vlan_tci & 0x0fff;
+ 	} else {
+ 		return CTX_ACT_OK;
+ 	}
+-- 
+2.43.0
+
