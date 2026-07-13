@@ -24,6 +24,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0004-images-fix-operator-runtime-command-expansion.patch
 ├── 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
 ├── 0006-huaweicloud-support-subnet-selection-by-tags.patch
+├── 0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
 ├── series
 ├── apply.sh
 ├── build-local.sh
@@ -67,12 +68,20 @@ Helm 的 HuaweiCloud Operator Deployment 会显式执行
 并由 Operator 在同 VPC、同可用区内筛选子网。保留 CNI NetConf 的节点级配置方式，补充
 单文件、conflist、字段合并和标签筛选回归测试。显式 `subnetIDs` 的优先级高于标签。
 
+### 0007：隔离 SubENI 策略路由表
+
+取消 HuaweiCloud 对 `egress-multi-home-ip-rule-compat` 的自动开启。每个 SubENI 使用
+`10000 + VLAN ID` 的独立路由表，避免同一 trunk 上不同网关的 SubENI 互相替换默认路由，
+同时避开 Linux 保留表 253～255。VLAN ID 按华为云约束校验为 1～4094，并补充普通单元测试
+和真实 network namespace 特权测试。升级时会在新规则和路由完整写入后清理同一 Pod IP
+遗留的共享 trunk 表规则，避免旧的 priority 110 规则继续优先生效。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 6 个 patch"]
+    patches["按 series 应用 7 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]
