@@ -67,7 +67,7 @@ fi
 
 GIT_AM=(git am)
 if ! git config user.name >/dev/null || ! git config user.email >/dev/null; then
-  GIT_AM=(git -c user.name="HuaweiCloud Cilium Patch Bot" -c user.email="huaweicloud-cilium-patches@example.invalid" am)
+  GIT_AM=(git -c user.name="lchany" -c user.email="lchany@users.noreply.github.com" am)
 fi
 
 while IFS= read -r patch || [[ -n "${patch}" ]]; do

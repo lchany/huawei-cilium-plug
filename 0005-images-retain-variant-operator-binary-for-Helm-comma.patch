@@ -1,6 +1,5 @@
 From 0d3ddd6da44ba13da713e0ecb77dc8d9572b8231 Mon Sep 17 00:00:00 2001
-From: HuaweiCloud Cilium Patch Bot
- <huaweicloud-cilium-patches@example.invalid>
+From: lchany <lchany@users.noreply.github.com>
 Date: Sat, 11 Jul 2026 10:53:22 +0800
 Subject: [PATCH] images: retain variant operator binary for Helm command
 
@@ -22,4 +21,3 @@ index ea38511d..c42253df 100644
  WORKDIR /
 -- 
 2.43.0
-

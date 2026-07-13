@@ -10,7 +10,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 - upstream tag：`v1.12.19`
 - upstream commit：`a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`
-- 已验证适配提交：`ec24eea1fdad3a2ee0319de706d1d9e024840a3f`
+- 当前 patch 数量：9
 
 `apply.sh` 默认检查完整基线 commit，避免把 patch 应用到其他 Cilium 版本。
 
@@ -25,11 +25,14 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 ├── 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
 ├── 0006-huaweicloud-support-subnet-selection-by-tags.patch
 ├── 0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
+├── 0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
+├── 0009-huaweicloud-require-external-operator-credentials.patch
 ├── series
 ├── apply.sh
 ├── build-local.sh
 ├── huaweicloud-values.example.yaml
 ├── INSTALL-DEPLOY.md
+├── TROUBLESHOOTING.md
 └── README.md
 ```
 
@@ -76,12 +79,25 @@ Helm 的 HuaweiCloud Operator Deployment 会显式执行
 和真实 network namespace 特权测试。升级时会在新规则和路由完整写入后清理同一 Pod IP
 遗留的共享 trunk 表规则，避免旧的 priority 110 规则继续优先生效。
 
+### 0008：兼容华为云入口 VLAN 表示
+
+按 Cilium v1.12.19 的 TC 数据路径适配线内 802.1Q/802.1ad、skb VLAN 元数据以及二者
+同时存在的情况。命中 SubENI 映射后显式标记为已处理，避免同一程序后续读取旧
+`vlan_present` 状态而被通用 VLAN 过滤误丢弃。v1.12.19 已使用正确的
+`HWC_TRUNK_IFINDEX`，因此没有移植 v1.19.1 的 ifindex 修复。
+
+### 0009：使用外部 Secret 注入 Operator 凭据
+
+保留 v1.12.19 原生的 `CILIUM_HUAWEI_CLOUD_*` 环境变量接口，但不再从 Helm values
+生成包含 AK/SK 的 Secret。部署前必须创建 Secret，并通过 `huaweicloud.existingSecret`
+引用；Secret 或键不存在时 Operator Pod 会明确启动失败。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 7 个 patch"]
+    patches["按 series 应用 9 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]
@@ -100,7 +116,9 @@ git rev-parse HEAD
 
 从准备、构建、镜像分发到验收的完整步骤见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
 部署配置从 [huaweicloud-values.example.yaml](huaweicloud-values.example.yaml) 复制，填写
-实际云资源后使用；不要提交包含 AK/SK 的 values 文件。
+实际云资源后使用。AK/SK 只写入 Kubernetes Secret，不写入 values 或命令行。
+
+版本适配审核、实际问题对应关系和验证记录见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
 华为云子网既可以通过 `huaweicloud.subnetIDs` 指定，也可以通过
 `huaweicloud.subnetTags` 按标签选择；同时配置时子网 ID 优先。节点级差异化配置可通过

@@ -86,7 +86,7 @@ git clone --branch patch-archive/huaweicloud-v1.12.19 \
   huawei-cilium-patches
 ```
 
-目录中应有 7 个编号 patch、`series`、`apply.sh` 和两份文档。
+目录中应有 9 个编号 patch、`series`、`apply.sh`、部署示例和问题记录。
 
 ## 3. 获取 Cilium v1.12.19
 
@@ -123,10 +123,10 @@ a1d7fbd43b563c809330b1c3e28165a3e7ff43aa
 "$WORKDIR/huawei-cilium-patches/apply.sh"
 ```
 
-成功后会新增 7 个提交：
+成功后会新增 9 个提交：
 
 ```bash
-git log --oneline --max-count=8
+git log --oneline --max-count=10
 ```
 
 如果 `git am` 失败，先执行 `git am --abort`。确认源码基线和工作区状态后再重试；不要
@@ -250,8 +250,29 @@ MAC 和系统网卡 MAC 对照后再填写，不能只取第一张网卡。
 
 ## 8. 准备 Helm values
 
-从无密示例创建权限为 `0600` 的临时文件。AK/SK 不要放在命令行、Shell 历史或 Git
-提交中。
+先创建 Operator 引用的 Kubernetes Secret，再从无密示例创建 values。AK/SK 不要放在
+Helm values、命令行、Shell 历史或 Git 提交中。下面命令会交互式读取凭据；输入不会
+回显，也不会出现在进程参数中。
+
+```bash
+read -rsp 'HuaweiCloud AK: ' HUAWEI_AK; echo
+read -rsp 'HuaweiCloud SK: ' HUAWEI_SK; echo
+kubectl -n kube-system create secret generic cilium-huaweicloud \
+  --from-literal=CILIUM_HUAWEI_CLOUD_ACCESS_KEY="$HUAWEI_AK" \
+  --from-literal=CILIUM_HUAWEI_CLOUD_SECRET_KEY="$HUAWEI_SK" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset HUAWEI_AK HUAWEI_SK
+```
+
+只核对 Secret 和键名，不读取或打印密钥值：
+
+```bash
+kubectl -n kube-system get secret cilium-huaweicloud \
+  -o jsonpath='{range $k,$v := .data}{$k}{"\n"}{end}' | sort
+```
+
+输出必须包含 `CILIUM_HUAWEI_CLOUD_ACCESS_KEY` 和
+`CILIUM_HUAWEI_CLOUD_SECRET_KEY`。
 
 ```bash
 cd "$WORKDIR"
@@ -267,7 +288,7 @@ ${EDITOR:-vi} huawei-values.yaml
 | --- | --- | --- |
 | `image.repository` | Agent 镜像基础仓库 | 与第 6 节选择的分发方式一致 |
 | `operator.image.repository` | 不带 `-huaweicloud` 的 Operator 基础仓库 | 例如 `registry.example.com/network/operator` |
-| `accessKey` / `secretKey` | 有 SubENI 权限的云账号凭据 | 不要提交此文件 |
+| `huaweicloud.existingSecret` | 预创建的凭据 Secret 名称 | 默认 `cilium-huaweicloud` |
 | `projectID`、`region`、`vpcID` | 当前云项目、区域和 VPC | 与节点所属网络一致 |
 | `trunkInterface` | 第 7 节确认的网卡 | 常见为 `eth0`，不能猜测 |
 | `subnetIDs` 或 `subnetTags` | 按 ID 或标签选择用于 SubENI 的子网 | 二选一；同时填写时 `subnetIDs` 优先 |
@@ -334,7 +355,7 @@ cni:
 
 ```bash
 stat -c '%a %n' huawei-values.yaml
-if grep -nE '<(AK|SK|项目 ID|VPC ID|SubENI 子网 ID|安全组 ID)' huawei-values.yaml; then
+if grep -nE '<(项目 ID|VPC ID|SubENI 子网 ID|安全组 ID)' huawei-values.yaml; then
   echo '仍有未填写的占位符'
   exit 1
 fi
@@ -363,10 +384,20 @@ kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2alpha1/
 
 ```bash
 cd "$WORKDIR/cilium"
-helm lint ./install/kubernetes/cilium -f huaweicloud-values.yaml
+helm lint ./install/kubernetes/cilium -f "$WORKDIR/huawei-values.yaml"
 helm template cilium ./install/kubernetes/cilium \
   --namespace kube-system \
-  -f huaweicloud-values.yaml >/dev/null
+  -f "$WORKDIR/huawei-values.yaml" \
+  > "$WORKDIR/cilium-rendered.yaml"
+
+# 只能出现 Operator 的两个 secretKeyRef；不能渲染出名为
+# cilium-huaweicloud 的 Secret 对象。
+grep -n -A5 'name: CILIUM_HUAWEI_CLOUD_' "$WORKDIR/cilium-rendered.yaml"
+if grep -B2 -A2 '^kind: Secret$' "$WORKDIR/cilium-rendered.yaml" |
+   grep -q '^  name: cilium-huaweicloud$'; then
+  echo '错误：Chart 仍在生成华为云凭据 Secret'
+  exit 1
+fi
 ```
 
 渲染成功后安装：
@@ -376,12 +407,12 @@ kubectl config current-context
 helm upgrade --install cilium ./install/kubernetes/cilium \
   --namespace kube-system \
   --create-namespace \
-  -f huaweicloud-values.yaml
+  -f "$WORKDIR/huawei-values.yaml"
 helm status cilium --namespace kube-system
 ```
 
-安装完成后删除本地临时 values 文件。集群中的 `cilium-huaweicloud` Secret 仍由 Helm
-维护。
+安装完成后删除本地渲染文件。`cilium-huaweicloud` 是安装前独立创建的 Secret，不由
+Helm release 管理；卸载或回滚 Cilium 不会自动删除它。需要删除时必须由运维显式执行。
 
 ## 10. 部署后检查
 

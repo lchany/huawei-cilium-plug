@@ -1,6 +1,5 @@
 From d8fcd0fd9cec82c0e1d9ca2035c6ce40c5fcc30a Mon Sep 17 00:00:00 2001
-From: HuaweiCloud Cilium Patch Bot
- <huaweicloud-cilium-patches@example.invalid>
+From: lchany <lchany@users.noreply.github.com>
 Date: Sat, 11 Jul 2026 09:47:41 +0800
 Subject: [PATCH] images: fix operator runtime command expansion
 
@@ -25,4 +24,3 @@ index 4eaec0f2..ea38511d 100644
 +CMD ["/usr/bin/cilium-operator"]
 -- 
 2.43.0
-

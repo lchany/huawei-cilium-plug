@@ -5,3 +5,5 @@
 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
 0006-huaweicloud-support-subnet-selection-by-tags.patch
 0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
+0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
+0009-huaweicloud-require-external-operator-credentials.patch

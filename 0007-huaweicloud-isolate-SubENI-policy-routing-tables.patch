@@ -1,6 +1,5 @@
 From 7a34e2cec40ec6b0d6bfe7ae21570f60665905f8 Mon Sep 17 00:00:00 2001
-From: HuaweiCloud Cilium Patch Bot
- <huaweicloud-cilium-patches@example.invalid>
+From: lchany <lchany@users.noreply.github.com>
 Date: Mon, 13 Jul 2026 19:27:41 +0800
 Subject: [PATCH] huaweicloud: isolate SubENI policy routing tables
 
@@ -465,4 +464,3 @@ index ab1cb37dd..f4f81a673 100644
  	ipv6 := net.ParseIP("fd00::2").To16()
 -- 
 2.33.0
-

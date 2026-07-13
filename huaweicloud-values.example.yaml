@@ -18,8 +18,8 @@ ipam:
 
 huaweicloud:
   enabled: true
-  accessKey: "<AK>"
-  secretKey: "<SK>"
+  # 先按部署文档创建此 Secret；不要把 AK/SK 写入 values。
+  existingSecret: cilium-huaweicloud
   projectID: "<项目 ID>"
   region: "<区域，例如 cn-south-1>"
   vpcID: "<VPC ID>"

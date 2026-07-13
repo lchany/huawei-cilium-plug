@@ -1,6 +1,5 @@
 From be69b0cad3250e5f113fab14e1334bc3164dea3b Mon Sep 17 00:00:00 2001
-From: HuaweiCloud Cilium Patch Bot
- <huaweicloud-cilium-patches@example.invalid>
+From: lchany <lchany@users.noreply.github.com>
 Date: Sat, 11 Jul 2026 09:08:30 +0800
 Subject: [PATCH] huaweicloud: add generated files dependencies and tests
 
@@ -75769,4 +75768,3 @@ index ce03027eda..930b1d2a43 100644
  # sigs.k8s.io/controller-tools => github.com/cilium/controller-tools v0.6.2
 -- 
 2.43.0
-

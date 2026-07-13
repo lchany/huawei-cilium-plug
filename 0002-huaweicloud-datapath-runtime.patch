@@ -1,6 +1,5 @@
 From 2a7178b309c8aa83f0039c5bb6071e70fb30b4ef Mon Sep 17 00:00:00 2001
-From: HuaweiCloud Cilium Patch Bot
- <huaweicloud-cilium-patches@example.invalid>
+From: lchany <lchany@users.noreply.github.com>
 Date: Sat, 11 Jul 2026 09:07:31 +0800
 Subject: [PATCH] huaweicloud: wire SubENI VLAN datapath
 
@@ -533,4 +532,3 @@ index e84e949968..e7f3b2f0f3 100644
  	LogFile      string                 `json:"log-file"`
 -- 
 2.43.0
-
