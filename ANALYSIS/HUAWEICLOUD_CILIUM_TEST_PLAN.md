@@ -2,13 +2,13 @@
 
 ## 1. 目的与结论
 
-本计划以当前 patch 归档中的 `INSTALL-DEPLOY.md`、7 个 patch、现有 Go 测试和
+本计划以当前 patch 归档中的 `INSTALL-DEPLOY.md`、14 个 patch、现有 Go 测试和
 `test/hwc-real-e2e/netprobe.go` 为依据，补齐客户现有部署验收方案未覆盖或覆盖较弱的部分。
 
 当前方案已经覆盖构建、镜像检查、Helm 部署、基础就绪检查，以及 Pod 的 SubENI、Service、
 DNS、NetworkPolicy 和公网访问方向；但代码改动涉及完整的云 API、IPAM 生命周期、
-CiliumNode 状态同步、BPF map、VLAN 数据面和异常恢复，现有自动化测试只有 9 个主要用例，
-不足以支撑生产验收。建议先完成 P0，再进行客户环境验收；P1 在发布前完成，P2 可进入后续
+CiliumNode 状态同步、BPF map、VLAN 数据面和异常恢复，现有自动化覆盖仍以少量关键用例
+为主，不足以支撑生产验收。建议先完成 P0，再进行客户环境验收；P1 在发布前完成，P2 可进入后续
 稳定性迭代。
 
 > 范围说明：仓库是 patch 归档，不是完整 Cilium 源码。单元/集成测试需要把 `series` 应用到
@@ -20,15 +20,16 @@ CiliumNode 状态同步、BPF map、VLAN 数据面和异常恢复，现有自动
 
 | 模块 | 已有验证 |
 | --- | --- |
-| Agent 路由兼容 | HuaweiCloud 使用 egress multi-home 规则 |
+| Agent 路由兼容 | HuaweiCloud 不自动开启 compat；每个 SubENI 使用 `10000 + VLAN ID` 独立表 |
 | 子网选择 | 未知容量可选；标签筛选；显式 subnet ID 优先 |
 | 安全组 | 未显式配置时继承 trunk port 安全组 |
 | IP 回收 | 回收候选顺序稳定 |
 | BPF map | 第二张 map 写失败时回滚第一张 map |
 | VPC CIDR | 主/辅助 CIDR 解析，忽略非法辅助 CIDR |
-| 配置安全 | AK/SK 参数标记为敏感参数 |
+| 配置安全 | Operator 通过预创建的外部 Secret 获取 AK/SK，Chart 不生成含密 Secret |
 | CNI 配置 | 单文件、conflist 解析 subnet tags；CNI/Agent 字段合并 |
 | 构建产物 | Agent/Operator 镜像构建、导出及 Operator 两个命令路径验证 |
+| VLAN 入口 | BPF 编译覆盖线内 802.1Q/802.1ad、metadata 和双表示处理代码 |
 
 ### 2.2 客户方案已有现场验收
 
@@ -44,18 +45,22 @@ CiliumNode 状态同步、BPF map、VLAN 数据面和异常恢复，现有自动
 
 | ID | 测试项 | 核心场景和断言 | 对应代码 |
 | --- | --- | --- | --- |
-| P0-01 | Patch 可重放与全量定向测试 | 在干净固定基线上依次应用 7 个 patch；`series` 全部成功；工作树无意外修改；执行 HuaweiCloud、IPAM、Operator、CNI、node discovery、daemon 定向测试 | `apply.sh`、`series`、`build-local.sh` |
+| P0-01 | Patch 可重放与全量定向测试 | 在干净固定基线上依次应用 14 个 patch；`series` 全部成功；工作树无意外修改；执行 HuaweiCloud、IPAM、Operator、CNI、node discovery、daemon、routing 和 BPF 定向测试 | `apply.sh`、`series`、`build-local.sh` |
 | P0-02 | 云 API 正常与失败路径 | Create/BatchCreate/Get/List/Delete/Tag SubENI；分页 marker；等待 Active；超时、404、限流、5xx、鉴权失败；batch 部分成功时回滚；错误码标准化 | `pkg/huaweicloud/api/api.go`、`error.go` |
 | P0-03 | IPAM 分配生命周期 | 首次分配、批量分配、容量不足、跨 AZ/VPC 排除、无可用子网、显式安全组/标签安全组/继承 trunk 三种路径；CiliumNode status 与云端一致 | `pkg/huaweicloud/eni/node.go`、`instances.go` |
 | P0-04 | IP 释放与回收安全 | `releaseExcessIPs=false` 不删除；开启后只释放空闲 SubENI；延迟窗口；已被 Pod 使用的 IP 永不释放；Delete API 失败可重试且状态不丢；连续调谐幂等 | `pkg/huaweicloud/eni/node.go` |
 | P0-05 | 子网标签完整矩阵 | 单标签、多标签 AND、无匹配、空标签、标签值为空、同标签跨 VPC/AZ、容量不足；ID 与标签并存时始终 ID 优先；多个合格子网的选择策略稳定 | `instances.go`、`0006` |
 | P0-06 | CNI/Agent 配置优先级 | Agent-only、CNI-only、字段级合并、空值不覆盖、`.conf`、`.conflist`、错误 JSON、错误字段类型；滚动重启后 CiliumNode 中值正确 | `plugins/cilium-cni/types`、`pkg/nodediscovery` |
 | P0-07 | BPF map 生命周期 | endpoint create/restore/delete；两张 map 成功写入；第一/第二张写失败；旧值存在/不存在时回滚；重复事件幂等；非法 IPv4、MAC、VLAN、ifindex；map reopen/close | `pkg/huaweicloud/subenimap/manager.go`、`endpointmanager/huaweicloud_subeni.go` |
-| P0-08 | VLAN 数据面双向通信 | 同节点 Pod↔Pod、跨节点 Pod↔Pod、Pod↔Node、Pod↔ClusterIP、Pod↔外网；抓包确认入方向去 VLAN、出方向添加正确 VLAN/MAC；无策略与有策略均验证 | `bpf/lib/huaweicloud.h`、`bpf_host.c` |
+| P0-08 | VLAN 数据面双向通信 | 同节点 Pod↔Pod、跨节点 Pod↔Pod、Pod↔Node、Pod↔ClusterIP、Pod↔外网；覆盖线内 802.1Q、802.1ad、skb metadata 和双表示；确认只执行需要的 pop 且 handled 后不再进入通用 VLAN 过滤；无策略与有策略均验证 | `0008`、`bpf/lib/huaweicloud.h`、`bpf_host.c` |
 | P0-09 | NetworkPolicy 回归 | 默认拒绝、L3/L4 allow、跨节点 allow/deny、Service 后端策略、策略增删即时生效；确认 VLAN 处理未绕过 conntrack/policy | HuaweiCloud BPF 接线及 Cilium 原生 policy |
 | P0-10 | Operator 镜像启动契约 | Config.Cmd 精确为 `/usr/bin/cilium-operator`；通用和 variant 二进制均存在并可启动；Helm 渲染命令与镜像内路径一致；容器重启无 `${OPERATOR_VARIANT}` | `0004`、`0005`、Helm deployment |
-| P0-11 | 凭据与日志安全 | Helm Secret 正确引用；启动参数、配置打印、错误日志、panic 日志均不出现 AK/SK；日志采集侧再扫描一次；无密 values 可提交、有密文件权限 0600 | Operator flags、Secret、`pkg/option/config.go` |
+| P0-11 | 外部 Secret 与凭据安全 | `existingSecret` 为空时 Helm 失败；Secret/AK/SK 键缺失时 Operator 明确失败；Chart 不生成 HuaweiCloud Secret；values、release、命令行、日志、事件均无真实 AK/SK；upgrade/rollback/uninstall 不删除外部 Secret | `0009`、Operator deployment、Helm templates |
+| P0-12 | 子网真实容量同步 | V1/V2 子网容量与 V3 Virsubnet 正确合并；容量 0/不足/相等、分页、缺失/重复 ID、负容量和 API 错误均有确定行为；多个候选选择真实余量最大者 | `0010`、`subnet_capacity.go`、`instances.go` |
+| P0-13 | 客户 25 个数据面验收 | `CUST-DP-01`～`25` 首次安装及重启恢复两轮验证功能、实际后端和源 IP；当前实机 24 Pass、场景 11 因 kube-proxy Cluster SNAT 与客户源-IP期望冲突而 Block，发布前需客户确认语义 | `ANALYSIS/HUAWEICLOUD_CILIUM_CUSTOMER_ACCEPTANCE_CASES.md`、`HUAWEICLOUD_CILIUM_5_NODE_LIVE_RESULTS.md` |
+| P0-14 | 客户 IPAM 水位配置 | `0011` 已补传播；验证 CiliumNode、水位与容量门禁。实例硬上限不足 10 时明确 Block，并验证该规格的耗尽边界 | `CUST-CFG-13`、`CUST-EDGE-08`、`mutateNodeResource` |
 | P0-12 | 基础回归 | Cilium upstream 与本改动相关的 IPAM、CNI、datapath、endpoint restore、iptables/masquerade 测试无回归；集群重启后现有 Pod 网络恢复 | 被修改的 upstream 模块 |
+| P0-13 | 源码边界门禁 | 完成 `HUAWEICLOUD_CILIUM_BOUNDARY_COVERAGE_REVIEW.md` 中 P0/S 场景，重点验证多网卡 trunk、跨 VPC SG、batch 空/部分响应、最终一致性 404、显式子网归属、SG fallback、回收竞态、VLAN/LXC ID 截断、unknown VLAN fail-closed 和路由部分安装 | `BMETA`、`BAPI`、`BCFG`、`BIPAM`、`BMAP`、`BVLAN`、`BROUTE` |
 
 ### P1：发布前完成
 
@@ -91,12 +96,12 @@ CiliumNode 状态同步、BPF map、VLAN 数据面和异常恢复，现有自动
 3. 运行 `go vet`/定向静态检查，并检查新增代码中的错误吞掉、无 context 超时、敏感日志。
 4. 输出变更模块—测试用例映射表。
 
-退出条件：7 个 patch 可重复应用，代码格式/静态检查无阻断问题。
+退出条件：14 个 patch 可重复应用，代码格式/静态检查无阻断问题。
 
 ### 阶段 B：单元与组件测试（2～3 天）
 
 1. 先执行现有测试，建立结果基线。
-2. 优先补 P0-02～P0-07、P0-10、P0-11。
+2. 优先补 P0-02～P0-08、P0-10、P0-11。
 3. 对云 API 使用 fake HTTP server，对调谐逻辑使用已有 mock API，对 BPF map 使用内存 backend。
 4. 对新增/修改包采集覆盖率；关键分支目标不低于 80%，云资源删除和回滚路径必须逐分支覆盖。
 
@@ -107,13 +112,13 @@ CiliumNode 状态同步、BPF map、VLAN 数据面和异常恢复，现有自动
 1. 执行 `build-local.sh`，确认 `build.status=SUCCESS` 和两份镜像 SHA256。
 2. 检查镜像架构、用户、Cmd、两个 Operator 二进制和 Agent/CNI 二进制。
 3. 对示例 values 执行 `helm lint`、`helm template`，覆盖 subnet ID、subnet tags、二者并存、
-   空配置和错误 repository 五组 values。
+   空配置、错误 repository、`existingSecret` 为空及自定义 Secret 名称。
 
 退出条件：镜像可重复构建；Helm 渲染结果与配置优先级、启动命令一致。
 
 ### 阶段 D：华为云功能 E2E（2～3 天）
 
-1. 使用至少 2 节点，尽可能覆盖 2 AZ；记录 VPC、子网标签、trunk 端口和安全组的脱敏信息。
+1. 使用 5 节点、至少 2 AZ；记录 VPC、子网标签、trunk 端口和安全组的脱敏信息。
 2. 先执行客户已有就绪、SubENI、Service、DNS、NetworkPolicy、公网用例。
 3. 补 P0-08、P0-09、P0-12，以及 P1 的多节点、重启、容量、Service 和 MTU 用例。
 4. 每个网络用例同时保存：Pod/Node 地址、CiliumNode 摘要、BPF map 摘要、tcpdump 证据和结果。
@@ -154,6 +159,8 @@ go tool cover -func=coverage-huaweicloud.out
 | 策略 | 无策略、默认拒绝、允许、动态增删 |
 | 生命周期 | 新建、删除、重建、Agent 重启、Operator 重启、Node 重启 |
 | 故障 | API 超时/429/5xx、子网耗尽、权限不足、错误 trunk、安全组错误 |
+| VLAN 表示 | 线内 802.1Q、线内 802.1ad、skb metadata、线内+metadata |
+| 凭据 | 正常 Secret、空引用、缺对象、缺 AK/SK 键、错误凭据、轮换和卸载保留 |
 
 ## 7. 结果记录与发布门禁
 
@@ -170,8 +177,8 @@ go tool cover -func=coverage-huaweicloud.out
 
 ## 8. 当前阻塞与所需输入
 
-- 缺少独立的“客户测试方案”附件；本计划暂以仓库 `INSTALL-DEPLOY.md` 第 10 节作为客户
-  现有验收基线。如客户另有 Excel/Word/Markdown 用例，需要再做逐条去重和差距映射。
-- 真机 E2E 需要华为云 Kubernetes 集群、支持 SubENI 的 ECS、VPC/子网/安全组及脱敏后的
-  环境标识；凭据不得写入本文或 Git。
+- 五台支持 SubENI 的 ECS 已购买；仍需填写实际拓扑、VPC/子网/安全组、配额、镜像 digest
+  及脱敏后的环境标识。凭据不得写入本文或 Git。
+- 若客户另有 Excel/Word/Markdown 验收用例，需要与
+  `HUAWEICLOUD_CILIUM_5_NODE_TEST_SCENARIOS.md` 做逐条去重和差距映射。
 - 当前仓库只有 patch，执行测试前还需准备固定基线的完整 Cilium 源码树。

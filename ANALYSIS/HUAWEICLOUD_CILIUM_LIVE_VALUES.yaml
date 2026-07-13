@@ -1,0 +1,85 @@
+# Five-node HuaweiCloud live-test profile derived from the customer settings.
+# Credentials are deliberately excluded; create Secret cilium-huaweicloud separately.
+image:
+  override: localhost/huaweicloud/cilium:v1.12.19-huaweicloud
+  pullPolicy: IfNotPresent
+  useDigest: false
+
+operator:
+  replicas: 1
+  image:
+    override: localhost/huaweicloud/operator-huaweicloud:v1.12.19-huaweicloud
+    pullPolicy: IfNotPresent
+    useDigest: false
+  prometheus:
+    enabled: true
+
+huaweicloud:
+  enabled: true
+  existingSecret: cilium-huaweicloud
+  projectID: 08ba7d4a16800f462fc1c00f760e625b
+  region: cn-south-1
+  vpcID: bab95f74-bf6a-4f0f-b17e-c6beed000712
+  trunkInterface: eth0
+  subnetIDs:
+    - d306e11a-359f-4c9e-9621-d83ab58c74de
+  securityGroupIDs: []
+  releaseExcessIPs: false
+
+ipam:
+  mode: huaweicloud
+
+cluster:
+  id: 1
+  name: customer-live
+
+annotateK8sNode: true
+autoDirectNodeRoutes: false
+bandwidthManager:
+  enabled: false
+bpf:
+  preallocateMaps: false
+  monitorAggregation: maximum
+  monitorInterval: 600s
+debug:
+  enabled: false
+disableCNPStatusUpdates: true
+disableEndpointCRD: "false"
+endpointHealthChecking:
+  enabled: true
+endpointRoutes:
+  enabled: true
+hubble:
+  enabled: true
+ipv4:
+  enabled: true
+ipv6:
+  enabled: false
+enableIPv4Masquerade: false
+kubeProxyReplacement: probe
+l7Proxy: false
+nodePort:
+  enabled: false
+extraConfig:
+  enable-node-port: "false"
+policyAuditMode: true
+prometheus:
+  enabled: true
+tunnel: disabled
+
+identityAllocationMode: kvstore
+etcd:
+  enabled: true
+  managed: false
+  ssl: true
+  endpoints:
+    - https://192.168.1.65:2379
+
+cni:
+  chainingMode: none
+  customConf: true
+  readCniConf: /host/etc/cni/net.d/04-cilium-cni-eni.conf
+  uninstall: false
+
+securityContext:
+  privileged: true

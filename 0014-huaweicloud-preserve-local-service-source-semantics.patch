@@ -1,0 +1,62 @@
+From 6bb462b5a30963da24449152109c6a100d0a7f12 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-8564-1.novalocal>
+Date: Mon, 13 Jul 2026 22:41:17 +0800
+Subject: [PATCH] huaweicloud: preserve local service source semantics
+
+---
+ pkg/datapath/iptables/iptables.go | 32 +++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/pkg/datapath/iptables/iptables.go b/pkg/datapath/iptables/iptables.go
+index 0c4f03475..3638eeac8 100644
+--- a/pkg/datapath/iptables/iptables.go
++++ b/pkg/datapath/iptables/iptables.go
+@@ -1239,6 +1239,32 @@ func (m *IptablesManager) installMasqueradeRules(prog iptablesInterface, ifName,
+ 	return nil
+ }
+ 
++func installHuaweiCloudLocalServiceSNATRules(prog iptablesInterface, localDeliveryInterface, nodeIP, routerIP string) error {
++	rules := [][]string{
++		{
++			"-t", "nat", "-A", ciliumPostNatChain,
++			"-m", "mark", "--mark", "0x4000/0x4000",
++			"-o", localDeliveryInterface,
++			"-m", "comment", "--comment", "huaweicloud local service hairpin SNAT",
++			"-j", "SNAT", "--to-source", routerIP,
++		},
++		{
++			"-t", "nat", "-A", ciliumPostNatChain,
++			"-s", nodeIP,
++			"-o", localDeliveryInterface,
++			"-m", "conntrack", "--ctstate", "DNAT",
++			"-m", "comment", "--comment", "huaweicloud host local service SNAT",
++			"-j", "SNAT", "--to-source", routerIP,
++		},
++	}
++	for _, rule := range rules {
++		if err := prog.runProg(rule); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
+ func createIpset(name string, ipv6 bool) error {
+ 	ipsetFamily := "inet"
+ 	if ipv6 {
+@@ -1423,6 +1449,12 @@ func (m *IptablesManager) installRules(ifName string) error {
+ 		if err := m.installHostTrafficMarkRule(ip4tables); err != nil {
+ 			return fmt.Errorf("cannot install host traffic mark rule: %w", err)
+ 		}
++		if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++			if err := installHuaweiCloudLocalServiceSNATRules(ip4tables, localDeliveryInterface,
++				node.GetIPv4().String(), node.GetInternalIPv4Router().String()); err != nil {
++				return fmt.Errorf("cannot install HuaweiCloud local service SNAT rules: %w", err)
++			}
++		}
+ 
+ 		if option.Config.IptablesMasqueradingIPv4Enabled() {
+ 			if err := m.installMasqueradeRules(ip4tables, ifName, localDeliveryInterface,
+-- 
+2.33.0
+

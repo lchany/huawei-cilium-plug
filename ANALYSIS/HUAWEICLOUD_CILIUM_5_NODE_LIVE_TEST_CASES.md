@@ -5,8 +5,14 @@
 在 5 台新购华为云 ECS 上，对 HuaweiCloud Cilium v1.12.19 的 SubENI 控制面、VLAN
 数据面、Service、DNS、NetworkPolicy、故障恢复、资源回收和升级回滚进行真实环境验收。
 
-本文是可执行测试单，不包含真实 AK/SK、项目 ID、VPC ID、子网 ID 或安全组 ID。所有
-占位符必须在受控的 `0600` 配置文件中填写，不得提交到 Git 或粘贴到测试报告。
+本轮固定使用 upstream `a1d7fbd43b563c809330b1c3e28165a3e7ff43aa` 加 `series` 中
+14 个 patch 的基线。完整候选场景目录见
+`ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_TEST_SCENARIOS.md`；本文保留 P0/P1 核心场景的
+可执行步骤。
+
+本文是可执行测试单，不包含真实 AK/SK、项目 ID、VPC ID、子网 ID 或安全组 ID。环境
+标识占位符必须在受控的 `0600` 无密 values 中填写；AK/SK 只能进入预创建的 Kubernetes
+Secret。两者均不得提交到 Git 或粘贴到测试报告。
 
 ## 2. 推荐五节点拓扑
 
@@ -39,7 +45,8 @@
 2. 所有删除、重启、限流、子网耗尽和回滚用例必须在变更窗口执行。
 3. 禁止在测试中删除 VPC、业务子网、业务安全组、非测试 SubENI 或非测试节点。
 4. 每次资源删除前，用测试 namespace、节点名、资源标签三重确认目标。
-5. AK/SK 只写入权限 `0600` 的临时 values；测试结束立即删除本地文件并轮换临时凭据。
+5. AK/SK 只能写入预创建的 Kubernetes Secret，不得进入 Helm values、命令行、Shell
+   历史或 Git；测试结束按审批删除或轮换临时凭据。
 6. 故障注入一次只操作一个节点；控制面和两个以上 worker 不得同时重启。
 7. 每个高风险用例开始前保存 CiliumNode、Pod、SubENI 和 Helm 状态，失败后优先回滚。
 
@@ -142,7 +149,8 @@ helm template cilium ./install/kubernetes/cilium -n kube-system \
 ```
 
 预期：CRD server dry-run、lint 和 template 均成功；Operator 镜像无双重 `-huaweicloud`；
-Agent 参数中的 AK/SK 显示为 Secret 引用或脱敏值。
+Operator 的 AK/SK 均为 `existingSecret` 的 required `secretKeyRef`；渲染结果不包含
+HuaweiCloud Secret 对象，也不包含真实 AK/SK。
 
 ### TC-INS-02：首次安装和 rollout
 
@@ -151,13 +159,17 @@ Agent 参数中的 AK/SK 显示为 Secret 引用或脱敏值。
 ```bash
 kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2/
 kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2alpha1/
+kubectl -n kube-system get secret '<HUAWEICLOUD_EXISTING_SECRET>' \
+  -o jsonpath='{range $k,$v := .data}{$k}{"\n"}{end}' | sort
 helm upgrade --install cilium ./install/kubernetes/cilium \
   -n kube-system --create-namespace -f '<HUAWEI_VALUES>'
 kubectl -n kube-system rollout status ds/cilium --timeout=10m
 kubectl -n kube-system rollout status deploy/cilium-operator --timeout=10m
 ```
 
-预期：5/5 Agent Ready，Operator 1/1 Ready；无 CrashLoopBackOff、ImagePullBackOff。
+预期：Secret 键名包含 `CILIUM_HUAWEI_CLOUD_ACCESS_KEY` 和
+`CILIUM_HUAWEI_CLOUD_SECRET_KEY`，但命令不打印值；5/5 Agent Ready，Operator 1/1
+Ready；无 CrashLoopBackOff、ImagePullBackOff。
 
 ### TC-INS-03：Cilium 和 CiliumNode 状态
 
@@ -180,10 +192,33 @@ AZ、trunk、subnet tags 符合实际云资源。
 ```bash
 kubectl -n kube-system logs deploy/cilium-operator >"$EVIDENCE_ROOT/operator.log"
 kubectl -n kube-system logs ds/cilium >"$EVIDENCE_ROOT/agent.log"
-grep -E -- '--huawei-cloud-(access-key|secret-key)=' "$EVIDENCE_ROOT/operator.log"
+helm -n kube-system get manifest cilium >"$EVIDENCE_ROOT/helm-manifest.yaml"
+grep -n -A5 'name: CILIUM_HUAWEI_CLOUD_' "$EVIDENCE_ROOT/helm-manifest.yaml"
 ```
 
-预期：命中项仅显示 `<redacted>`；日志中不存在真实 AK/SK。检查结束后对证据再次脱敏。
+预期：Helm manifest 只包含两个 `secretKeyRef`，不包含 HuaweiCloud Secret 对象；日志、
+Pod spec、Event 和 Helm release 中不存在真实 AK/SK。检查结束后对证据再次脱敏。
+
+### TC-INS-05：外部 Secret 失败契约
+
+优先级：P0；风险：中；一次只验证一种错误配置。
+
+步骤：依次在离线渲染或测试窗口验证 `existingSecret` 为空、Secret 不存在、缺 AK 键、缺
+SK 键；每次验证后立即恢复正确 Secret。
+
+预期：`existingSecret` 为空时 Helm 明确失败；对象或键缺失时 Operator 为
+`CreateContainerConfigError`，不会带空凭据启动；Agent 和已有 Pod 网络不受影响；任何错误
+输出都不包含密钥值。
+
+### TC-INS-06：凭据轮换与 Secret 所有权
+
+优先级：P1；风险：中。
+
+步骤：更新预创建 Secret 后滚动重启 Operator，执行一次只读云 API 和一次测试 Pod 创建；
+再验证 Helm upgrade/rollback 不覆盖 Secret。卸载演练只在独立测试窗口执行。
+
+预期：新凭据生效，无重复或泄漏 SubENI；upgrade、rollback、uninstall 均不修改或删除外部
+Secret；Secret 只能由运维显式轮换或删除。
 
 ## 7. 测试工作负载准备
 
@@ -341,6 +376,11 @@ gateway 只保留最后写入值，或先创建 Pod 的网络在后一个 Pod �
 
 ## 9. 数据面与 Service 用例
 
+客户给出的 25 个数据面场景是本节的强制 P0 专项，必须按
+`ANALYSIS/HUAWEICLOUD_CILIUM_CUSTOMER_ACCEPTANCE_CASES.md` 执行。该专项通过唯一 Service
+后端消除负载均衡随机性，并把功能、实际后端、源 IP 分开取证；不能用本节较粗粒度的
+TC-NET-01～05 替代。
+
 ### TC-NET-01：同节点 Pod 到 Pod
 
 优先级：P0；风险：低。
@@ -429,6 +469,29 @@ kubectl -n kube-system exec ds/cilium -- cilium bpf map list
 
 预期：出方向使用对应 SubENI VLAN/MAC，入方向 VLAN 被正确处理；BPF map 条目与 Pod 的
 IP、VLAN、MAC、ifindex 一致。证据不得包含业务流量正文。
+
+### TC-NET-10：入口 VLAN 表示矩阵
+
+优先级：P0；风险：中；对应 `0008`。
+
+步骤：结合 trunk 抓包、`ethtool -k/-K`、Cilium monitor/drop counters 和驱动实际交付行为，
+分别覆盖线内 802.1Q、线内 802.1ad、skb VLAN metadata，以及线内头与 metadata 同时可见的
+情况；每种表示执行跨节点 Pod、ClusterIP、DNS、ICMP、TCP 和 UDP 探测。若环境无法自然
+产生某种表示，应记录 Block，并在可控 tc/netns 环境补测，不能以另一种表示的结果替代。
+
+预期：线内 VLAN 优先解析，单表示只 pop 一次，双表示按实际表示完成两阶段 pop；成功命中
+HuaweiCloud map 后不会被通用 VLAN 过滤再次丢弃。不得出现持续
+`DROP_HWC_VLAN_POP_FAIL`、单向通、DNS/Service 特异失败或 NetworkPolicy 绕过。
+
+### TC-NET-11：错误 VLAN/MAC 与非 trunk 回归
+
+优先级：P1；风险：中。
+
+步骤：在隔离环境构造错误 VLAN、错误目标 MAC、截断 VLAN header 和非 trunk 接口 VLAN
+流量，并观察 map 命中和 drop reason。
+
+预期：错误流量不得投递给其他 Pod；非法头明确丢弃；非 trunk 流量不进入 HuaweiCloud
+helper；Cilium 原生 VLAN 逻辑无回归。
 
 ## 10. NetworkPolicy 用例
 
@@ -579,16 +642,22 @@ kubectl get pods -A -o wide >"$EVIDENCE_ROOT/pods-after.txt"
 - 同节点、同 AZ 跨节点、跨 AZ、Service、DNS、VPC 内网、公网、NetworkPolicy 全部通过。
 - 标签子网选择、显式 ID 优先、无匹配失败恢复和安全回收均有云端证据。
 - 同节点同时使用两个不同网关的 Pod 子网时，源策略规则和路由表完全隔离，不受 Pod 创建顺序影响。
+- 线内 802.1Q/802.1ad、skb metadata 和双表示路径均有证据；任何无法实机产生的表示必须
+  明确标记 Block 并补充受控测试。
+- Operator 只引用预创建的外部 Secret；values、Helm release、日志和报告中均无真实 AK/SK，
+  upgrade/rollback/uninstall 不删除外部 Secret。
 - Agent、Operator、worker 重启恢复通过；升级和回滚演练通过。
 - 镜像 digest、patch commit、脱敏配置摘要、测试记录和证据路径可追溯。
+- 客户 `CUST-DP-01`～`CUST-DP-25` 首次安装和重启恢复两轮均为 Pass；任何“连通但源 IP
+  不符”都按 Fail 处理。
 
 ## 16. 执行排期建议
 
 | 天数 | 内容 |
 | --- | --- |
 | D1 | 5 台 ECS、VPC、子网、标签、安全组、配额和 Kubernetes 基线检查 |
-| D2 | Cilium 安装、状态、凭据脱敏、首次 SubENI 分配 |
-| D3 | 标签/ID 子网选择、Service、DNS、内外网、VLAN 证据 |
+| D2 | Cilium 安装、外部 Secret 契约、凭据脱敏、首次 SubENI 分配 |
+| D3 | 标签/ID 子网选择、双网关路由、Service、DNS、内外网、VLAN 表示矩阵 |
 | D4 | NetworkPolicy、IP burst、安全回收、容量边界 |
 | D5 | Agent/Operator/worker 故障恢复、升级和回滚 |
 | D6 | 性能基线，启动 24 小时稳定性 |
@@ -603,5 +672,33 @@ kubectl get pods -A -o wide >"$EVIDENCE_ROOT/pods-after.txt"
 - 采用 1 control-plane + 4 worker，还是 3 control-plane + 2 worker。
 - VPC CIDR、两个 Pod 子网及标签、测试安全组、SubENI 配额。
 - Agent、Operator、netprobe 的最终镜像地址与 digest。
+- 外部 Secret 名称、临时凭据最小权限和轮换负责人；不得在本文填写真实 AK/SK。
 - 公网/VPC 内网测试目标，性能、恢复时间和探测成功率门限。
 - 是否允许执行 worker 重启、API 不可达、错误权限、子网无匹配、安全回收等高风险用例。
+
+## 18. 边界专项门禁
+
+执行实机安装前，必须先完成
+`ANALYSIS/HUAWEICLOUD_CILIUM_BOUNDARY_COVERAGE_REVIEW.md` 的 P0/S 场景。以下边界若未明确，
+不得只靠正常 Pod 连通性判定版本可发布：
+
+1. 多网卡节点不能仅相信 metadata `links[0]`，必须完成系统 MAC、metadata port、云端 port
+   三方核对；
+2. 同标签、不同 VPC 的安全组不得被选入当前节点；
+3. BatchCreate 返回 nil、空、少于或多于请求数量时，资源和分配状态必须一致；
+4. Create 后短暂 404、BUILD/DOWN、60 秒超时边界不能导致重复 SubENI；
+5. 显式 subnet ID 的空值、重复、跨 VPC/AZ、首项耗尽和非容量错误必须分别验证；
+6. SG tags 无匹配时必须确认是 fail-closed 还是允许回退继承，不能保留未定义安全语义；
+7. IP private address 未命中任何 subnet CIDR 时不得静默选择错误 gateway；
+8. Used 状态在 PrepareIPRelease 与 Delete 之间变化时不得误删在用 SubENI；
+9. VLAN ID 0/4095/负数/溢出及 endpoint ID 超过 uint16 时不得通过截断形成 map 冲突；
+10. 线内未知 VLAN map miss、线内与 metadata VLAN 不一致必须 fail-closed；
+11. 节点已占用 10001～14094 路由表、rule/route 分步失败和 stale rule 清理失败必须可恢复；
+12. CNI conflist 含空 plugins、`null` plugin、多个/缺少 cilium-cni 时不得 panic 或误加载。
+13. `0010` 的容量 0、小于/等于申请量、V1/V2 分页、缺失/重复 subnet ID、负容量和 API
+    错误必须 fail-closed，不能把未知容量当成无限容量。
+14. `0011` 已补齐客户 CNI `min-allocate` 的传播；实机仍必须检查 `cni.readCniConf`、
+    CiliumNode 水位及实例硬容量。当机型上限小于 10 时必须明确 Block 并验证容量耗尽行为。
+
+边界场景执行后逐项记录 Pass/Fail/Block。P0 Block 只有在等价受控测试已通过且限制得到
+客户书面接受时才可关闭；P0 Fail 直接阻断发布。

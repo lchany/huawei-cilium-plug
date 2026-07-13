@@ -104,7 +104,7 @@ VPC 和可用区信息合并，填充 `ipamTypes.Subnet.AvailableAddresses`。�
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 10 个 patch"]
+    patches["按 series 应用 14 个 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]

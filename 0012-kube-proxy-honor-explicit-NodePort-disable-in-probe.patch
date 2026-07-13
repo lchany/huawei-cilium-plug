@@ -1,0 +1,38 @@
+From 6b7bc13b6897a56f41bc4f8224ead570dedb8ff0 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-8564-1.novalocal>
+Date: Mon, 13 Jul 2026 22:22:01 +0800
+Subject: [PATCH] kube-proxy: honor explicit NodePort disable in probe mode
+
+---
+ daemon/cmd/kube_proxy_replacement.go | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/daemon/cmd/kube_proxy_replacement.go b/daemon/cmd/kube_proxy_replacement.go
+index 9f0fbc0ef..aaf3abd48 100644
+--- a/daemon/cmd/kube_proxy_replacement.go
++++ b/daemon/cmd/kube_proxy_replacement.go
+@@ -16,6 +16,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/spf13/viper"
+ 	"github.com/vishvananda/netlink"
+ 	"golang.org/x/sys/unix"
+ 
+@@ -90,7 +91,12 @@ func initKubeProxyReplacementOptions() (bool, error) {
+ 			option.EnableSessionAffinity)
+ 
+ 		option.Config.EnableHostPort = true
+-		option.Config.EnableNodePort = true
++		// Probe mode historically enables every supported replacement feature.
++		// Preserve an explicit --enable-node-port=false so kube-proxy can remain
++		// the NodePort datapath while the remaining features are probed.
++		if !viper.IsSet(option.EnableNodePort) || viper.GetBool(option.EnableNodePort) {
++			option.Config.EnableNodePort = true
++		}
+ 		option.Config.EnableExternalIPs = true
+ 		option.Config.EnableSocketLB = true
+ 		option.Config.EnableHostServicesTCP = true
+-- 
+2.33.0
+

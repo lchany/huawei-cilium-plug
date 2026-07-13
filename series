@@ -8,3 +8,7 @@
 0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
 0009-huaweicloud-require-external-operator-credentials.patch
 0010-huaweicloud-populate-subnet-available-addresses.patch
+0011-huaweicloud-honor-min-allocate-from-CNI-config.patch
+0012-kube-proxy-honor-explicit-NodePort-disable-in-probe.patch
+0013-huaweicloud-set-endpoint-route-source-to-cilium-host.patch
+0014-huaweicloud-preserve-local-service-source-semantics.patch

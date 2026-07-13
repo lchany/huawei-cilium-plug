@@ -104,7 +104,7 @@ Kubernetes Secret。这样凭据会进入 values 和 Helm release。v1.12.19 Ope
 - 现象：未配置 Git 身份时 `git am` 失败；一次重试进入部分应用状态。
 - 处理：先 `git am --abort`，配置明确的提交身份后从干净基线重放。`apply.sh` 也提供
   非自动化名称的安全回退身份。
-- 状态：已从 upstream `v1.12.19` 固定提交重放全部 10 个 patch，重放源码树与修复源码树一致。
+- 状态：已从 upstream `v1.12.19` 固定提交重放全部 14 个 patch，重放及相关 Go 测试通过。
 
 ## 子网容量未赋值
 
