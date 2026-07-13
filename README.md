@@ -35,6 +35,7 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── 0003-huaweicloud-generated-tests-docs.patch
 ├── 0004-huaweicloud-reliability-fixes.patch
 ├── 0005-huaweicloud-enable-subnet-tag-only-selection.patch
+├── 0006-huaweicloud-secure-operator-credential-injection.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
@@ -304,6 +305,18 @@ SubENI VLAN 流量。
 - 同时配置 ID 和标签时保持显式 `subnet-ids` 优先的兼容行为。
 - 增加标签独立配置、空配置拒绝和 ID 优先级回归测试。
 
+### 0006-huaweicloud-secure-operator-credential-injection.patch
+
+修复 Operator 只识别 `CILIUM_HUAWEI_CLOUD_*` 环境变量、与 Kubernetes Secret 常用
+`HUAWEI_CLOUD_*` key 不兼容的问题，并避免启动时泄露凭据。
+
+主要内容：
+
+- 兼容 `HUAWEI_CLOUD_*` 环境变量，同时保留 `CILIUM_HUAWEI_CLOUD_*` 的优先级。
+- 将 AK/SK 标记为敏感配置，Operator 启动配置日志固定显示 `<redacted>`。
+- 增加环境变量优先级和日志脱敏回归测试。
+- 更新源码内的 Helm/Secret 部署说明，禁止将 AK/SK 放入 `operator.extraArgs`。
+
 ## 应用方式
 
 准备干净的 upstream Cilium 源码。该源码由使用方自行获取，本项目不提供：
@@ -320,7 +333,7 @@ git checkout d0d0c8792c3420b3a6739fa21e3a182827a0bbc6
 /path/to/patch-archive/apply.sh
 ```
 
-脚本会按 `series` 顺序应用五个 patch。
+脚本会按 `series` 顺序应用全部 patch。
 
 完整安装部署流程见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)。
 

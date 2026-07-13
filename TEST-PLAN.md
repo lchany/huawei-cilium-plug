@@ -261,9 +261,12 @@ kubectl -n kube-system exec ds/cilium -- cilium-dbg map get cilium_hwc_vlan_mac
 **目标**：验证显式安全组、标签安全组和云默认行为。
 
 **步骤**：分别测试 `security-group-ids`、`security-group-tags` 和均为空；创建 Pod 后检查
-云侧 SubENI 安全组，并用允许/拒绝端口验证规则。
+云侧 SubENI 安全组，并用允许/拒绝端口验证规则。显式安全组场景必须覆盖同 VPC/Pod 子网内
+ICMP、TCP、UDP、DNS（53）和 Cilium health（4240）的双向通信；默认安全组仅在规则已预先
+审计的隔离环境执行。
 
-**预期**：安全组选择符合配置；标签查询限定在正确 VPC；空配置行为与文档一致。
+**预期**：安全组选择符合配置；标签查询限定在正确 VPC；空配置行为与文档一致；禁止规则
+实际拒绝，允许规则实际放通，且 CoreDNS 与跨节点 health 均恢复 Ready。
 
 ## 4. P1 可靠性与运维用例
 
@@ -289,7 +292,8 @@ kubectl -n kube-system exec ds/cilium -- cilium-dbg map get cilium_hwc_vlan_mac
 
 在隔离测试窗口临时使用无效 AK/SK 或缺权限账号，触发一次扩容，然后恢复正确 Secret。
 
-**预期**：Operator 明确报告 401/403；不会无限创建资源；恢复凭证后无需重装即可继续分配。
+**预期**：Operator 明确报告 401/403；不会无限创建资源；恢复凭证后无需重装即可继续分配；
+AK/SK 不得出现在 Pod 参数、启动日志、测试日志或归档证据中。
 
 ### HWC-P1-05 华为云 API 短时不可达
 

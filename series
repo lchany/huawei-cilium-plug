@@ -3,3 +3,4 @@
 0003-huaweicloud-generated-tests-docs.patch
 0004-huaweicloud-reliability-fixes.patch
 0005-huaweicloud-enable-subnet-tag-only-selection.patch
+0006-huaweicloud-secure-operator-credential-injection.patch

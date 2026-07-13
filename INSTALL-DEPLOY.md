@@ -118,6 +118,8 @@ ls
 0002-huaweicloud-datapath-runtime.patch
 0003-huaweicloud-generated-tests-docs.patch
 0004-huaweicloud-reliability-fixes.patch
+0005-huaweicloud-enable-subnet-tag-only-selection.patch
+0006-huaweicloud-secure-operator-credential-injection.patch
 apply.sh
 series
 README.md
@@ -279,6 +281,41 @@ make docker-cilium-image
 make docker-operator-huaweicloud-image
 ```
 
+### 7.1 离线节点的镜像清单与导入
+
+离线部署不能只导入 Agent 和 Operator。最终 Helm 渲染通常还会引用 `cilium-envoy`；Kubernetes
+初始化还需要控制面、etcd、pause、CoreDNS 和 kube-proxy 镜像。先使用**最终** values 渲染，导出
+完整镜像清单，再为目标架构准备镜像。
+
+```bash
+helm template cilium ./install/kubernetes/cilium \
+  --namespace kube-system \
+  -f huaweicloud-values.yaml \
+  | awk '/^[[:space:]]*image:/{print $2}' \
+  | tr -d '"' | sort -u > required-images.txt
+```
+
+对清单中的每个镜像制作单架构 OCI archive。以下以 amd64 为例；`IMAGE` 必须保持原始的完整
+tag 或 tag@digest，不能自行改名：
+
+```bash
+export IMAGE=<required-images.txt 中的一行>
+skopeo copy --override-os linux --override-arch amd64 \
+  "docker://${IMAGE}" "oci-archive:${IMAGE##*/}.oci.tar:${IMAGE}"
+```
+
+在每个需要运行该镜像的节点导入。containerd 环境使用原始完整引用作为 `--index-name`，确保
+kubelet 以 tag@digest 拉取时能命中本地镜像：
+
+```bash
+sudo ctr -n k8s.io images import --platform linux/amd64 \
+  --index-name "$IMAGE" - < "${IMAGE##*/}.oci.tar"
+sudo crictl images | grep -F "${IMAGE%%@*}"
+```
+
+镜像 archive、containerd 内容库和临时渲染文件也属于构建/部署产物。若执行环境要求产物只落在
+挂载盘，先确认它们都位于挂载盘；不要在系统盘或默认 Docker data-root 下制作 archive。
+
 ## 8. 准备 HuaweiCloud Secret
 
 在集群中创建或更新 Secret。AK/SK 不要写进 Helm 命令行。
@@ -373,7 +410,13 @@ extraArgs:
 
 把 `<VPC_IPV4_CIDR>` 换成 VPC 的 IPv4 网段，例如 `192.168.0.0/16`。不要填 Pod CIDR 或单个 SubENI 子网。`eth0` 只是示例；如果 trunk 网卡不是 `eth0`，同时修改 `devices`、`nodePort.directRoutingDevice` 和 `--huawei-cloud-trunk-interface`。
 
-如果使用华为云默认安全组，删除 `--huawei-cloud-security-group-ids=...` 这一行；如果指定安全组，保留该行并填入实际 ID。
+生产和真实环境测试应显式设置 `--huawei-cloud-security-group-ids=...`。首次创建 SubENI
+时空配置会由云侧选择默认安全组，规则往往无法满足 Pod、CoreDNS 与 Cilium health 的
+双向通信要求，排查成本很高。只有已单独验证默认安全组规则时，才删除这一行。
+
+Pod 安全组至少应按最小权限允许 VPC/Pod 子网内的双向通信；测试阶段还应覆盖 ICMP、TCP、
+UDP、DNS（53）和 Cilium health（4240）。不要为了排障临时开放 `0.0.0.0/0` 全端口；新增
+或修改规则前须记录规则 ID、作用范围与回滚时间。
 
 ### 9.1 按子网标签选择 SubENI 子网
 
@@ -440,14 +483,23 @@ operator:
     override: registry.example.com/network/operator-huaweicloud:v1.19.1-huaweicloud
 ```
 
+Operator 从 Secret 读取 `HUAWEI_CLOUD_*` 环境变量；当前 patch 同时兼容
+`CILIUM_HUAWEI_CLOUD_*`，后者优先。不要再把 `$(HUAWEI_CLOUD_...)` 写到
+`operator.extraArgs`：这会把凭据展开到 Pod 参数中。
+
 安装前先渲染 chart；渲染失败时不要执行升级命令。
 
 ```bash
 cd "$WORKDIR/cilium"
 helm template cilium ./install/kubernetes/cilium \
   --namespace kube-system \
-  -f huaweicloud-values.yaml > /dev/null
+  -f huaweicloud-values.yaml > cilium-rendered.yaml
+
+grep -n 'HUAWEI_CLOUD_ACCESS_KEY\|huawei-cloud-access-key' cilium-rendered.yaml
 ```
+
+渲染结果中应只出现 `HUAWEI_CLOUD_ACCESS_KEY` 的 Secret 引用，不能出现
+`--huawei-cloud-access-key=` 或 AK/SK 明文。
 
 ## 10. 安装 Cilium
 
@@ -666,7 +718,25 @@ kubectl -n kube-system get secret cilium-huaweicloud
 kubectl -n kube-system get deploy cilium-operator -o yaml | grep HUAWEI_CLOUD
 ```
 
-### 14.5 `CiliumNode.spec.huawei-cloud` 为空
+不要用 `kubectl get secret -o yaml`、`printenv` 或带 `--previous` 的全量日志把凭据写入
+工单。确认 Secret key 是否存在时，只检查 key 名和长度；Operator 启动配置日志中的 AK/SK
+应显示为 `<redacted>`。
+
+### 14.5 跨节点 Pod、CoreDNS 或 Cilium health 不通
+
+按以下顺序排查，避免把安全组、VPC 路由与 BPF 问题混在一起：
+
+1. 确认每个 `CiliumNode.status.huawei-cloud.subenis` 中的 Pod/health IP、VLAN、MAC、网关
+   与云侧 SubENI 一致。
+2. 在所有节点确认 `cilium_hwc_srcip4`、`cilium_hwc_vlan_mac` 有对应 endpoint 条目。
+3. 在云侧确认每个 SubENI 都绑定了 values 中显式指定的安全组，并复核 VPC/Pod 子网内的
+   双向规则、DNS 和 4240 端口。
+4. 确认 `ipv4NativeRoutingCIDR` 是整个 VPC CIDR，且 trunk、`devices`、
+   `nodePort.directRoutingDevice` 三处网卡名一致。
+5. 收集 `cilium-dbg health status --verbose`、endpoint 列表和相关时间段的 Agent 日志；在
+   未确认安全组前不要修改 BPF 程序或扩大安全组范围。
+
+### 14.6 `CiliumNode.spec.huawei-cloud` 为空
 
 优先检查：
 
@@ -676,7 +746,7 @@ kubectl -n kube-system get deploy cilium-operator -o yaml | grep HUAWEI_CLOUD
 - 子网 ID、安全组 ID 是否正确。
 - 节点是否能访问华为云 metadata 服务。
 
-### 14.6 BPF map 没有 HuaweiCloud 条目
+### 14.7 BPF map 没有 HuaweiCloud 条目
 
 先看三个对象：
 
@@ -692,7 +762,7 @@ kubectl -n kube-system logs ds/cilium | grep -i huaweicloud
 2. 测试 Pod 是否拿到了 SubENI 对应的 Pod IP。
 3. endpoint manager 是否把 Pod/SubENI 映射写入 `cilium_hwc_srcip4` 和 `cilium_hwc_vlan_mac`。
 
-### 14.7 Pod 出网不通
+### 14.8 Pod 出网不通
 
 优先检查：
 
@@ -702,7 +772,7 @@ kubectl -n kube-system logs ds/cilium | grep -i huaweicloud
 - 子网路由、NAT 或出口网关是否符合预期。
 - `cilium_hwc_srcip4` 是否有这个 Pod IP 对应条目。
 
-### 14.8 Pod 入方向策略不生效
+### 14.9 Pod 入方向策略不生效
 
 这个 patch 要求入方向流量去 VLAN 后回到 Cilium 原生 datapath。排查时重点看：
 
