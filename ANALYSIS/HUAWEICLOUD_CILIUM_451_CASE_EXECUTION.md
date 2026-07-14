@@ -67,7 +67,7 @@
 | INS-08 | P0/R | ConfigMap 参数 | Pass | ipam/tunnel/IPv4/IPv6/NodePort/KPR/identity 参数逐项读取匹配 |
 | INS-09 | P1/C | 缺 CRD 安装 | Pending | 待执行 |
 | INS-10 | P1/C | Agent 镜像不可拉取 | Pass | audit67 仅移除 node0003 的运行别名后删除 Agent；新 Pod 明确进入 ErrImagePull/ImagePullBackOff，事件记录 localhost registry connection refused；恢复本地别名后新 Agent Ready/OK、哈希正确且mesh 56/56 |
-| INS-11 | P1/C | Operator 镜像错误或双后缀 | Pending | 待执行 |
+| INS-11 | P1/C | Operator 镜像错误或双后缀 | Pass | audit78 注入不存在的 `audit76-missing` Operator 镜像，确认新 Pod 进入 ErrImagePull/ImagePullBackOff、候选 rollout 超时且旧 audit76 保持 Ready；恢复后坏 Pod/镜像引用归零 |
 | INS-12 | P1/R | 节点污点和 toleration | Pass | audit68 node0004 加临时NoSchedule污点后删除Agent；DaemonSet的全量Exists toleration使新Agent仍在该节点Ready/OK且哈希正确；移除污点后无残留，mesh 56/56 |
 | INS-13 | P1/R | Operator 单副本重启 | Pass | 删除后新 Pod Ready，五个 CiliumNode 稳定，数据面通过 |
 | INS-14 | P1/O | Operator 多副本/选主 | Pass | audit69 Operator扩至2副本均Ready，仅Lease holder执行leader；删除当前leader后standby取得不同holderIdentity且Deployment补齐2/2，客户链路20/20；最终恢复1/1 |
@@ -266,7 +266,7 @@
 | UPG-09 | P0/C | Agent 镜像回滚 | Pass | audit66 node0004 将`audit25b`从audit64回指保留的audit60并重建Agent，旧哈希/完整BPF/状态OK且混部mesh 56/56；再回指audit64，路由/neighbor完整、五节点哈希一致且mesh 56/56 |
 | UPG-10 | P1/C | Operator 镜像回滚 | Pass | audit77 五节点预置保留的 audit20 镜像后执行真实 Deployment 回滚及恢复；旧版窗口和恢复窗口均通过健康、数据面与 pool 恒等校验，最终 audit76 二进制 SHA256 精确匹配 |
 | UPG-11 | P1/C | 升级中单节点失败 | Pass | audit67 node0003 单节点因缺镜像进入ImagePullBackOff时其余4 Agent保持Ready，客户pod2→pod3持续20/20；恢复别名后该节点Agent Ready/OK、策略表/neighbor完整且全mesh 56/56 |
-| UPG-12 | P1/C | 回滚中途失败后继续 | Pending | 待执行 |
+| UPG-12 | P1/C | 回滚中途失败后继续 | Pass | audit78 将 maxUnavailable 临时收紧为0后注入不可拉取候选，验证失败阶段仍有1个旧 Operator Ready、mesh 56/56、pool 恒等；继续恢复 audit76 并还原 1/1 strategy 后再次全通过 |
 | UPG-13 | P1/R | CRD 字段向前/向后兼容 | Pending | 待执行 |
 | UPG-14 | P1/C | Helm uninstall/reinstall | Pending | 待执行 |
 | OBS-01 | P0/R | Cilium status/health | Pass | 多轮 5/5 `cilium status --brief=OK` |
