@@ -245,11 +245,11 @@
 | SCALE-04 | P1/R | 40→4→40 循环 10 次 | Pending | 待执行 |
 | SCALE-05 | P2/R | 接近最大 Pod 数 | Pending | 待执行 |
 | PERF-01 | P1/R | 同节点吞吐/RTT | Pending | 待执行 |
-| PERF-02 | P1/R | 同 AZ 跨节点吞吐/RTT | Pending | 待执行 |
-| PERF-03 | P1/R | 跨 AZ 吞吐/RTT | Pending | 待执行 |
+| PERF-02 | P1/R | 同 AZ 跨节点吞吐/RTT | Pass | audit70 同 AZ 跨节点完成3轮各300秒持续TCP：中位1405.31 Mbps、最大偏差3.238%；TCP/UDP各3轮10000次请求应答均0丢失，P99分别87.382–94.302/80.502–88.403 us；另有3轮100包ICMP均0丢失 |
+| PERF-03 | P1/R | 跨 AZ 吞吐/RTT | Skip | 用户批准跨 AZ 环境限制 Skip；五台购买机器均位于同一 AZ，audit70已完成同 AZ 跨节点基线 |
 | PERF-04 | P1/R | TCP/UDP PPS | Pending | 待执行 |
-| PERF-05 | P1/R | Pod 创建到 Ready 时延 | Pending | 待执行 |
-| PERF-06 | P1/R | Agent/Operator CPU、内存 | Pending | 待执行 |
+| PERF-05 | P1/R | Pod 创建到 Ready 时延 | Pass | audit70 在node0004连续删除/重建20个DaemonSet Pod：P50/P95/P99=3998/4039/4084 ms；Scheduled到Cilium Create endpoint请求P50/P95=344/354 ms，20次镜像均为本机缓存命中；末尾mesh 56/56 |
+| PERF-06 | P1/R | Agent/Operator CPU、内存 | Pass | audit70以crictl累计CPU时钟和working set记录空闲、两轮mesh burst、60秒settled三阶段各6个Agent/Operator样本；CPU 1.707–2.799 mcore，working set 35.08–239.98 MiB，阶段内最大绝对内存变化2.04 MiB，无重启/严重日志且mesh 56/56 |
 | PERF-07 | P1/R | 云 API 调用率 | Pending | 待执行 |
 | STAB-01 | P1/R | 24 小时持续探测 | Pending | 待执行 |
 | STAB-02 | P1/R | 24 小时 Pod churn | Pending | 待执行 |
