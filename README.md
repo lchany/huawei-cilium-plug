@@ -10,7 +10,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 - upstream tag：`v1.12.19`
 - upstream commit：`a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`
-- 当前 patch 数量：1（已将原 43 个开发/修复 patch 合并）
+- 当前 patch 数量：15（保留最早的 14 个功能 patch，后续测试发现的 bug 修复合并为 1 个 patch）
 
 `apply.sh` 默认检查完整基线 commit，避免把 patch 应用到其他 Cilium 版本。
 
@@ -18,7 +18,11 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 ```text
 .
-├── 0001-huaweicloud-add-production-SubENI-IPAM-and-datapath-.patch
+├── 0001-huaweicloud-control-plane.patch
+├── 0002-huaweicloud-datapath-runtime.patch
+├── 0003-huaweicloud-generated-tests-dependencies.patch
+├── 0004-0014：原有功能与适配 patch
+├── 0015-fix-huaweicloud-consolidate-validation-bug-fixes.patch
 ├── series
 ├── apply.sh
 ├── build-local.sh
@@ -91,12 +95,22 @@ VPC 和可用区信息合并，填充 `ipamTypes.Subnet.AvailableAddresses`。�
 申请量的子网不再参与选择；自动候选选择真实剩余地址最多的一个，同容量时按 ID
 稳定选择；显式列表严格按配置顺序选择首个合法且容量充足的子网。
 
+### 0011～0014：原有行为适配
+
+分别处理 CNI `min-allocate`、probe 模式下显式关闭 NodePort、endpoint route 源地址以及
+本地 Service 源地址语义。这些功能 patch 保持独立，不与后续测试修复混合。
+
+### 0015：统一的测试修复 patch
+
+只包含相对前 14 个功能 patch 的后续 bug 修复增量，来源是边界、并发和五节点实机测试。
+按完整 `series` 回放后的 Git tree 与最终验证源码树一致。
+
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 1 个合并 patch"]
+    patches["按 series 应用 14 个功能 patch + 1 个 bugfix patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]

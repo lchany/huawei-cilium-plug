@@ -1,0 +1,466 @@
+From 7a34e2cec40ec6b0d6bfe7ae21570f60665905f8 Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 19:27:41 +0800
+Subject: [PATCH] huaweicloud: isolate SubENI policy routing tables
+
+---
+ daemon/cmd/daemon_main.go                     |   5 +-
+ daemon/cmd/daemon_main_huaweicloud_test.go    |   2 +-
+ .../linux/linux_defaults/linux_defaults.go    |   7 ++
+ pkg/datapath/linux/routing/info.go            |  18 ++-
+ pkg/datapath/linux/routing/info_test.go       | 115 +++++++++++++++++-
+ pkg/datapath/linux/routing/routing.go         |  83 +++++++++++--
+ pkg/datapath/linux/routing/routing_test.go    |  70 +++++++++++
+ 7 files changed, 280 insertions(+), 20 deletions(-)
+
+diff --git a/daemon/cmd/daemon_main.go b/daemon/cmd/daemon_main.go
+index 568e70bc9..6506d72f1 100644
+--- a/daemon/cmd/daemon_main.go
++++ b/daemon/cmd/daemon_main.go
+@@ -154,7 +154,7 @@ func skipInit(basePath string) bool {
+ }
+ 
+ func usesEgressMultiHomeIPRuleCompat(ipamMode string) bool {
+-	return ipamMode == ipamOption.IPAMAzure || ipamMode == ipamOption.IPAMHuaweiCloud
++	return ipamMode == ipamOption.IPAMAzure
+ }
+ 
+ func init() {
+@@ -1548,9 +1548,8 @@ func initEnv(cmd *cobra.Command) {
+ 	if usesEgressMultiHomeIPRuleCompat(option.Config.IPAM) {
+ 		option.Config.EgressMultiHomeIPRuleCompat = true
+ 		log.Infof(
+-			"Auto-set %q to `true` because the %s datapath uses the trunk interface routing-table scheme.",
++			"Auto-set %q to `true` because the Azure datapath uses the legacy interface routing-table scheme.",
+ 			option.EgressMultiHomeIPRuleCompat,
+-			option.Config.IPAM,
+ 		)
+ 	}
+ 
+diff --git a/daemon/cmd/daemon_main_huaweicloud_test.go b/daemon/cmd/daemon_main_huaweicloud_test.go
+index 65d237817..bfe3a5ec5 100644
+--- a/daemon/cmd/daemon_main_huaweicloud_test.go
++++ b/daemon/cmd/daemon_main_huaweicloud_test.go
+@@ -15,7 +15,7 @@ func TestUsesEgressMultiHomeIPRuleCompat(t *testing.T) {
+ 		want     bool
+ 	}{
+ 		{ipamOption.IPAMAzure, true},
+-		{ipamOption.IPAMHuaweiCloud, true},
++		{ipamOption.IPAMHuaweiCloud, false},
+ 		{ipamOption.IPAMENI, false},
+ 	} {
+ 		if got := usesEgressMultiHomeIPRuleCompat(test.ipamMode); got != test.want {
+diff --git a/pkg/datapath/linux/linux_defaults/linux_defaults.go b/pkg/datapath/linux/linux_defaults/linux_defaults.go
+index 043345dcc..fa892ff8f 100644
+--- a/pkg/datapath/linux/linux_defaults/linux_defaults.go
++++ b/pkg/datapath/linux/linux_defaults/linux_defaults.go
+@@ -32,6 +32,13 @@ const (
+ 	// table which is between 253-255. See ip-route(8).
+ 	RouteTableInterfacesOffset = 10
+ 
++	// RouteTableHuaweiCloudInterfacesOffset is the offset for per-SubENI
++	// routing tables in HuaweiCloud VLAN mode. VLAN IDs are unique on a parent
++	// interface and range from 1 to 4094, so this reserves tables 10001-14094.
++	// The dedicated range avoids the reserved tables 253-255 and the table
++	// ranges already used by Cilium.
++	RouteTableHuaweiCloudInterfacesOffset = 10000
++
+ 	// RouteMarkDecrypt is the default route mark to use to indicate datapath
+ 	// needs to decrypt a packet.
+ 	RouteMarkDecrypt = 0x0D00
+diff --git a/pkg/datapath/linux/routing/info.go b/pkg/datapath/linux/routing/info.go
+index 672e863c9..4af66144b 100644
+--- a/pkg/datapath/linux/routing/info.go
++++ b/pkg/datapath/linux/routing/info.go
+@@ -9,11 +9,17 @@ import (
+ 	"net"
+ 	"strconv"
+ 
++	"github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/mac"
+ )
+ 
+-// RoutingInfo represents information that's required to enable
+-// connectivity via the local rule and route tables while in ENI or Azure IPAM mode.
++const (
++	minHuaweiCloudVLANID = 1
++	maxHuaweiCloudVLANID = 4094
++)
++
++// RoutingInfo represents information that's required to enable connectivity
++// via the local rule and route tables while in ENI, Azure, or HuaweiCloud IPAM mode.
+ // The information in this struct is used to create rules and routes which direct
+ // traffic out of the interface (egress).
+ //
+@@ -36,8 +42,8 @@ type RoutingInfo struct {
+ 	Masquerade bool
+ 
+ 	// InterfaceNumber is the generic number of the master interface that
+-	// egress traffic is directed to. This is used to compute the table ID for
+-	// the per-ENI tables.
++	// egress traffic is directed to. In HuaweiCloud mode this is the SubENI
++	// VLAN ID. This is used to compute the per-interface route table ID.
+ 	InterfaceNumber int
+ 
+ 	// IpamMode tells us which IPAM mode is being used (e.g., ENI, AKS).
+@@ -86,6 +92,10 @@ func parse(gateway string, cidrs []string, macAddr, ifaceNum, ipamMode string, m
+ 	if err != nil {
+ 		return nil, fmt.Errorf("invalid interface number: %s", ifaceNum)
+ 	}
++	if ipamMode == option.IPAMHuaweiCloud &&
++		(parsedIfaceNum < minHuaweiCloudVLANID || parsedIfaceNum > maxHuaweiCloudVLANID) {
++		return nil, fmt.Errorf("invalid HuaweiCloud VLAN ID: %d", parsedIfaceNum)
++	}
+ 
+ 	return &RoutingInfo{
+ 		IPv4Gateway:     ip,
+diff --git a/pkg/datapath/linux/routing/info_test.go b/pkg/datapath/linux/routing/info_test.go
+index 5dd42cc76..5fbcb6247 100644
+--- a/pkg/datapath/linux/routing/info_test.go
++++ b/pkg/datapath/linux/routing/info_test.go
+@@ -12,6 +12,7 @@ import (
+ 	"gopkg.in/check.v1"
+ 
+ 	"github.com/cilium/cilium/pkg/checker"
++	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/mac"
+ )
+@@ -40,6 +41,7 @@ func (e *LinuxRoutingSuite) TestParse(c *check.C) {
+ 		macAddr   string
+ 		masq      bool
+ 		ifaceNum  string
++		ipamMode  string
+ 		wantRInfo *RoutingInfo
+ 		wantErr   bool
+ 	}{
+@@ -106,6 +108,28 @@ func (e *LinuxRoutingSuite) TestParse(c *check.C) {
+ 			wantRInfo: nil,
+ 			wantErr:   true,
+ 		},
++		{
++			name:      "HuaweiCloud VLAN below range",
++			gateway:   "192.168.1.1",
++			cidrs:     []string{"192.168.0.0/16"},
++			macAddr:   "11:22:33:44:55:66",
++			masq:      true,
++			ifaceNum:  "0",
++			ipamMode:  ipamOption.IPAMHuaweiCloud,
++			wantRInfo: nil,
++			wantErr:   true,
++		},
++		{
++			name:      "HuaweiCloud VLAN above range",
++			gateway:   "192.168.1.1",
++			cidrs:     []string{"192.168.0.0/16"},
++			macAddr:   "11:22:33:44:55:66",
++			masq:      true,
++			ifaceNum:  "4095",
++			ipamMode:  ipamOption.IPAMHuaweiCloud,
++			wantRInfo: nil,
++			wantErr:   true,
++		},
+ 		{
+ 			name:     "valid IPv4 input",
+ 			gateway:  "192.168.1.1",
+@@ -148,8 +172,97 @@ func (e *LinuxRoutingSuite) TestParse(c *check.C) {
+ 	}
+ 	for _, tt := range tests {
+ 		c.Log(tt.name)
+-		rInfo, err := NewRoutingInfo(tt.gateway, tt.cidrs, tt.macAddr, tt.ifaceNum, ipamOption.IPAMENI, tt.masq)
++		ipamMode := tt.ipamMode
++		if ipamMode == "" {
++			ipamMode = ipamOption.IPAMENI
++		}
++		rInfo, err := NewRoutingInfo(tt.gateway, tt.cidrs, tt.macAddr, tt.ifaceNum, ipamMode, tt.masq)
+ 		c.Assert(rInfo, checker.DeepEquals, tt.wantRInfo)
+ 		c.Assert((err != nil), check.Equals, tt.wantErr)
+ 	}
+ }
++
++func TestEgressRulePriorityAndTableID(t *testing.T) {
++	tests := []struct {
++		name      string
++		ifaceNum  int
++		ifindex   int
++		ipamMode  string
++		compat    bool
++		wantPrio  int
++		wantTable int
++		wantErr   bool
++	}{
++		{
++			name:      "minimum VLAN",
++			ifaceNum:  1,
++			ipamMode:  ipamOption.IPAMHuaweiCloud,
++			wantPrio:  linux_defaults.RulePriorityEgressv2,
++			wantTable: linux_defaults.RouteTableHuaweiCloudInterfacesOffset + 1,
++		},
++		{
++			name:      "VLAN that would collide with main using legacy offset",
++			ifaceNum:  244,
++			ipamMode:  ipamOption.IPAMHuaweiCloud,
++			wantPrio:  linux_defaults.RulePriorityEgressv2,
++			wantTable: linux_defaults.RouteTableHuaweiCloudInterfacesOffset + 244,
++		},
++		{
++			name:      "maximum VLAN in compatibility priority",
++			ifaceNum:  4094,
++			ipamMode:  ipamOption.IPAMHuaweiCloud,
++			compat:    true,
++			wantPrio:  linux_defaults.RulePriorityEgress,
++			wantTable: linux_defaults.RouteTableHuaweiCloudInterfacesOffset + 4094,
++		},
++		{name: "zero VLAN", ifaceNum: 0, ipamMode: ipamOption.IPAMHuaweiCloud, wantErr: true},
++		{name: "VLAN above maximum", ifaceNum: 4095, ipamMode: ipamOption.IPAMHuaweiCloud, wantErr: true},
++		{
++			name:      "ENI compatibility mode remains ifindex based",
++			ifaceNum:  7,
++			ifindex:   42,
++			ipamMode:  ipamOption.IPAMENI,
++			compat:    true,
++			wantPrio:  linux_defaults.RulePriorityEgress,
++			wantTable: 42,
++		},
++		{
++			name:      "ENI v2 mode remains interface number based",
++			ifaceNum:  7,
++			ifindex:   42,
++			ipamMode:  ipamOption.IPAMENI,
++			wantPrio:  linux_defaults.RulePriorityEgressv2,
++			wantTable: linux_defaults.RouteTableInterfacesOffset + 7,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			info := RoutingInfo{InterfaceNumber: tt.ifaceNum, IpamMode: tt.ipamMode}
++			priority, tableID, err := info.egressRulePriorityAndTableID(tt.ifindex, tt.compat)
++			if (err != nil) != tt.wantErr {
++				t.Fatalf("egressRulePriorityAndTableID() error = %v, wantErr %t", err, tt.wantErr)
++			}
++			if tt.wantErr {
++				return
++			}
++			if priority != tt.wantPrio || tableID != tt.wantTable {
++				t.Fatalf("got priority/table %d/%d, want %d/%d", priority, tableID, tt.wantPrio, tt.wantTable)
++			}
++		})
++	}
++
++	first := RoutingInfo{InterfaceNumber: 101, IpamMode: ipamOption.IPAMHuaweiCloud}
++	second := RoutingInfo{InterfaceNumber: 202, IpamMode: ipamOption.IPAMHuaweiCloud}
++	_, firstTable, err := first.egressRulePriorityAndTableID(42, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, secondTable, err := second.egressRulePriorityAndTableID(42, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if firstTable == secondTable {
++		t.Fatalf("different HuaweiCloud VLANs share route table %d", firstTable)
++	}
++}
+diff --git a/pkg/datapath/linux/routing/routing.go b/pkg/datapath/linux/routing/routing.go
+index 76add0677..d5a5fdf6c 100644
+--- a/pkg/datapath/linux/routing/routing.go
++++ b/pkg/datapath/linux/routing/routing.go
+@@ -27,8 +27,8 @@ var (
+ 	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "linux-routing")
+ )
+ 
+-// Configure sets up the rules and routes needed when running in ENI or
+-// Azure IPAM mode.
++// Configure sets up the rules and routes needed when running in ENI, Azure,
++// or HuaweiCloud IPAM mode.
+ // These rules and routes direct egress traffic out of the interface and
+ // ingress traffic back to the endpoint (`ip`). The compat flag controls which
+ // egress priority to consider when deleting the egress rules (see
+@@ -51,6 +51,10 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 	if err != nil {
+ 		return fmt.Errorf("unable to find ifindex for interface MAC: %s", err)
+ 	}
++	egressPriority, tableID, err := info.egressRulePriorityAndTableID(ifindex, compat)
++	if err != nil {
++		return err
++	}
+ 
+ 	ipWithMask := net.IPNet{
+ 		IP:   ip,
+@@ -72,15 +76,6 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		}
+ 	}
+ 
+-	var egressPriority, tableID int
+-	if compat {
+-		egressPriority = linux_defaults.RulePriorityEgress
+-		tableID = ifindex
+-	} else {
+-		egressPriority = linux_defaults.RulePriorityEgressv2
+-		tableID = computeTableIDFromIfaceNumber(info.InterfaceNumber)
+-	}
+-
+ 	// The condition here should mirror the condition in Delete.
+ 	if info.Masquerade && info.IpamMode == ipamOption.IPAMENI {
+ 		// Lookup a VPC specific table for all traffic from an endpoint to the
+@@ -128,6 +123,48 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		return fmt.Errorf("unable to add L2 nexthop route: %s", err)
+ 	}
+ 
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		if err := cleanupStaleHuaweiCloudEgressRules(&ipWithMask, egressPriority, tableID); err != nil {
++			return fmt.Errorf("unable to clean up stale HuaweiCloud egress rules: %w", err)
++		}
++	}
++
++	return nil
++}
++
++// cleanupStaleHuaweiCloudEgressRules removes rules left by the former shared
++// trunk-ifindex scheme or by a compatibility-priority change. It runs only
++// after the new rule and both routes are installed, so removing a stale rule
++// switches the endpoint to a complete per-VLAN routing table.
++func cleanupStaleHuaweiCloudEgressRules(ip *net.IPNet, priority, tableID int) error {
++	for _, candidatePriority := range []int{
++		linux_defaults.RulePriorityEgress,
++		linux_defaults.RulePriorityEgressv2,
++	} {
++		rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
++			Priority: candidatePriority,
++			From:     ip,
++		})
++		if err != nil {
++			return err
++		}
++
++		for _, ruleToDelete := range rules {
++			if ruleToDelete.Priority == priority && ruleToDelete.Table == tableID {
++				continue
++			}
++			if err := route.DeleteRule(route.Rule{
++				Priority: ruleToDelete.Priority,
++				Mark:     ruleToDelete.Mark,
++				Mask:     ruleToDelete.Mask,
++				From:     ruleToDelete.Src,
++				To:       ruleToDelete.Dst,
++				Table:    ruleToDelete.Table,
++			}); err != nil {
++				return err
++			}
++		}
++	}
+ 	return nil
+ }
+ 
+@@ -308,3 +345,27 @@ func retrieveIfIndexFromMAC(mac mac.MAC, mtu int) (int, error) {
+ func computeTableIDFromIfaceNumber(num int) int {
+ 	return linux_defaults.RouteTableInterfacesOffset + num
+ }
++
++// egressRulePriorityAndTableID selects the policy-rule priority and route
++// table used for an endpoint. HuaweiCloud SubENIs share one trunk device, so
++// using the trunk ifindex as the table ID would make SubENIs with different
++// gateways replace each other's default route. Use the VLAN ID, which is
++// unique per trunk interface, to give every SubENI an isolated route table.
++func (info *RoutingInfo) egressRulePriorityAndTableID(ifindex int, compat bool) (int, int, error) {
++	priority := linux_defaults.RulePriorityEgressv2
++	if compat {
++		priority = linux_defaults.RulePriorityEgress
++	}
++
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		if info.InterfaceNumber < minHuaweiCloudVLANID || info.InterfaceNumber > maxHuaweiCloudVLANID {
++			return 0, 0, fmt.Errorf("invalid HuaweiCloud VLAN ID: %d", info.InterfaceNumber)
++		}
++		return priority, linux_defaults.RouteTableHuaweiCloudInterfacesOffset + info.InterfaceNumber, nil
++	}
++
++	if compat {
++		return priority, ifindex, nil
++	}
++	return priority, computeTableIDFromIfaceNumber(info.InterfaceNumber), nil
++}
+diff --git a/pkg/datapath/linux/routing/routing_test.go b/pkg/datapath/linux/routing/routing_test.go
+index ab1cb37dd..f4f81a673 100644
+--- a/pkg/datapath/linux/routing/routing_test.go
++++ b/pkg/datapath/linux/routing/routing_test.go
+@@ -46,6 +46,76 @@ func (e *LinuxRoutingSuite) TestConfigure(c *C) {
+ 	})
+ }
+ 
++func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudIsolatesSubENIRouteTables(c *C) {
++	_, first := getFakes(c)
++	first.IpamMode = ipamOption.IPAMHuaweiCloud
++	first.Masquerade = false
++	first.InterfaceNumber = 101
++	first.IPv4Gateway = net.ParseIP("192.168.1.1")
++
++	second := first
++	second.InterfaceNumber = 202
++	second.IPv4Gateway = net.ParseIP("192.168.2.1")
++
++	firstIP := net.ParseIP("192.168.1.10")
++	secondIP := net.ParseIP("192.168.2.10")
++	masterMAC := first.MasterIfMAC
++
++	runFuncInNetNS(c, func() {
++		ifaceCleanup := createDummyDevice(c, masterMAC)
++		defer ifaceCleanup()
++		trunkIfindex, err := retrieveIfIndexFromMAC(masterMAC, 1500)
++		c.Assert(err, IsNil)
++		legacyRule := route.Rule{
++			Priority: linux_defaults.RulePriorityEgress,
++			From:     &net.IPNet{IP: firstIP, Mask: net.CIDRMask(32, 32)},
++			Table:    trunkIfindex,
++		}
++		c.Assert(route.ReplaceRule(legacyRule), IsNil)
++
++		c.Assert(first.Configure(firstIP, 1500, false, false), IsNil)
++		c.Assert(second.Configure(secondIP, 1500, false, false), IsNil)
++
++		firstTable := linux_defaults.RouteTableHuaweiCloudInterfacesOffset + first.InterfaceNumber
++		secondTable := linux_defaults.RouteTableHuaweiCloudInterfacesOffset + second.InterfaceNumber
++		c.Assert(firstTable, Not(Equals), secondTable)
++
++		assertHuaweiCloudEgressRuleAndDefaultRoute(c, firstIP, first.IPv4Gateway, firstTable)
++		assertHuaweiCloudEgressRuleAndDefaultRoute(c, secondIP, second.IPv4Gateway, secondTable)
++		legacyRules, err := route.ListRules(netlink.FAMILY_V4, &legacyRule)
++		c.Assert(err, IsNil)
++		c.Assert(legacyRules, HasLen, 0)
++
++		c.Assert(Delete(firstIP, false), IsNil)
++		c.Assert(Delete(secondIP, false), IsNil)
++	})
++}
++
++func assertHuaweiCloudEgressRuleAndDefaultRoute(c *C, ip, gateway net.IP, table int) {
++	ipWithMask := &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
++	rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
++		Priority: linux_defaults.RulePriorityEgressv2,
++		From:     ipWithMask,
++		Table:    table,
++	})
++	c.Assert(err, IsNil)
++	c.Assert(rules, HasLen, 1)
++
++	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
++		Table: table,
++	}, netlink.RT_FILTER_TABLE)
++	c.Assert(err, IsNil)
++
++	foundDefault := false
++	for _, configuredRoute := range routes {
++		if configuredRoute.Dst == nil || configuredRoute.Dst.String() == "0.0.0.0/0" {
++			c.Assert(configuredRoute.Gw.Equal(gateway), Equals, true)
++			foundDefault = true
++		}
++	}
++	c.Assert(foundDefault, Equals, true)
++}
++
+ func (e *LinuxRoutingSuite) TestConfigureRoutewithIncompatibleIP(c *C) {
+ 	_, ri := getFakes(c)
+ 	ipv6 := net.ParseIP("fd00::2").To16()
+-- 
+2.33.0

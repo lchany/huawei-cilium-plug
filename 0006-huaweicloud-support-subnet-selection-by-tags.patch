@@ -1,0 +1,297 @@
+From a06036043ae44dc87505f55e84a9040a10a20658 Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 09:30:05 +0800
+Subject: [PATCH] huaweicloud: support subnet selection by tags
+
+---
+ daemon/cmd/daemon_main.go                     |  4 ++
+ .../cilium/templates/cilium-configmap.yaml    |  1 +
+ install/kubernetes/cilium/values.yaml         |  3 +
+ install/kubernetes/cilium/values.yaml.tmpl    |  3 +
+ pkg/huaweicloud/eni/instances_test.go         | 33 +++++++++++
+ pkg/nodediscovery/huaweicloud_test.go         | 37 +++++++++++++
+ pkg/nodediscovery/nodediscovery.go            |  3 +
+ pkg/option/config.go                          | 13 +++++
+ plugins/cilium-cni/types/types_test.go        | 55 +++++++++++++++++++
+ 9 files changed, 152 insertions(+)
+ create mode 100644 pkg/nodediscovery/huaweicloud_test.go
+
+diff --git a/daemon/cmd/daemon_main.go b/daemon/cmd/daemon_main.go
+index a9eceaa2..568e70bc 100644
+--- a/daemon/cmd/daemon_main.go
++++ b/daemon/cmd/daemon_main.go
+@@ -500,6 +500,10 @@ func initializeFlags() {
+ 	flags.StringSlice(option.HuaweiCloudSubnetIDs, []string{}, "Ordered list of subnet IDs for HuaweiCloud Sub-ENI creation")
+ 	option.BindEnv(option.HuaweiCloudSubnetIDs)
+ 
++	flags.Var(option.NewNamedMapOptions(option.HuaweiCloudSubnetTags, &option.Config.HuaweiCloudSubnetTags, nil),
++		option.HuaweiCloudSubnetTags, "HuaweiCloud subnet tags in the form of k1=v1,k2=v2 (subnet IDs take precedence)")
++	option.BindEnv(option.HuaweiCloudSubnetTags)
++
+ 	flags.StringSlice(option.HuaweiCloudSecurityGroupIDs, []string{}, "Security group IDs to attach to HuaweiCloud Sub-ENIs")
+ 	option.BindEnv(option.HuaweiCloudSecurityGroupIDs)
+ 
+diff --git a/install/kubernetes/cilium/templates/cilium-configmap.yaml b/install/kubernetes/cilium/templates/cilium-configmap.yaml
+index 9c38ca31..e8d2fc4a 100644
+--- a/install/kubernetes/cilium/templates/cilium-configmap.yaml
++++ b/install/kubernetes/cilium/templates/cilium-configmap.yaml
+@@ -449,6 +449,7 @@ data:
+   enable-local-node-route: "false"
+   huawei-cloud-trunk-interface: {{ .Values.huaweicloud.trunkInterface | quote }}
+   huawei-cloud-subnet-ids: {{ join "," .Values.huaweicloud.subnetIDs | quote }}
++  huawei-cloud-subnet-tags: {{ .Values.huaweicloud.subnetTags | toRawJson | quote }}
+   huawei-cloud-security-group-ids: {{ join "," .Values.huaweicloud.securityGroupIDs | quote }}
+ {{- if .Values.huaweicloud.projectID }}
+   huawei-cloud-project-id: {{ .Values.huaweicloud.projectID | quote }}
+diff --git a/install/kubernetes/cilium/values.yaml b/install/kubernetes/cilium/values.yaml
+index b1933645..65351da9 100644
+--- a/install/kubernetes/cilium/values.yaml
++++ b/install/kubernetes/cilium/values.yaml
+@@ -266,7 +266,10 @@ huaweicloud:
+   # endpoint: ""
+   # vpcID: ""
+   trunkInterface: eth0
++  # -- Subnet IDs used for Sub-ENI allocation. When set, these take precedence over subnetTags.
+   subnetIDs: []
++  # -- Select Sub-ENI allocation subnets by HuaweiCloud VPC subnet tags.
++  subnetTags: {}
+   securityGroupIDs: []
+   subENITags: {}
+   releaseExcessIPs: false
+diff --git a/install/kubernetes/cilium/values.yaml.tmpl b/install/kubernetes/cilium/values.yaml.tmpl
+index 927e12d6..0ddd06c4 100644
+--- a/install/kubernetes/cilium/values.yaml.tmpl
++++ b/install/kubernetes/cilium/values.yaml.tmpl
+@@ -263,7 +263,10 @@ huaweicloud:
+   # endpoint: ""
+   # vpcID: ""
+   trunkInterface: eth0
++  # -- Subnet IDs used for Sub-ENI allocation. When set, these take precedence over subnetTags.
+   subnetIDs: []
++  # -- Select Sub-ENI allocation subnets by HuaweiCloud VPC subnet tags.
++  subnetTags: {}
+   securityGroupIDs: []
+   subENITags: {}
+   releaseExcessIPs: false
+diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
+index c448d5aa..6ccb4529 100644
+--- a/pkg/huaweicloud/eni/instances_test.go
++++ b/pkg/huaweicloud/eni/instances_test.go
+@@ -29,6 +29,39 @@ func TestFindOneSubnetAcceptsUnknownCapacity(t *testing.T) {
+ 	}
+ }
+ 
++func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
++	api := mock.NewAPI(
++		[]*ipamTypes.Subnet{
++			{ID: "subnet-pod", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 10, Tags: ipamTypes.Tags{"network-role": "pod"}},
++			{ID: "subnet-node", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 20, Tags: ipamTypes.Tags{"network-role": "node"}},
++		},
++		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
++	)
++	manager := NewInstancesManager(api, "vpc-1", nil)
++	if manager.Resync(context.Background()).IsZero() {
++		t.Fatal("resync failed")
++	}
++
++	byTags := manager.FindOneSubnet(eniTypes.Spec{
++		VPCID:            "vpc-1",
++		AvailabilityZone: "az-1",
++		SubnetTags:       map[string]string{"network-role": "pod"},
++	}, 1)
++	if byTags == nil || byTags.ID != "subnet-pod" {
++		t.Fatalf("unexpected tag-selected subnet: %#v", byTags)
++	}
++
++	byID := manager.FindOneSubnet(eniTypes.Spec{
++		VPCID:            "vpc-1",
++		AvailabilityZone: "az-1",
++		Subnets:          []string{"subnet-node"},
++		SubnetTags:       map[string]string{"network-role": "pod"},
++	}, 1)
++	if byID == nil || byID.ID != "subnet-node" {
++		t.Fatalf("explicit subnet ID did not take precedence: %#v", byID)
++	}
++}
++
+ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
+ 	api := mock.NewAPI(nil, nil, nil)
+ 	api.SetPortSecurityGroups("trunk-1", []string{"sg-1", "sg-2"})
+diff --git a/pkg/nodediscovery/huaweicloud_test.go b/pkg/nodediscovery/huaweicloud_test.go
+new file mode 100644
+index 00000000..7112a064
+--- /dev/null
++++ b/pkg/nodediscovery/huaweicloud_test.go
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package nodediscovery
++
++import (
++	"reflect"
++	"testing"
++
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++)
++
++func TestApplyHuaweiCloudNetConf(t *testing.T) {
++	dst := &huaweiCloudTypes.Spec{
++		Subnets:        []string{"subnet-from-agent"},
++		SecurityGroups: []string{"sg-from-agent"},
++	}
++	src := huaweiCloudTypes.Spec{
++		SubnetTags:        map[string]string{"network-role": "pod"},
++		SecurityGroupTags: map[string]string{"security-role": "pod"},
++	}
++
++	applyHuaweiCloudNetConf(dst, src)
++
++	if !reflect.DeepEqual(dst.Subnets, []string{"subnet-from-agent"}) {
++		t.Fatalf("empty CNI subnet IDs overwrote agent configuration: %v", dst.Subnets)
++	}
++	if !reflect.DeepEqual(dst.SubnetTags, src.SubnetTags) {
++		t.Fatalf("CNI subnet tags were not applied: %v", dst.SubnetTags)
++	}
++	if !reflect.DeepEqual(dst.SecurityGroups, []string{"sg-from-agent"}) {
++		t.Fatalf("empty CNI security groups overwrote agent configuration: %v", dst.SecurityGroups)
++	}
++	if !reflect.DeepEqual(dst.SecurityGroupTags, src.SecurityGroupTags) {
++		t.Fatalf("CNI security group tags were not applied: %v", dst.SecurityGroupTags)
++	}
++}
+diff --git a/pkg/nodediscovery/nodediscovery.go b/pkg/nodediscovery/nodediscovery.go
+index f5ed5d7f..d08d2e4d 100644
+--- a/pkg/nodediscovery/nodediscovery.go
++++ b/pkg/nodediscovery/nodediscovery.go
+@@ -775,6 +775,9 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+ 		if len(option.Config.HuaweiCloudSubnetIDs) > 0 {
+ 			nodeResource.Spec.HuaweiCloud.Subnets = option.Config.HuaweiCloudSubnetIDs
+ 		}
++		if len(option.Config.HuaweiCloudSubnetTags) > 0 {
++			nodeResource.Spec.HuaweiCloud.SubnetTags = option.Config.HuaweiCloudSubnetTags
++		}
+ 		if len(option.Config.HuaweiCloudSecurityGroupIDs) > 0 {
+ 			nodeResource.Spec.HuaweiCloud.SecurityGroups = option.Config.HuaweiCloudSecurityGroupIDs
+ 		}
+diff --git a/pkg/option/config.go b/pkg/option/config.go
+index f9c212f4..92681194 100644
+--- a/pkg/option/config.go
++++ b/pkg/option/config.go
+@@ -839,6 +839,9 @@ const (
+ 	// HuaweiCloudSubnetIDs is the ordered list of subnet IDs for HuaweiCloud Sub-ENI creation.
+ 	HuaweiCloudSubnetIDs = "huawei-cloud-subnet-ids"
+ 
++	// HuaweiCloudSubnetTags selects subnets for HuaweiCloud Sub-ENI creation by tags.
++	HuaweiCloudSubnetTags = "huawei-cloud-subnet-tags"
++
+ 	// HuaweiCloudSecurityGroupIDs is the list of security groups for HuaweiCloud Sub-ENIs.
+ 	HuaweiCloudSecurityGroupIDs = "huawei-cloud-security-group-ids"
+ 
+@@ -1776,6 +1779,10 @@ type DaemonConfig struct {
+ 	// HuaweiCloudSubnetIDs is the ordered list of subnet IDs for HuaweiCloud Sub-ENI creation.
+ 	HuaweiCloudSubnetIDs []string
+ 
++	// HuaweiCloudSubnetTags selects subnets for HuaweiCloud Sub-ENI creation by tags.
++	// Explicit HuaweiCloudSubnetIDs take precedence when both are configured.
++	HuaweiCloudSubnetTags map[string]string
++
+ 	// HuaweiCloudSecurityGroupIDs is the list of security groups for HuaweiCloud Sub-ENIs.
+ 	HuaweiCloudSecurityGroupIDs []string
+ 
+@@ -2345,6 +2352,7 @@ var (
+ 		IdentityChangeGracePeriod:    defaults.IdentityChangeGracePeriod,
+ 		IdentityRestoreGracePeriod:   defaults.IdentityRestoreGracePeriod,
+ 		FixedIdentityMapping:         make(map[string]string),
++		HuaweiCloudSubnetTags:        make(map[string]string),
+ 		KVStoreOpt:                   make(map[string]string),
+ 		LogOpt:                       make(map[string]string),
+ 		SelectiveRegeneration:        defaults.SelectiveRegeneration,
+@@ -2924,6 +2932,11 @@ func (c *DaemonConfig) Populate() {
+ 	c.IPAM = viper.GetString(IPAM)
+ 	c.HuaweiCloudTrunkInterface = viper.GetString(HuaweiCloudTrunkInterface)
+ 	c.HuaweiCloudSubnetIDs = viper.GetStringSlice(HuaweiCloudSubnetIDs)
++	if m, err := command.GetStringMapStringE(viper.GetViper(), HuaweiCloudSubnetTags); err != nil {
++		log.Fatalf("unable to parse %s: %s", HuaweiCloudSubnetTags, err)
++	} else {
++		c.HuaweiCloudSubnetTags = m
++	}
+ 	c.HuaweiCloudSecurityGroupIDs = viper.GetStringSlice(HuaweiCloudSecurityGroupIDs)
+ 	c.IPv4Range = viper.GetString(IPv4Range)
+ 	c.IPv4NodeAddr = viper.GetString(IPv4NodeAddr)
+diff --git a/plugins/cilium-cni/types/types_test.go b/plugins/cilium-cni/types/types_test.go
+index 0aa9f1c0..0702a768 100644
+--- a/plugins/cilium-cni/types/types_test.go
++++ b/plugins/cilium-cni/types/types_test.go
+@@ -16,6 +16,7 @@ import (
+ 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
+ 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
+ 	"github.com/cilium/cilium/pkg/checker"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+ )
+ 
+@@ -274,6 +275,60 @@ func (t *CNITypesSuite) TestReadCNIConfAzurev2WithPlugins(c *check.C) {
+ 	testConfRead(c, confFile1, &netConf1)
+ }
+ 
++func (t *CNITypesSuite) TestReadCNIConfHuaweiCloudSubnetTags(c *check.C) {
++	standalone := `
++{
++  "cniVersion": "0.3.1",
++  "name": "cilium",
++  "type": "cilium-cni",
++  "huawei-cloud": {
++    "subnet-tags": {
++      "network-role": "pod"
++    }
++  }
++}
++`
++	wantStandalone := NetConf{
++		NetConf: cnitypes.NetConf{
++			CNIVersion: "0.3.1",
++			Name:       "cilium",
++			Type:       "cilium-cni",
++		},
++		HuaweiCloud: huaweiCloudTypes.Spec{
++			SubnetTags: map[string]string{"network-role": "pod"},
++		},
++	}
++	testConfRead(c, standalone, &wantStandalone)
++
++	conflist := `
++{
++  "cniVersion": "0.3.1",
++  "name": "cilium",
++  "plugins": [
++    {
++      "cniVersion": "0.3.1",
++      "type": "cilium-cni",
++      "huawei-cloud": {
++        "subnet-tags": {
++          "network-role": "pod"
++        }
++      }
++    }
++  ]
++}
++`
++	wantConflist := NetConf{
++		NetConf: cnitypes.NetConf{
++			CNIVersion: "0.3.1",
++			Type:       "cilium-cni",
++		},
++		HuaweiCloud: huaweiCloudTypes.Spec{
++			SubnetTags: map[string]string{"network-role": "pod"},
++		},
++	}
++	testConfRead(c, conflist, &wantConflist)
++}
++
+ func (t *CNITypesSuite) TestReadCNIConfClusterPoolV2(c *check.C) {
+ 	confFile1 := `
+ {
+-- 
+2.43.0
+

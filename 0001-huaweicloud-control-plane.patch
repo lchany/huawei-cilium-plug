@@ -1,0 +1,4721 @@
+From 1ea597d76a75f79643933811058cedaf55123cf3 Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Sat, 11 Jul 2026 09:07:12 +0800
+Subject: [PATCH] huaweicloud: add SubENI control plane support
+
+---
+ Makefile                                      |   2 +-
+ Makefile.defs                                 |   2 +-
+ Makefile.docker                               |   4 +-
+ .../cilium/templates/cilium-configmap.yaml    |  27 +
+ .../templates/cilium-operator/_helpers.tpl    |   4 +
+ .../templates/cilium-operator/deployment.yaml |  14 +
+ .../templates/cilium-operator/secret.yaml     |  12 +
+ install/kubernetes/cilium/values.yaml         |  17 +
+ install/kubernetes/cilium/values.yaml.tmpl    |  17 +
+ operator/Makefile                             |   5 +-
+ operator/flags.go                             |  10 +-
+ operator/main.go                              |   2 +-
+ operator/option/config.go                     |  50 ++
+ operator/provider_huaweicloud_flags.go        |  44 +
+ operator/provider_huaweicloud_register.go     |  15 +
+ pkg/endpointmanager/huaweicloud_subeni.go     | 231 ++++++
+ pkg/endpointmanager/manager.go                |  12 +-
+ pkg/endpointmanager/subscribe.go              |   4 +
+ pkg/huaweicloud/api/api.go                    | 781 ++++++++++++++++++
+ pkg/huaweicloud/api/error.go                  |  71 ++
+ pkg/huaweicloud/api/mock/mock.go              | 459 ++++++++++
+ pkg/huaweicloud/api/types.go                  |  12 +
+ pkg/huaweicloud/eni/instances.go              | 278 +++++++
+ pkg/huaweicloud/eni/limits/limits.go          | 299 +++++++
+ pkg/huaweicloud/eni/log.go                    |  17 +
+ pkg/huaweicloud/eni/node.go                   | 552 +++++++++++++
+ pkg/huaweicloud/eni/types/doc.go              |   7 +
+ pkg/huaweicloud/eni/types/types.go            | 184 +++++
+ pkg/huaweicloud/metadata/metadata.go          | 206 +++++
+ pkg/huaweicloud/subenimap/manager.go          | 241 ++++++
+ pkg/huaweicloud/subenimap/types.go            | 149 ++++
+ pkg/huaweicloud/types/types.go                |  17 +
+ pkg/huaweicloud/utils/utils.go                |  36 +
+ pkg/ipam/allocator/huaweicloud/huaweicloud.go | 104 +++
+ pkg/ipam/crd.go                               |  67 +-
+ pkg/ipam/ipam.go                              |   2 +-
+ pkg/ipam/option/option.go                     |   3 +
+ pkg/ipam/types/types.go                       |  24 +
+ pkg/k8s/apis/cilium.io/v2/types.go            |  14 +
+ pkg/nodediscovery/nodediscovery.go            |  73 +-
+ pkg/option/config.go                          |  33 +-
+ 41 files changed, 4088 insertions(+), 13 deletions(-)
+ create mode 100644 operator/provider_huaweicloud_flags.go
+ create mode 100644 operator/provider_huaweicloud_register.go
+ create mode 100644 pkg/endpointmanager/huaweicloud_subeni.go
+ create mode 100644 pkg/huaweicloud/api/api.go
+ create mode 100644 pkg/huaweicloud/api/error.go
+ create mode 100644 pkg/huaweicloud/api/mock/mock.go
+ create mode 100644 pkg/huaweicloud/api/types.go
+ create mode 100644 pkg/huaweicloud/eni/instances.go
+ create mode 100644 pkg/huaweicloud/eni/limits/limits.go
+ create mode 100644 pkg/huaweicloud/eni/log.go
+ create mode 100644 pkg/huaweicloud/eni/node.go
+ create mode 100644 pkg/huaweicloud/eni/types/doc.go
+ create mode 100644 pkg/huaweicloud/eni/types/types.go
+ create mode 100644 pkg/huaweicloud/metadata/metadata.go
+ create mode 100644 pkg/huaweicloud/subenimap/manager.go
+ create mode 100644 pkg/huaweicloud/subenimap/types.go
+ create mode 100644 pkg/huaweicloud/types/types.go
+ create mode 100644 pkg/huaweicloud/utils/utils.go
+ create mode 100644 pkg/ipam/allocator/huaweicloud/huaweicloud.go
+
+diff --git a/Makefile b/Makefile
+index 3c6fe1a4dd..895da082c3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -645,7 +645,7 @@ help: ## Display help for the Makefile, from https://www.thapaliya.com/en/writin
+ 	$(call print_help_line,"docker-hubble-relay-image","Build hubble-relay docker image")
+ 	$(call print_help_line,"docker-clustermesh-apiserver-image","Build docker image for Cilium clustermesh APIServer")
+ 	$(call print_help_line,"docker-operator-image","Build cilium-operator docker image")
+-	$(call print_help_line,"docker-operator-*-image","Build platform specific cilium-operator images(alibabacloud, aws, azure, generic)")
++	$(call print_help_line,"docker-operator-*-image","Build platform specific cilium-operator images(alibabacloud, aws, azure, huaweicloud, generic)")
+ 	$(call print_help_line,"docker-*-image-unstripped","Build unstripped version of above docker images(cilium, hubble-relay, operator etc.)")
+ 
+ .PHONY: help clean clean-container dev-doctor force generate-api generate-health-api generate-operator-api generate-hubble-api install licenses-all veryclean check-sources
+diff --git a/Makefile.defs b/Makefile.defs
+index 9d98629ff7..70d9749e99 100644
+--- a/Makefile.defs
++++ b/Makefile.defs
+@@ -64,7 +64,7 @@ GO_TEST_FLAGS =
+ GO_CLEAN_FLAGS =
+ GO_BUILD_LDFLAGS =
+ # go build/test -tags values
+-GO_TAGS_FLAGS = osusergo
++GO_TAGS_FLAGS = osusergo ipam_provider_huaweicloud
+ 
+ # This is declared here as it is needed to change the covermode depending on if
+ # RACE is specified.
+diff --git a/Makefile.docker b/Makefile.docker
+index c5cced19ad..43f84f27ec 100644
+--- a/Makefile.docker
++++ b/Makefile.docker
+@@ -133,6 +133,6 @@ docker-images-all: docker-cilium-image docker-plugin-image docker-hubble-relay-i
+ 
+ docker-images-all-unstripped: docker-cilium-image-unstripped docker-plugin-image-unstripped docker-hubble-relay-image-unstripped docker-clustermesh-apiserver-image-unstripped docker-operator-images-all-unstripped ## Build all Cilium related unstripped docker images.
+ 
+-docker-operator-images-all: docker-operator-image docker-operator-aws-image docker-operator-azure-image docker-operator-alibabacloud-image docker-operator-generic-image ## Build all variants of cilium-operator images.
++docker-operator-images-all: docker-operator-image docker-operator-aws-image docker-operator-azure-image docker-operator-alibabacloud-image docker-operator-huaweicloud-image docker-operator-generic-image ## Build all variants of cilium-operator images.
+ 
+-docker-operator-images-all-unstripped: docker-operator-image-unstripped docker-operator-aws-image-unstripped docker-operator-azure-image-unstripped docker-operator-alibabacloud-image-unstripped docker-operator-generic-image-unstripped ## Build all variants of unstripped cilium-operator images.
++docker-operator-images-all-unstripped: docker-operator-image-unstripped docker-operator-aws-image-unstripped docker-operator-azure-image-unstripped docker-operator-alibabacloud-image-unstripped docker-operator-huaweicloud-image-unstripped docker-operator-generic-image-unstripped ## Build all variants of unstripped cilium-operator images.
+diff --git a/install/kubernetes/cilium/templates/cilium-configmap.yaml b/install/kubernetes/cilium/templates/cilium-configmap.yaml
+index e20574ef1f..9c38ca31ee 100644
+--- a/install/kubernetes/cilium/templates/cilium-configmap.yaml
++++ b/install/kubernetes/cilium/templates/cilium-configmap.yaml
+@@ -443,6 +443,31 @@ data:
+   auto-create-cilium-node-resource: "true"
+ {{- end }}
+ 
++{{- if .Values.huaweicloud.enabled }}
++  enable-endpoint-routes: "true"
++  auto-create-cilium-node-resource: "true"
++  enable-local-node-route: "false"
++  huawei-cloud-trunk-interface: {{ .Values.huaweicloud.trunkInterface | quote }}
++  huawei-cloud-subnet-ids: {{ join "," .Values.huaweicloud.subnetIDs | quote }}
++  huawei-cloud-security-group-ids: {{ join "," .Values.huaweicloud.securityGroupIDs | quote }}
++{{- if .Values.huaweicloud.projectID }}
++  huawei-cloud-project-id: {{ .Values.huaweicloud.projectID | quote }}
++{{- end }}
++{{- if .Values.huaweicloud.region }}
++  huawei-cloud-region: {{ .Values.huaweicloud.region | quote }}
++{{- end }}
++{{- if .Values.huaweicloud.endpoint }}
++  huawei-cloud-endpoint: {{ .Values.huaweicloud.endpoint | quote }}
++{{- end }}
++{{- if .Values.huaweicloud.vpcID }}
++  huawei-cloud-vpc-id: {{ .Values.huaweicloud.vpcID | quote }}
++{{- end }}
++{{- if .Values.huaweicloud.subENITags }}
++  huawei-cloud-subeni-tags: {{ .Values.huaweicloud.subENITags | toRawJson | quote }}
++{{- end }}
++  huawei-cloud-release-excess-ips: {{ .Values.huaweicloud.releaseExcessIPs | quote }}
++{{- end }}
++
+ {{- if hasKey .Values "l7Proxy" }}
+   # Enables L7 proxy for L7 policy enforcement and visibility
+   enable-l7-proxy: {{ .Values.l7Proxy | quote }}
+@@ -572,6 +597,8 @@ data:
+   # List of devices used to attach bpf_host.o (implements BPF NodePort,
+   # host-firewall and BPF masquerading)
+   devices: {{ join " " .Values.devices | quote }}
++{{- else if .Values.huaweicloud.enabled }}
++  devices: {{ .Values.huaweicloud.trunkInterface | quote }}
+ {{- end }}
+ 
+ {{- if .Values.enableRuntimeDeviceDetection }}
+diff --git a/install/kubernetes/cilium/templates/cilium-operator/_helpers.tpl b/install/kubernetes/cilium/templates/cilium-operator/_helpers.tpl
+index 0910de630a..3550825a90 100644
+--- a/install/kubernetes/cilium/templates/cilium-operator/_helpers.tpl
++++ b/install/kubernetes/cilium/templates/cilium-operator/_helpers.tpl
+@@ -6,6 +6,8 @@
+   {{- $cloud = "azure" -}}
+ {{- else if .Values.alibabacloud.enabled -}}
+   {{- $cloud = "alibabacloud" -}}
++{{- else if .Values.huaweicloud.enabled -}}
++  {{- $cloud = "huaweicloud" -}}
+ {{- end -}}
+ {{- $cloud -}}
+ {{- end -}}
+@@ -18,6 +20,8 @@
+   {{- $imageDigest = (.Values.operator.image.useDigest | default false) | ternary (printf "@%s" .Values.operator.image.azureDigest) "" -}}
+ {{- else if .Values.alibabacloud.enabled -}}
+   {{- $imageDigest = (.Values.operator.image.useDigest | default false) | ternary (printf "@%s" .Values.operator.image.alibabacloudDigest) "" -}}
++{{- else if .Values.huaweicloud.enabled -}}
++  {{- $imageDigest = (.Values.operator.image.useDigest | default false) | ternary (printf "@%s" .Values.operator.image.huaweicloudDigest) "" -}}
+ {{- end -}}
+ {{- $imageDigest -}}
+ {{- end -}}
+diff --git a/install/kubernetes/cilium/templates/cilium-operator/deployment.yaml b/install/kubernetes/cilium/templates/cilium-operator/deployment.yaml
+index b0560f87ea..1474a5eaa6 100644
+--- a/install/kubernetes/cilium/templates/cilium-operator/deployment.yaml
++++ b/install/kubernetes/cilium/templates/cilium-operator/deployment.yaml
+@@ -112,6 +112,20 @@ spec:
+               key: ALIBABA_CLOUD_ACCESS_KEY_SECRET
+               optional: true
+         {{- end }}
++        {{- if .Values.huaweicloud.enabled }}
++        - name: CILIUM_HUAWEI_CLOUD_ACCESS_KEY
++          valueFrom:
++            secretKeyRef:
++              name: cilium-huaweicloud
++              key: CILIUM_HUAWEI_CLOUD_ACCESS_KEY
++              optional: true
++        - name: CILIUM_HUAWEI_CLOUD_SECRET_KEY
++          valueFrom:
++            secretKeyRef:
++              name: cilium-huaweicloud
++              key: CILIUM_HUAWEI_CLOUD_SECRET_KEY
++              optional: true
++        {{- end }}
+         {{- if .Values.k8sServiceHost }}
+         - name: KUBERNETES_SERVICE_HOST
+           value: {{ .Values.k8sServiceHost | quote }}
+diff --git a/install/kubernetes/cilium/templates/cilium-operator/secret.yaml b/install/kubernetes/cilium/templates/cilium-operator/secret.yaml
+index 4209641264..085a47390c 100644
+--- a/install/kubernetes/cilium/templates/cilium-operator/secret.yaml
++++ b/install/kubernetes/cilium/templates/cilium-operator/secret.yaml
+@@ -10,4 +10,16 @@ data:
+   AZURE_CLIENT_ID: {{ default "" .Values.azure.clientID | b64enc | quote }}
+   AZURE_CLIENT_SECRET: {{ default "" .Values.azure.clientSecret | b64enc | quote }}
+ {{- end }}
++{{- if .Values.huaweicloud.enabled }}
++---
++apiVersion: v1
++kind: Secret
++metadata:
++  name: cilium-huaweicloud
++  namespace: {{ .Release.Namespace }}
++type: Opaque
++data:
++  CILIUM_HUAWEI_CLOUD_ACCESS_KEY: {{ default "" .Values.huaweicloud.accessKey | b64enc | quote }}
++  CILIUM_HUAWEI_CLOUD_SECRET_KEY: {{ default "" .Values.huaweicloud.secretKey | b64enc | quote }}
++{{- end }}
+ {{- end }}
+diff --git a/install/kubernetes/cilium/values.yaml b/install/kubernetes/cilium/values.yaml
+index 6f296bda4c..b1933645cf 100644
+--- a/install/kubernetes/cilium/values.yaml
++++ b/install/kubernetes/cilium/values.yaml
+@@ -256,6 +256,21 @@ alibabacloud:
+   # -- Enable AlibabaCloud ENI integration
+   enabled: false
+ 
++huaweicloud:
++  # -- Enable HuaweiCloud Sub-ENI integration.
++  enabled: false
++  # accessKey: ""
++  # secretKey: ""
++  # projectID: ""
++  # region: ""
++  # endpoint: ""
++  # vpcID: ""
++  trunkInterface: eth0
++  subnetIDs: []
++  securityGroupIDs: []
++  subENITags: {}
++  releaseExcessIPs: false
++
+ # -- Deprecated in favor of bandwidthManager.enabled. To be removed in 1.13.
+ # Optimize TCP and UDP workloads and enable rate-limiting traffic from
+ # individual Pods with EDT (Earliest Departure Time) through the
+@@ -1657,6 +1672,8 @@ operator:
+     awsDigest: ""
+     # operator-alibabacloud-digest
+     alibabacloudDigest: ""
++    # operator-huaweicloud-digest
++    huaweicloudDigest: ""
+     useDigest: false
+     pullPolicy: "IfNotPresent"
+     suffix: ""
+diff --git a/install/kubernetes/cilium/values.yaml.tmpl b/install/kubernetes/cilium/values.yaml.tmpl
+index 8f8faed25b..927e12d69f 100644
+--- a/install/kubernetes/cilium/values.yaml.tmpl
++++ b/install/kubernetes/cilium/values.yaml.tmpl
+@@ -253,6 +253,21 @@ alibabacloud:
+   # -- Enable AlibabaCloud ENI integration
+   enabled: false
+ 
++huaweicloud:
++  # -- Enable HuaweiCloud Sub-ENI integration.
++  enabled: false
++  # accessKey: ""
++  # secretKey: ""
++  # projectID: ""
++  # region: ""
++  # endpoint: ""
++  # vpcID: ""
++  trunkInterface: eth0
++  subnetIDs: []
++  securityGroupIDs: []
++  subENITags: {}
++  releaseExcessIPs: false
++
+ # -- Deprecated in favor of bandwidthManager.enabled. To be removed in 1.13.
+ # Optimize TCP and UDP workloads and enable rate-limiting traffic from
+ # individual Pods with EDT (Earliest Departure Time) through the
+@@ -1654,6 +1669,8 @@ operator:
+     awsDigest: ${OPERATOR_AWS_DIGEST}
+     # operator-alibabacloud-digest
+     alibabacloudDigest: ${OPERATOR_ALIBABACLOUD_DIGEST}
++    # operator-huaweicloud-digest
++    huaweicloudDigest: ${OPERATOR_HUAWEICLOUD_DIGEST}
+     useDigest: ${USE_DIGESTS}
+     pullPolicy: "${PULL_POLICY}"
+     suffix: "${CILIUM_OPERATOR_SUFFIX}"
+diff --git a/operator/Makefile b/operator/Makefile
+index ebd1285e3d..9a0967c081 100644
+--- a/operator/Makefile
++++ b/operator/Makefile
+@@ -3,17 +3,18 @@
+ 
+ include ../Makefile.defs
+ 
+-TARGETS := cilium-operator cilium-operator-generic cilium-operator-aws cilium-operator-azure cilium-operator-alibabacloud
++TARGETS := cilium-operator cilium-operator-generic cilium-operator-aws cilium-operator-azure cilium-operator-alibabacloud cilium-operator-huaweicloud
+ 
+ .PHONY: all $(TARGETS) clean install
+ 
+ all: $(TARGETS)
+ 
+-cilium-operator: GO_TAGS_FLAGS+=ipam_provider_aws,ipam_provider_azure,ipam_provider_operator,ipam_provider_alibabacloud
++cilium-operator: GO_TAGS_FLAGS+=ipam_provider_aws,ipam_provider_azure,ipam_provider_operator,ipam_provider_alibabacloud,ipam_provider_huaweicloud
+ cilium-operator-generic: GO_TAGS_FLAGS+=ipam_provider_operator
+ cilium-operator-aws: GO_TAGS_FLAGS+=ipam_provider_aws
+ cilium-operator-azure: GO_TAGS_FLAGS+=ipam_provider_azure
+ cilium-operator-alibabacloud: GO_TAGS_FLAGS+=ipam_provider_alibabacloud
++cilium-operator-huaweicloud: GO_TAGS_FLAGS+=ipam_provider_huaweicloud
+ 
+ $(TARGETS):
+ 	@$(ECHO_GO)
+diff --git a/operator/flags.go b/operator/flags.go
+index 4a4e31b69d..b0549700e7 100644
+--- a/operator/flags.go
++++ b/operator/flags.go
+@@ -124,6 +124,8 @@ func init() {
+ 		defaultIPAM = ipamOption.IPAMAzure
+ 	case "cilium-operator-alibabacloud":
+ 		defaultIPAM = ipamOption.IPAMAlibabaCloud
++	case "cilium-operator-huaweicloud":
++		defaultIPAM = ipamOption.IPAMHuaweiCloud
+ 	case "cilium-operator-generic":
+ 		defaultIPAM = ipamOption.IPAMClusterPool
+ 	}
+@@ -146,6 +148,8 @@ func init() {
+ 				return "cilium-operator-azure"
+ 			case ipamOption.IPAMAlibabaCloud:
+ 				return "cilium-operator-alibabacloud"
++			case ipamOption.IPAMHuaweiCloud:
++				return "cilium-operator-huaweicloud"
+ 			case ipamOption.IPAMKubernetes, ipamOption.IPAMClusterPool, ipamOption.IPAMClusterPoolV2, ipamOption.IPAMCRD:
+ 				return "cilium-operator-generic"
+ 			default:
+@@ -178,9 +182,13 @@ func init() {
+ 			if ipamFlagValue != ipamOption.IPAMAlibabaCloud {
+ 				return unsupporterErr()
+ 			}
++		case "cilium-operator-huaweicloud":
++			if ipamFlagValue != ipamOption.IPAMHuaweiCloud {
++				return unsupporterErr()
++			}
+ 		case "cilium-operator-generic":
+ 			switch ipamFlagValue {
+-			case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++			case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 				return unsupporterErr()
+ 			}
+ 		}
+diff --git a/operator/main.go b/operator/main.go
+index 8f7e931a0c..06a4d8d433 100644
+--- a/operator/main.go
++++ b/operator/main.go
+@@ -389,7 +389,7 @@ func onOperatorStartLeading(ctx context.Context) {
+ 	log.WithField(logfields.Mode, option.Config.IPAM).Info("Initializing IPAM")
+ 
+ 	switch ipamMode := option.Config.IPAM; ipamMode {
+-	case ipamOption.IPAMAzure, ipamOption.IPAMENI, ipamOption.IPAMClusterPool, ipamOption.IPAMClusterPoolV2, ipamOption.IPAMAlibabaCloud:
++	case ipamOption.IPAMAzure, ipamOption.IPAMENI, ipamOption.IPAMClusterPool, ipamOption.IPAMClusterPoolV2, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 		alloc, providerBuiltin := allocatorProviders[ipamMode]
+ 		if !providerBuiltin {
+ 			log.Fatalf("%s allocator is not supported by this version of %s", ipamMode, binaryName)
+diff --git a/operator/option/config.go b/operator/option/config.go
+index 8ab17a88cf..8a1ad910a4 100644
+--- a/operator/option/config.go
++++ b/operator/option/config.go
+@@ -236,6 +236,30 @@ const (
+ 	// the number of API calls to AlibabaCloud ECS service.
+ 	AlibabaCloudReleaseExcessIPs = "alibaba-cloud-release-excess-ips"
+ 
++	// HuaweiCloudAccessKey is the access key used by HuaweiCloud API client.
++	HuaweiCloudAccessKey = "huawei-cloud-access-key"
++
++	// HuaweiCloudSecretKey is the secret key used by HuaweiCloud API client.
++	HuaweiCloudSecretKey = "huawei-cloud-secret-key"
++
++	// HuaweiCloudProjectID is the project ID used by HuaweiCloud API client.
++	HuaweiCloudProjectID = "huawei-cloud-project-id"
++
++	// HuaweiCloudRegion is the region used by HuaweiCloud API client.
++	HuaweiCloudRegion = "huawei-cloud-region"
++
++	// HuaweiCloudEndpoint optionally overrides the HuaweiCloud API endpoint.
++	HuaweiCloudEndpoint = "huawei-cloud-endpoint"
++
++	// HuaweiCloudVPCID constrains resource discovery to a VPC.
++	HuaweiCloudVPCID = "huawei-cloud-vpc-id"
++
++	// HuaweiCloudSubENITags are tags added to Sub-ENI port resources created by HuaweiCloud IPAM.
++	HuaweiCloudSubENITags = "huawei-cloud-subeni-tags"
++
++	// HuaweiCloudReleaseExcessIPs enables releasing unused HuaweiCloud Sub-ENIs.
++	HuaweiCloudReleaseExcessIPs = "huawei-cloud-release-excess-ips"
++
+ 	// CiliumEndpointSlice options
+ 
+ 	// CESMaxCEPsInCES is the maximum number of cilium endpoints allowed in single
+@@ -474,6 +498,16 @@ type OperatorConfig struct {
+ 	// the number of API calls to AlibabaCloud ECS service.
+ 	AlibabaCloudReleaseExcessIPs bool
+ 
++	// HuaweiCloud options
++	HuaweiCloudAccessKey        string
++	HuaweiCloudSecretKey        string
++	HuaweiCloudProjectID        string
++	HuaweiCloudRegion           string
++	HuaweiCloudEndpoint         string
++	HuaweiCloudVPCID            string
++	HuaweiCloudSubENITags       map[string]string
++	HuaweiCloudReleaseExcessIPs bool
++
+ 	// CiliumEndpointSlice options
+ 
+ 	// CESMaxCEPsInCES is the maximum number of CiliumEndpoints allowed in single
+@@ -599,6 +633,15 @@ func (c *OperatorConfig) Populate() {
+ 	c.AlibabaCloudVPCID = viper.GetString(AlibabaCloudVPCID)
+ 	c.AlibabaCloudReleaseExcessIPs = viper.GetBool(AlibabaCloudReleaseExcessIPs)
+ 
++	// HuaweiCloud options
++	c.HuaweiCloudAccessKey = viper.GetString(HuaweiCloudAccessKey)
++	c.HuaweiCloudSecretKey = viper.GetString(HuaweiCloudSecretKey)
++	c.HuaweiCloudProjectID = viper.GetString(HuaweiCloudProjectID)
++	c.HuaweiCloudRegion = viper.GetString(HuaweiCloudRegion)
++	c.HuaweiCloudEndpoint = viper.GetString(HuaweiCloudEndpoint)
++	c.HuaweiCloudVPCID = viper.GetString(HuaweiCloudVPCID)
++	c.HuaweiCloudReleaseExcessIPs = viper.GetBool(HuaweiCloudReleaseExcessIPs)
++
+ 	// CiliumEndpointSlice options
+ 	c.CESMaxCEPsInCES = viper.GetInt(CESMaxCEPsInCES)
+ 	c.CESSlicingMode = viper.GetString(CESSlicingMode)
+@@ -632,6 +675,12 @@ func (c *OperatorConfig) Populate() {
+ 	} else {
+ 		c.ENITags = m
+ 	}
++
++	if m, err := command.GetStringMapStringE(viper.GetViper(), HuaweiCloudSubENITags); err != nil {
++		log.Fatalf("unable to parse %s: %s", HuaweiCloudSubENITags, err)
++	} else {
++		c.HuaweiCloudSubENITags = m
++	}
+ }
+ 
+ // Config represents the operator configuration.
+@@ -641,4 +690,5 @@ var Config = &OperatorConfig{
+ 	IPAMInstanceTags:        make(map[string]string),
+ 	AWSInstanceLimitMapping: make(map[string]string),
+ 	ENITags:                 make(map[string]string),
++	HuaweiCloudSubENITags:   make(map[string]string),
+ }
+diff --git a/operator/provider_huaweicloud_flags.go b/operator/provider_huaweicloud_flags.go
+new file mode 100644
+index 0000000000..6d486e936a
+--- /dev/null
++++ b/operator/provider_huaweicloud_flags.go
+@@ -0,0 +1,44 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++//go:build ipam_provider_huaweicloud
++
++package main
++
++import (
++	"github.com/spf13/viper"
++
++	operatorOption "github.com/cilium/cilium/operator/option"
++	"github.com/cilium/cilium/pkg/option"
++)
++
++func init() {
++	flags := rootCmd.Flags()
++
++	flags.String(operatorOption.HuaweiCloudAccessKey, "", "Access key for HuaweiCloud API")
++	option.BindEnv(operatorOption.HuaweiCloudAccessKey)
++
++	flags.String(operatorOption.HuaweiCloudSecretKey, "", "Secret key for HuaweiCloud API")
++	option.BindEnv(operatorOption.HuaweiCloudSecretKey)
++
++	flags.String(operatorOption.HuaweiCloudProjectID, "", "Project ID for HuaweiCloud API")
++	option.BindEnv(operatorOption.HuaweiCloudProjectID)
++
++	flags.String(operatorOption.HuaweiCloudRegion, "", "Region for HuaweiCloud API. If empty, metadata is used")
++	option.BindEnv(operatorOption.HuaweiCloudRegion)
++
++	flags.String(operatorOption.HuaweiCloudEndpoint, "", "Optional HuaweiCloud API endpoint override")
++	option.BindEnv(operatorOption.HuaweiCloudEndpoint)
++
++	flags.String(operatorOption.HuaweiCloudVPCID, "", "Specific VPC ID for HuaweiCloud Sub-ENI discovery")
++	option.BindEnv(operatorOption.HuaweiCloudVPCID)
++
++	flags.Var(option.NewNamedMapOptions(operatorOption.HuaweiCloudSubENITags, &operatorOption.Config.HuaweiCloudSubENITags, nil),
++		operatorOption.HuaweiCloudSubENITags, "HuaweiCloud Sub-ENI port tags in the form of k1=v1,k2=v2")
++	option.BindEnv(operatorOption.HuaweiCloudSubENITags)
++
++	flags.Bool(operatorOption.HuaweiCloudReleaseExcessIPs, false, "Release excess free HuaweiCloud Sub-ENIs")
++	option.BindEnv(operatorOption.HuaweiCloudReleaseExcessIPs)
++
++	viper.BindPFlags(flags)
++}
+diff --git a/operator/provider_huaweicloud_register.go b/operator/provider_huaweicloud_register.go
+new file mode 100644
+index 0000000000..b42bb3df83
+--- /dev/null
++++ b/operator/provider_huaweicloud_register.go
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++//go:build ipam_provider_huaweicloud
++
++package main
++
++import (
++	"github.com/cilium/cilium/pkg/ipam/allocator/huaweicloud"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++)
++
++func init() {
++	allocatorProviders[ipamOption.IPAMHuaweiCloud] = &huaweicloud.AllocatorHuaweiCloud{}
++}
+diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
+new file mode 100644
+index 0000000000..f357fafe72
+--- /dev/null
++++ b/pkg/endpointmanager/huaweicloud_subeni.go
+@@ -0,0 +1,231 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package endpointmanager
++
++import (
++	"context"
++	"fmt"
++	"net"
++
++	"github.com/sirupsen/logrus"
++	"github.com/vishvananda/netlink"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++
++	"github.com/cilium/cilium/pkg/endpoint"
++	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++	"github.com/cilium/cilium/pkg/k8s"
++	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/logging/logfields"
++	nodeTypes "github.com/cilium/cilium/pkg/node/types"
++	"github.com/cilium/cilium/pkg/option"
++)
++
++var huaweiCloudSubENILog = logging.DefaultLogger.WithField(logfields.LogSubsys, "endpointmanager-huaweicloud-subeni")
++
++type subENIMapUpdater interface {
++	OnEndpointReady(subenimap.EndpointInfo) error
++	OnEndpointDelete(subenimap.EndpointInfo) error
++	Close()
++}
++
++type huaweiCloudSubENISubscriber struct {
++	logger *logrus.Entry
++	mapMgr subENIMapUpdater
++}
++
++type subENIEndpoint interface {
++	GetIPv4Address() string
++	GetID() uint64
++	GetIfIndex() int
++}
++
++type huaweiCloudEndpointInfo struct {
++	ipv4           string
++	id             uint32
++	ifIndex        uint32
++	mac            [6]byte
++	vlanID         int32
++	gatewayIP      net.IP
++	gatewayMAC     net.HardwareAddr
++	trunkInterface string
++}
++
++func (e *huaweiCloudEndpointInfo) GetIPv4Address() string { return e.ipv4 }
++func (e *huaweiCloudEndpointInfo) GetID() uint32          { return e.id }
++func (e *huaweiCloudEndpointInfo) GetIfIndex() uint32     { return e.ifIndex }
++func (e *huaweiCloudEndpointInfo) GetMACAddress() [6]byte { return e.mac }
++func (e *huaweiCloudEndpointInfo) GetVLANID() int32       { return e.vlanID }
++
++func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
++	if option.Config.IPAM != ipamOption.IPAMHuaweiCloud || !k8s.IsEnabled() {
++		return nil, nil
++	}
++
++	mapMgr, err := subenimap.NewSubENIMapManager(huaweiCloudSubENILog)
++	if err != nil {
++		return nil, fmt.Errorf("create HuaweiCloud SubENI map manager: %w", err)
++	}
++
++	subscriber := &huaweiCloudSubENISubscriber{logger: huaweiCloudSubENILog, mapMgr: mapMgr}
++	mgr.Subscribe(subscriber)
++	for _, ep := range mgr.GetEndpoints() {
++		subscriber.upsertEndpoint(ep, "initial-sync")
++	}
++
++	return func() {
++		mgr.Unsubscribe(subscriber)
++		mapMgr.Close()
++	}, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) EndpointCreated(ep *endpoint.Endpoint) {
++	s.upsertEndpoint(ep, "created")
++}
++
++func (s *huaweiCloudSubENISubscriber) EndpointRestored(ep *endpoint.Endpoint) {
++	s.upsertEndpoint(ep, "restored")
++}
++
++func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ endpoint.DeleteConfig) {
++	info, err := s.resolveEndpointInfo(ep)
++	if err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++		}).Warn("Failed to resolve HuaweiCloud SubENI endpoint info on delete")
++		return
++	}
++	if info == nil {
++		return
++	}
++	if err := s.mapMgr.OnEndpointDelete(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++		}).Warn("Failed to delete HuaweiCloud SubENI BPF map entries")
++	}
++}
++
++func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
++	info, err := s.resolveEndpointInfo(ep)
++	if err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++			"reason":             reason,
++		}).Warn("Failed to resolve HuaweiCloud SubENI endpoint info")
++		return
++	}
++	if info == nil {
++		return
++	}
++	if err := s.ensureGatewayNeighbor(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++			"reason":             reason,
++		}).Warn("Failed to install HuaweiCloud gateway neighbor entry")
++	}
++	if err := s.mapMgr.OnEndpointReady(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++			"reason":             reason,
++		}).Warn("Failed to upsert HuaweiCloud SubENI BPF map entries")
++	}
++}
++
++func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint) (*huaweiCloudEndpointInfo, error) {
++	if ep == nil || ep.GetIfIndex() == 0 || ep.GetID() == 0 || ep.GetIPv4Address() == "" {
++		return nil, nil
++	}
++
++	cn, err := k8s.CiliumClient().CiliumV2().CiliumNodes().Get(context.Background(), nodeTypes.GetName(), metav1.GetOptions{})
++	if err != nil {
++		return nil, fmt.Errorf("get CiliumNode %s: %w", nodeTypes.GetName(), err)
++	}
++
++	return subENIInfoForEndpoint(cn, ep)
++}
++
++func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiCloudEndpointInfo, error) {
++	if cn == nil || cn.Status.HuaweiCloud == nil {
++		return nil, nil
++	}
++
++	ipv4 := ep.GetIPv4Address()
++	for _, subENI := range cn.Status.HuaweiCloud.SubENIs {
++		if subENI.PrivateIPAddress != ipv4 {
++			continue
++		}
++
++		parsedMAC, err := net.ParseMAC(subENI.MACAddress)
++		if err != nil {
++			return nil, fmt.Errorf("parse HuaweiCloud SubENI MAC %q for %s: %w", subENI.MACAddress, ipv4, err)
++		}
++		var macArr [6]byte
++		copy(macArr[:], parsedMAC)
++
++		gatewayMAC, err := parseOptionalMAC(subENI.GatewayMAC)
++		if err != nil {
++			return nil, fmt.Errorf("parse HuaweiCloud gateway MAC %q for %s: %w", subENI.GatewayMAC, ipv4, err)
++		}
++		gatewayIP, err := parseOptionalIPv4(subENI.GatewayIP)
++		if err != nil {
++			return nil, fmt.Errorf("parse HuaweiCloud gateway IP %q for %s: %w", subENI.GatewayIP, ipv4, err)
++		}
++
++		return &huaweiCloudEndpointInfo{
++			ipv4:           ipv4,
++			id:             uint32(ep.GetID()),
++			ifIndex:        uint32(ep.GetIfIndex()),
++			mac:            macArr,
++			vlanID:         subENI.VlanID,
++			gatewayIP:      gatewayIP,
++			gatewayMAC:     gatewayMAC,
++			trunkInterface: subENI.TrunkInterface,
++		}, nil
++	}
++
++	return nil, nil
++}
++
++func parseOptionalMAC(raw string) (net.HardwareAddr, error) {
++	if raw == "" {
++		return nil, nil
++	}
++	return net.ParseMAC(raw)
++}
++
++func parseOptionalIPv4(raw string) (net.IP, error) {
++	if raw == "" {
++		return nil, nil
++	}
++	ip := net.ParseIP(raw).To4()
++	if ip == nil {
++		return nil, fmt.Errorf("invalid IPv4 address")
++	}
++	return ip, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEndpointInfo) error {
++	if info == nil || info.gatewayIP == nil || len(info.gatewayMAC) == 0 || info.trunkInterface == "" {
++		return nil
++	}
++
++	link, err := netlink.LinkByName(info.trunkInterface)
++	if err != nil {
++		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
++	}
++
++	return netlink.NeighSet(&netlink.Neigh{
++		LinkIndex:    link.Attrs().Index,
++		Family:       netlink.FAMILY_V4,
++		State:        netlink.NUD_PERMANENT,
++		IP:           info.gatewayIP,
++		HardwareAddr: info.gatewayMAC,
++	})
++}
+diff --git a/pkg/endpointmanager/manager.go b/pkg/endpointmanager/manager.go
+index 7ed29901fc..9bc828497e 100644
+--- a/pkg/endpointmanager/manager.go
++++ b/pkg/endpointmanager/manager.go
+@@ -595,7 +595,17 @@ func (mgr *EndpointManager) expose(ep *endpoint.Endpoint) error {
+ // manager.
+ func (mgr *EndpointManager) RestoreEndpoint(ep *endpoint.Endpoint) error {
+ 	ep.SetDefaultConfiguration(true)
+-	return mgr.expose(ep)
++	if err := mgr.expose(ep); err != nil {
++		return err
++	}
++	mgr.mutex.RLock()
++	for s := range mgr.subscribers {
++		if restored, ok := s.(endpointRestoredSubscriber); ok {
++			restored.EndpointRestored(ep)
++		}
++	}
++	mgr.mutex.RUnlock()
++	return nil
+ }
+ 
+ // AddEndpoint takes the prepared endpoint object and starts managing it.
+diff --git a/pkg/endpointmanager/subscribe.go b/pkg/endpointmanager/subscribe.go
+index 964dc13111..efa2c4d98e 100644
+--- a/pkg/endpointmanager/subscribe.go
++++ b/pkg/endpointmanager/subscribe.go
+@@ -18,6 +18,10 @@ type Subscriber interface {
+ 	EndpointDeleted(ep *endpoint.Endpoint, conf endpoint.DeleteConfig)
+ }
+ 
++type endpointRestoredSubscriber interface {
++	EndpointRestored(ep *endpoint.Endpoint)
++}
++
+ func (mgr *EndpointManager) Subscribe(s Subscriber) {
+ 	mgr.mutex.Lock()
+ 	defer mgr.mutex.Unlock()
+diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
+new file mode 100644
+index 0000000000..c67436d913
+--- /dev/null
++++ b/pkg/huaweicloud/api/api.go
+@@ -0,0 +1,781 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/netip"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth"
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/config"
++	coreregion "github.com/huaweicloud/huaweicloud-sdk-go-v3/core/region"
++	hwECS "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2"
++	ecsmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2/model"
++	hwECSRegion "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2/region"
++	hwVPC "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3"
++	vpcmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/model"
++	hwVPCRegion "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/region"
++
++	"github.com/cilium/cilium/pkg/api/helpers"
++	"github.com/cilium/cilium/pkg/cidr"
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	hwTypes "github.com/cilium/cilium/pkg/huaweicloud/types"
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++)
++
++type HuaweiCloudAPI interface {
++	CreateSubNetworkInterface(ctx context.Context, req CreateSubENIRequest) (string, *eniTypes.SubENI, error)
++	BatchCreateSubNetworkInterfaces(ctx context.Context, count int, req CreateSubENIRequest) ([]*eniTypes.SubENI, error)
++	TagSubNetworkInterface(ctx context.Context, subENIID string, tags map[string]string) error
++	DeleteSubNetworkInterface(ctx context.Context, subENIID string) error
++	GetSubNetworkInterface(ctx context.Context, subENIID string) (*eniTypes.SubENI, error)
++	ListSubNetworkInterfaces(ctx context.Context, parentID string) ([]*eniTypes.SubENI, error)
++	GetPortSecurityGroups(ctx context.Context, portID string) ([]string, error)
++	GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error)
++	GetInstanceLimits(ctx context.Context, instanceID string) (ipamTypes.Limits, error)
++	GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error)
++	GetSubnets(ctx context.Context, vpcID string) (ipamTypes.SubnetMap, error)
++	GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error)
++	GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.SecurityGroupMap, error)
++}
++
++type Client struct {
++	vpcClient *hwVPC.VpcClient
++	ecsClient *hwECS.EcsClient
++	limiter   *helpers.ApiLimiter
++}
++
++type noOpRateLimitMetrics struct{}
++
++func (n noOpRateLimitMetrics) ObserveRateLimit(operation string, duration time.Duration) {}
++
++var _ HuaweiCloudAPI = &Client{}
++
++func NewClient(accessKey, secretKey, projectID, region, endpoint string) (*Client, error) {
++	credentials, err := auth.NewBasicCredentialsBuilder().
++		WithAk(accessKey).
++		WithSk(secretKey).
++		WithProjectId(projectID).
++		SafeBuild()
++	if err != nil {
++		return nil, fmt.Errorf("build credentials: %w", err)
++	}
++
++	vpcBuilder := hwVPC.VpcClientBuilder().WithCredential(credentials)
++	ecsBuilder := hwECS.EcsClientBuilder().WithCredential(credentials)
++	httpConfig := config.DefaultHttpConfig().WithTimeout(10 * time.Second)
++	vpcBuilder = vpcBuilder.WithHttpConfig(httpConfig)
++	ecsBuilder = ecsBuilder.WithHttpConfig(httpConfig)
++
++	if strings.TrimSpace(endpoint) != "" {
++		vpcBuilder = vpcBuilder.WithEndpoint(endpoint)
++		ecsBuilder = ecsBuilder.WithEndpoint(endpoint)
++	} else {
++		if strings.TrimSpace(region) == "" {
++			return nil, fmt.Errorf("region is required when endpoint is empty")
++		}
++
++		vpcRegion, err := hwVPCRegion.SafeValueOf(region)
++		if err != nil {
++			vpcRegion = coreregion.NewRegion(region, fmt.Sprintf("https://vpc.%s.myhuaweicloud.com", region))
++		}
++		ecsRegion, err := hwECSRegion.SafeValueOf(region)
++		if err != nil {
++			ecsRegion = coreregion.NewRegion(region, fmt.Sprintf("https://ecs.%s.myhuaweicloud.com", region))
++		}
++
++		vpcBuilder = vpcBuilder.WithRegion(vpcRegion)
++		ecsBuilder = ecsBuilder.WithRegion(ecsRegion)
++	}
++
++	vpcHTTPClient, err := vpcBuilder.SafeBuild()
++	if err != nil {
++		return nil, fmt.Errorf("build vpc client: %w", err)
++	}
++	ecsHTTPClient, err := ecsBuilder.SafeBuild()
++	if err != nil {
++		return nil, fmt.Errorf("build ecs client: %w", err)
++	}
++
++	return &Client{
++		vpcClient: hwVPC.NewVpcClient(vpcHTTPClient),
++		ecsClient: hwECS.NewEcsClient(ecsHTTPClient),
++		limiter:   helpers.NewApiLimiter(noOpRateLimitMetrics{}, 20.0, 40),
++	}, nil
++}
++
++func (c *Client) CreateSubNetworkInterface(ctx context.Context, req CreateSubENIRequest) (string, *eniTypes.SubENI, error) {
++	if err := ctx.Err(); err != nil {
++		return "", nil, err
++	}
++	option := &vpcmodel.CreateSubNetworkInterfaceOption{VirsubnetId: req.SubnetID, ParentId: req.TrunkInterfaceID}
++	if len(req.SecurityGroupIDs) > 0 {
++		option.SecurityGroups = &req.SecurityGroupIDs
++	}
++	request := &vpcmodel.CreateSubNetworkInterfaceRequest{Body: &vpcmodel.CreateSubNetworkInterfaceRequestBody{SubNetworkInterface: option}}
++
++	c.limiter.Limit(ctx, "CreateSubNetworkInterface")
++	response, err := c.vpcClient.CreateSubNetworkInterface(request)
++	if err != nil {
++		return "", nil, normalizeAPIError(err)
++	}
++	if response.SubNetworkInterface == nil {
++		return "", nil, fmt.Errorf("empty sub_network_interface in create response")
++	}
++
++	subENI := parseSubENI(response.SubNetworkInterface)
++	if err := c.finalizeCreatedSubENIs(ctx, []*eniTypes.SubENI{subENI}, req.Tags); err != nil {
++		return "", nil, err
++	}
++	return subENI.ID, subENI, nil
++}
++
++func (c *Client) BatchCreateSubNetworkInterfaces(ctx context.Context, count int, req CreateSubENIRequest) ([]*eniTypes.SubENI, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if count <= 0 {
++		return nil, fmt.Errorf("count must be positive")
++	}
++	if count > 10 {
++		return nil, fmt.Errorf("batch create count exceeds max 10")
++	}
++
++	option := &vpcmodel.BatchCreateSubNetworkInterfaceOption{VirsubnetId: req.SubnetID, ParentId: req.TrunkInterfaceID}
++	if len(req.SecurityGroupIDs) > 0 {
++		option.SecurityGroups = &req.SecurityGroupIDs
++	}
++	request := &vpcmodel.BatchCreateSubNetworkInterfaceRequest{Body: &vpcmodel.BatchCreateSubNetworkInterfaceRequestBody{SubNetworkInterface: option, Count: int32(count)}}
++
++	c.limiter.Limit(ctx, "BatchCreateSubNetworkInterface")
++	response, err := c.vpcClient.BatchCreateSubNetworkInterface(request)
++	if err != nil {
++		return nil, normalizeAPIError(err)
++	}
++
++	if response.SubNetworkInterfaces == nil {
++		return []*eniTypes.SubENI{}, nil
++	}
++	result := make([]*eniTypes.SubENI, 0, len(*response.SubNetworkInterfaces))
++	for _, item := range *response.SubNetworkInterfaces {
++		result = append(result, parseSubENI(&item))
++	}
++	if err := c.finalizeCreatedSubENIs(ctx, result, req.Tags); err != nil {
++		return nil, err
++	}
++
++	return result, nil
++}
++
++func (c *Client) finalizeCreatedSubENIs(ctx context.Context, subENIs []*eniTypes.SubENI, tags map[string]string) error {
++	for _, subENI := range subENIs {
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++			return c.rollbackCreatedSubENIs(subENIs, err)
++		}
++		if err := c.TagSubNetworkInterface(ctx, subENI.ID, tags); err != nil {
++			return c.rollbackCreatedSubENIs(subENIs, err)
++		}
++	}
++	return nil
++}
++
++func (c *Client) rollbackCreatedSubENIs(subENIs []*eniTypes.SubENI, cause error) error {
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++	var rollbackErr error
++	for _, subENI := range subENIs {
++		if err := c.DeleteSubNetworkInterface(ctx, subENI.ID); err != nil {
++			rollbackErr = fmt.Errorf("rollback sub-eni %s: %v", subENI.ID, err)
++		}
++	}
++	if rollbackErr != nil {
++		return fmt.Errorf("%w; %v", cause, rollbackErr)
++	}
++	return cause
++}
++
++func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, tags map[string]string) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if len(tags) == 0 {
++		return nil
++	}
++	resourceTags := make([]vpcmodel.ResourceTag, 0, len(tags))
++	for key, value := range tags {
++		resourceTags = append(resourceTags, vpcmodel.ResourceTag{Key: key, Value: value})
++	}
++	request := &vpcmodel.BatchCreatePortTagsRequest{
++		PortId: subENIID,
++		Body:   &vpcmodel.BatchCreatePortTagsRequestBody{Tags: resourceTags},
++	}
++	c.limiter.Limit(ctx, "BatchCreatePortTags")
++	_, err := c.vpcClient.BatchCreatePortTags(request)
++	return normalizeAPIError(err)
++}
++
++func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	request := &vpcmodel.DeleteSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
++	c.limiter.Limit(ctx, "DeleteSubNetworkInterface")
++	_, err := c.vpcClient.DeleteSubNetworkInterface(request)
++	return normalizeAPIError(err)
++}
++
++func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*eniTypes.SubENI, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	request := &vpcmodel.ShowSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
++	c.limiter.Limit(ctx, "ShowSubNetworkInterface")
++	response, err := c.vpcClient.ShowSubNetworkInterface(request)
++	if err != nil {
++		return nil, normalizeAPIError(err)
++	}
++	if response.SubNetworkInterface == nil {
++		return nil, fmt.Errorf("sub-eni %s not found", subENIID)
++	}
++	subENI := parseSubENI(response.SubNetworkInterface)
++	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++		return nil, err
++	}
++	return subENI, nil
++}
++
++func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string) ([]*eniTypes.SubENI, error) {
++	var parentIDs []string
++	if parentID != "" {
++		parentIDs = []string{parentID}
++	}
++	items, err := c.listSubNetworkInterfaces(ctx, parentIDs)
++	if err != nil {
++		return nil, err
++	}
++	result := make([]*eniTypes.SubENI, 0, len(items))
++	for _, item := range items {
++		subENI := parseSubENI(&item)
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++			return nil, err
++		}
++		result = append(result, subENI)
++	}
++
++	return result, nil
++}
++
++func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []string) ([]vpcmodel.SubNetworkInterface, error) {
++	limit := int32(2000)
++	request := &vpcmodel.ListSubNetworkInterfacesRequest{Limit: &limit}
++	if len(parentIDs) > 0 {
++		request.ParentId = &parentIDs
++	}
++	var result []vpcmodel.SubNetworkInterface
++	for {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		c.limiter.Limit(ctx, "ListSubNetworkInterfaces")
++		response, err := c.vpcClient.ListSubNetworkInterfaces(request)
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		if response.SubNetworkInterfaces != nil {
++			result = append(result, (*response.SubNetworkInterfaces)...)
++		}
++		request.Marker = nextMarker(response.PageInfo)
++		if request.Marker == nil {
++			return result, nil
++		}
++	}
++}
++
++func nextMarker(pageInfo *vpcmodel.PageInfo) *string {
++	if pageInfo == nil || pageInfo.NextMarker == nil || *pageInfo.NextMarker == "" {
++		return nil
++	}
++	return pageInfo.NextMarker
++}
++
++func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]string, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	c.limiter.Limit(ctx, "ShowPort")
++	response, err := c.vpcClient.ShowPort(&vpcmodel.ShowPortRequest{PortId: portID})
++	if err != nil {
++		return nil, normalizeAPIError(err)
++	}
++	if response.Port == nil {
++		return nil, fmt.Errorf("empty port in show response for %s", portID)
++	}
++	return append([]string(nil), response.Port.SecurityGroups...), nil
++}
++
++func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
++	if subENI == nil || subENI.SubnetID == "" {
++		return nil
++	}
++	if subENI.GatewayIP == "" || subENI.SubnetCIDR == "" {
++		gatewayIP, subnetCIDR, err := c.resolveSubENISubnetMetadata(ctx, subENI.SubnetID, subENI.PrivateIPAddress, cachedSubnets)
++		if err != nil {
++			return err
++		}
++		if subENI.GatewayIP == "" {
++			subENI.GatewayIP = gatewayIP
++		}
++		if subENI.SubnetCIDR == "" {
++			subENI.SubnetCIDR = subnetCIDR
++		}
++	}
++	if subENI.GatewayIP == "" || subENI.GatewayMAC != "" {
++		return nil
++	}
++
++	deviceOwners := []string{"network:router_interface_distributed"}
++	privateIPs := []string{fmt.Sprintf("ip_address=%s", subENI.GatewayIP)}
++	virsubnetIDs := []string{subENI.SubnetID}
++	request := &vpcmodel.ListPortsRequest{
++		DeviceOwner: &deviceOwners,
++		PrivateIps:  &privateIPs,
++		VirsubnetId: &virsubnetIDs,
++	}
++
++	c.limiter.Limit(ctx, "ListPorts")
++	response, err := c.vpcClient.ListPorts(request)
++	if err != nil {
++		return normalizeAPIError(err)
++	}
++	if response.Ports == nil || len(*response.Ports) == 0 {
++		return nil
++	}
++
++	subENI.GatewayMAC = (*response.Ports)[0].MacAddress
++	return nil
++}
++
++func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, privateIP string, cachedSubnets ipamTypes.SubnetMap) (string, string, error) {
++	if subnetID == "" {
++		return "", "", nil
++	}
++	if subnet := cachedSubnets[subnetID]; subnet != nil {
++		cidr := ""
++		if subnet.CIDR != nil {
++			cidr = subnet.CIDR.String()
++		}
++		if subnet.GatewayIP != "" && cidr != "" && (privateIP == "" || belongsToCIDR(privateIP, cidr)) {
++			return subnet.GatewayIP, cidr, nil
++		}
++	}
++
++	limit := int32(1)
++	ids := []string{subnetID}
++	request := &vpcmodel.ListVirsubnetsRequest{Limit: &limit, Id: &ids}
++
++	c.limiter.Limit(ctx, "ListVirsubnets")
++	response, err := c.vpcClient.ListVirsubnets(request)
++	if err != nil {
++		return "", "", normalizeAPIError(err)
++	}
++	if response.Virsubnets == nil || len(*response.Virsubnets) == 0 {
++		return "", "", nil
++	}
++
++	gatewayIP, subnetCIDR := selectIPv4SubnetCIDRAndGateway((*response.Virsubnets)[0].SubnetCidrs, privateIP)
++	return gatewayIP, subnetCIDR, nil
++}
++
++func belongsToCIDR(ipStr, cidrStr string) bool {
++	ip, err := netip.ParseAddr(ipStr)
++	if err != nil {
++		return false
++	}
++	prefix, err := netip.ParsePrefix(cidrStr)
++	if err != nil {
++		return false
++	}
++	return prefix.Contains(ip)
++}
++
++func selectIPv4SubnetCIDRAndGateway(subnetCIDRs []vpcmodel.SubnetCidr, privateIP string) (gatewayIP, subnetCIDR string) {
++	for _, entry := range subnetCIDRs {
++		if entry.IpVersion != "4" || entry.Cidr == "" {
++			continue
++		}
++		if privateIP != "" && belongsToCIDR(privateIP, entry.Cidr) {
++			return entry.GatewayIp, entry.Cidr
++		}
++	}
++
++	for _, entry := range subnetCIDRs {
++		if entry.IpVersion == "4" && entry.Cidr != "" {
++			return entry.GatewayIp, entry.Cidr
++		}
++	}
++
++	return "", ""
++}
++
++func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	request := &ecsmodel.ShowServerRequest{ServerId: instanceID}
++	c.limiter.Limit(ctx, "ShowServer")
++	serverResp, err := c.ecsClient.ShowServer(request)
++	if err != nil {
++		return nil, normalizeAPIError(err)
++	}
++
++	instance := &ipamTypes.Instance{Interfaces: map[string]ipamTypes.InterfaceRevision{}}
++	if serverResp.Server == nil {
++		return instance, nil
++	}
++
++	parentPorts := getParentPortsFromServer(serverResp.Server)
++	if len(parentPorts) == 0 {
++		return instance, nil
++	}
++
++	items, err := c.listSubNetworkInterfaces(ctx, parentPorts)
++	if err != nil {
++		return nil, err
++	}
++	for _, item := range items {
++		subENI := parseSubENI(&item)
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
++			return nil, err
++		}
++		instance.Interfaces[subENI.ID] = ipamTypes.InterfaceRevision{Resource: subENI}
++	}
++
++	return instance, nil
++}
++
++func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipamTypes.Limits, error) {
++	if err := ctx.Err(); err != nil {
++		return ipamTypes.Limits{}, err
++	}
++	if strings.TrimSpace(instanceID) == "" {
++		return ipamTypes.Limits{}, fmt.Errorf("instanceID is required")
++	}
++
++	serverReq := &ecsmodel.ShowServerRequest{ServerId: instanceID}
++	c.limiter.Limit(ctx, "ShowServer")
++	serverResp, err := c.ecsClient.ShowServer(serverReq)
++	if err != nil {
++		return ipamTypes.Limits{}, normalizeAPIError(err)
++	}
++
++	flavorID, err := flavorIDFromServer(serverResp.Server, instanceID)
++	if err != nil {
++		return ipamTypes.Limits{}, err
++	}
++
++	flavorsReq := &ecsmodel.ListFlavorsRequest{FlavorId: &flavorID}
++	c.limiter.Limit(ctx, "ListFlavors")
++	flavorsResp, err := c.ecsClient.ListFlavors(flavorsReq)
++	if err != nil {
++		return ipamTypes.Limits{}, normalizeAPIError(err)
++	}
++
++	maxSubENIs, err := subENILimitFromFlavors(flavorsResp.Flavors, flavorID)
++	if err != nil {
++		return ipamTypes.Limits{}, err
++	}
++
++	return ipamTypes.Limits{Adapters: 1, IPv4: maxSubENIs}, nil
++}
++
++func flavorIDFromServer(server *ecsmodel.ServerDetail, instanceID string) (string, error) {
++	if server == nil {
++		return "", fmt.Errorf("empty server detail for instance %s", instanceID)
++	}
++	if server.Flavor == nil || strings.TrimSpace(server.Flavor.Id) == "" {
++		return "", fmt.Errorf("empty flavor id for instance %s", instanceID)
++	}
++
++	return server.Flavor.Id, nil
++}
++
++func subENILimitFromFlavors(flavors *[]ecsmodel.Flavor, flavorID string) (int, error) {
++	if flavors == nil || len(*flavors) == 0 {
++		return 0, fmt.Errorf("no flavors found for flavor %s", flavorID)
++	}
++
++	for _, flavor := range *flavors {
++		if flavor.Id != flavorID && flavor.Name != flavorID {
++			continue
++		}
++		if flavor.OsExtraSpecs == nil || flavor.OsExtraSpecs.QuotasubNetworkInterfaceMaxNum == nil {
++			return 0, fmt.Errorf("sub network interface limit is missing for flavor %s", flavorID)
++		}
++
++		limit, err := strconv.Atoi(strings.TrimSpace(*flavor.OsExtraSpecs.QuotasubNetworkInterfaceMaxNum))
++		if err != nil {
++			return 0, fmt.Errorf("parse sub network interface limit for flavor %s: %w", flavorID, err)
++		}
++		if limit < 0 {
++			return 0, fmt.Errorf("sub network interface limit for flavor %s is negative", flavorID)
++		}
++
++		return limit, nil
++	}
++
++	return 0, fmt.Errorf("flavor %s not found", flavorID)
++}
++
++func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	_ = vpcs
++	_ = subnets
++
++	servers, err := c.listServers(ctx)
++	if err != nil {
++		return nil, err
++	}
++
++	parentToInstance := map[string]string{}
++	for _, server := range servers {
++		for _, portID := range getParentPortsFromServer(&server) {
++			parentToInstance[portID] = server.Id
++		}
++	}
++
++	items, err := c.listSubNetworkInterfaces(ctx, nil)
++	if err != nil {
++		return nil, err
++	}
++
++	instances := ipamTypes.NewInstanceMap()
++	for _, item := range items {
++		subENI := parseSubENI(&item)
++		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets); err != nil {
++			return nil, err
++		}
++		instanceID := parentToInstance[subENI.ParentID]
++		if instanceID == "" {
++			instanceID = item.InstanceId
++		}
++		if instanceID == "" {
++			continue
++		}
++		instances.Update(instanceID, ipamTypes.InterfaceRevision{Resource: subENI})
++	}
++
++	return instances, nil
++}
++
++func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, error) {
++	limit := int32(1000)
++	request := &ecsmodel.ListServersDetailsRequest{Limit: &limit}
++	var result []ecsmodel.ServerDetail
++	for {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		c.limiter.Limit(ctx, "ListServersDetails")
++		response, err := c.ecsClient.ListServersDetails(request)
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		if response.Servers == nil || len(*response.Servers) == 0 {
++			return result, nil
++		}
++		result = append(result, (*response.Servers)...)
++		if len(*response.Servers) < int(limit) || response.Count != nil && len(result) >= int(*response.Count) {
++			return result, nil
++		}
++		marker := (*response.Servers)[len(*response.Servers)-1].Id
++		request.Marker = &marker
++	}
++}
++
++func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.SubnetMap, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	request := &vpcmodel.ListVirsubnetsRequest{}
++	limit := int32(2000)
++	request.Limit = &limit
++	if vpcID != "" {
++		vpcIDs := []string{vpcID}
++		request.VpcId = &vpcIDs
++	}
++
++	result := ipamTypes.SubnetMap{}
++	for {
++		c.limiter.Limit(ctx, "ListVirsubnets")
++		response, err := c.vpcClient.ListVirsubnets(request)
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		if response.Virsubnets != nil {
++			for _, item := range *response.Virsubnets {
++				gatewayIP, subnetCIDR := selectIPv4SubnetCIDRAndGateway(item.SubnetCidrs, "")
++				subnet := &ipamTypes.Subnet{ID: item.Id, Name: item.Name, VirtualNetworkID: item.VpcId, AvailabilityZone: item.ZoneId, GatewayIP: gatewayIP, Tags: parseResponseTags(item.Tags)}
++				if _, parsedCIDR, err := net.ParseCIDR(subnetCIDR); err == nil {
++					subnet.CIDR = cidr.NewCIDR(parsedCIDR)
++				}
++				result[subnet.ID] = subnet
++			}
++		}
++		request.Marker = nextMarker(response.PageInfo)
++		if request.Marker == nil {
++			return result, nil
++		}
++	}
++}
++
++func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	request := &vpcmodel.ListVpcsRequest{}
++	limit := int32(2000)
++	request.Limit = &limit
++
++	result := ipamTypes.VirtualNetworkMap{}
++	for {
++		c.limiter.Limit(ctx, "ListVpcs")
++		response, err := c.vpcClient.ListVpcs(request)
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		if response.Vpcs != nil {
++			for _, item := range *response.Vpcs {
++				result[item.Id] = &ipamTypes.VirtualNetwork{ID: item.Id, PrimaryCIDR: item.Cidr, CIDRs: append([]string(nil), item.ExtendCidrs...)}
++			}
++		}
++		request.Marker = nextMarker(response.PageInfo)
++		if request.Marker == nil {
++			return result, nil
++		}
++	}
++}
++
++func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.SecurityGroupMap, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	request := &vpcmodel.ListSecurityGroupsRequest{}
++	limit := int32(2000)
++	request.Limit = &limit
++
++	result := hwTypes.SecurityGroupMap{}
++	for {
++		c.limiter.Limit(ctx, "ListSecurityGroups")
++		response, err := c.vpcClient.ListSecurityGroups(request)
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		if response.SecurityGroups != nil {
++			for _, item := range *response.SecurityGroups {
++				result[item.Id] = &hwTypes.SecurityGroup{ID: item.Id, VPCID: vpcID, Tags: parseResourceTags(item.Tags)}
++			}
++		}
++		request.Marker = nextMarker(response.PageInfo)
++		if request.Marker == nil {
++			return result, nil
++		}
++	}
++}
++
++func (c *Client) WaitSubENIActive(ctx context.Context, subENIID string) (*eniTypes.SubENI, error) {
++	ticker := time.NewTicker(1 * time.Second)
++	defer ticker.Stop()
++	timeout := time.NewTimer(60 * time.Second)
++	defer timeout.Stop()
++
++	for {
++		subENI, err := c.GetSubNetworkInterface(ctx, subENIID)
++		if err != nil {
++			return nil, fmt.Errorf("wait sub-eni %s: %w", subENIID, err)
++		}
++		switch subENI.State {
++		case "ACTIVE":
++			return subENI, nil
++		case "ERROR":
++			return nil, fmt.Errorf("sub-eni %s entered ERROR state", subENIID)
++		}
++
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-timeout.C:
++			return nil, fmt.Errorf("timed out waiting for sub-eni %s to become ACTIVE", subENIID)
++		case <-ticker.C:
++		}
++	}
++}
++
++func parseSubENI(subENI *vpcmodel.SubNetworkInterface) *eniTypes.SubENI {
++	if subENI == nil {
++		return nil
++	}
++	return &eniTypes.SubENI{
++		ID:               subENI.Id,
++		PrivateIPAddress: subENI.PrivateIpAddress,
++		MACAddress:       subENI.MacAddress,
++		VlanID:           subENI.VlanId,
++		SubnetID:         subENI.VirsubnetId,
++		SecurityGroups:   append([]string(nil), subENI.SecurityGroups...),
++		State:            subENI.State,
++		ParentID:         subENI.ParentId,
++		VPCID:            subENI.VpcId,
++	}
++}
++
++func parseResourceTags(tags []vpcmodel.ResourceTag) map[string]string {
++	result := make(map[string]string, len(tags))
++	for _, tag := range tags {
++		result[tag.Key] = tag.Value
++	}
++	return result
++}
++
++func parseResponseTags(tags []vpcmodel.ResponseTag) ipamTypes.Tags {
++	result := make(ipamTypes.Tags, len(tags))
++	for _, tag := range tags {
++		result[tag.Key] = tag.Value
++	}
++	return result
++}
++
++func getParentPortsFromServer(server *ecsmodel.ServerDetail) []string {
++	if server == nil {
++		return nil
++	}
++
++	portSet := map[string]struct{}{}
++	if server.NetworkInterfaces != nil {
++		for _, networkInterface := range *server.NetworkInterfaces {
++			if networkInterface.PortId != nil && *networkInterface.PortId != "" {
++				portSet[*networkInterface.PortId] = struct{}{}
++			}
++		}
++	}
++
++	for _, addresses := range server.Addresses {
++		for _, address := range addresses {
++			if address.OSEXTIPSportId != nil && *address.OSEXTIPSportId != "" {
++				portSet[*address.OSEXTIPSportId] = struct{}{}
++			}
++		}
++	}
++
++	result := make([]string, 0, len(portSet))
++	for port := range portSet {
++		result = append(result, port)
++	}
++	return result
++}
+diff --git a/pkg/huaweicloud/api/error.go b/pkg/huaweicloud/api/error.go
+new file mode 100644
+index 0000000000..b5c05fa804
+--- /dev/null
++++ b/pkg/huaweicloud/api/error.go
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++import (
++	"errors"
++	"fmt"
++
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/sdkerr"
++)
++
++// Sentinel errors returned by the HuaweiCloud API client.
++// Callers should use errors.Is() to check for specific conditions.
++var (
++	// ErrSubnetInsufficientIP is returned when a subnet has no more available IP addresses.
++	// HuaweiCloud VPC API error codes: VPC.0703, VPC.0532 (HTTP 409)
++	ErrSubnetInsufficientIP = errors.New("subnet insufficient ip")
++
++	// ErrUnauthorized is returned on authentication/authorization failures (HTTP 401/403).
++	ErrUnauthorized = errors.New("unauthorized")
++
++	// ErrInvalidArgument is returned when request parameters are invalid (HTTP 400).
++	ErrInvalidArgument = errors.New("invalid argument")
++
++	// ErrRateLimited is returned when the API rate limit is exceeded (HTTP 429).
++	ErrRateLimited = errors.New("rate limited")
++
++	// ErrNotFound is returned when the requested resource does not exist (HTTP 404).
++	ErrNotFound = errors.New("not found")
++)
++
++// normalizeAPIError converts a HuaweiCloud SDK ServiceResponseError into one of the
++// sentinel errors above so callers can use errors.Is() for semantic error handling.
++// Non-SDK errors are returned unchanged.
++func normalizeAPIError(err error) error {
++	if err == nil {
++		return nil
++	}
++
++	var sdkErr *sdkerr.ServiceResponseError
++	if !errors.As(err, &sdkErr) {
++		return err
++	}
++
++	switch {
++	case sdkErr.StatusCode == 401 || sdkErr.StatusCode == 403:
++		return fmt.Errorf("%w: %s (request_id: %s)", ErrUnauthorized, sdkErr.ErrorMessage, sdkErr.RequestId)
++	case sdkErr.StatusCode == 404:
++		return fmt.Errorf("%w: %s (request_id: %s)", ErrNotFound, sdkErr.ErrorMessage, sdkErr.RequestId)
++	case sdkErr.StatusCode == 429:
++		return fmt.Errorf("%w: %s (request_id: %s)", ErrRateLimited, sdkErr.ErrorMessage, sdkErr.RequestId)
++	case isSubnetInsufficientIP(sdkErr.ErrorCode):
++		// HTTP 409 + VPC.0703/VPC.0532 = subnet IP exhaustion
++		return fmt.Errorf("%w: %s (request_id: %s)", ErrSubnetInsufficientIP, sdkErr.ErrorMessage, sdkErr.RequestId)
++	case sdkErr.StatusCode == 400:
++		return fmt.Errorf("%w: [%s] %s (request_id: %s)", ErrInvalidArgument, sdkErr.ErrorCode, sdkErr.ErrorMessage, sdkErr.RequestId)
++	default:
++		return fmt.Errorf("huaweicloud api error [%s] %s (status: %d, request_id: %s): %w",
++			sdkErr.ErrorCode, sdkErr.ErrorMessage, sdkErr.StatusCode, sdkErr.RequestId, err)
++	}
++}
++
++// isSubnetInsufficientIP reports whether the HuaweiCloud VPC error code indicates
++// that a subnet has no more available IP addresses.
++// VPC.0703: "No more IP addresses available on network xxx." (private IP allocation)
++// VPC.0532: "No more IP addresses available on network." (port-level IP exhaustion)
++// Both return HTTP 409 Conflict.
++func isSubnetInsufficientIP(code string) bool {
++	return code == "VPC.0703" || code == "VPC.0532"
++}
+diff --git a/pkg/huaweicloud/api/mock/mock.go b/pkg/huaweicloud/api/mock/mock.go
+new file mode 100644
+index 0000000000..c517ef12a9
+--- /dev/null
++++ b/pkg/huaweicloud/api/mock/mock.go
+@@ -0,0 +1,459 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package mock
++
++import (
++	"context"
++	"fmt"
++	"net"
++
++	"github.com/google/uuid"
++
++	hwAPI "github.com/cilium/cilium/pkg/huaweicloud/api"
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	hwTypes "github.com/cilium/cilium/pkg/huaweicloud/types"
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++	"github.com/cilium/cilium/pkg/lock"
++)
++
++type SubENIMap map[string]*eniTypes.SubENI
++
++// Compile-time check that API implements hwAPI.HuaweiCloudAPI.
++var _ hwAPI.HuaweiCloudAPI = &API{}
++
++type API struct {
++	mutex              lock.RWMutex
++	subENIs            map[string]*eniTypes.SubENI
++	instanceSubENIs    map[string]SubENIMap
++	subnets            map[string]*ipamTypes.Subnet
++	vpcs               map[string]*ipamTypes.VirtualNetwork
++	securityGroups     map[string]*hwTypes.SecurityGroup
++	instanceLimits     map[string]ipamTypes.Limits
++	portSecurityGroups map[string][]string
++	nextIP             net.IP
++	// subnetErrors maps subnet IDs to errors returned on creation.
++	// Tests use SetSubnetError to inject errors like api.ErrSubnetInsufficientIP.
++	subnetErrors map[string]error
++}
++
++func NewAPI(subnets []*ipamTypes.Subnet, vpcs []*ipamTypes.VirtualNetwork, securityGroups []*hwTypes.SecurityGroup) *API {
++	_, cidr, _ := net.ParseCIDR("10.0.0.0/8")
++
++	api := &API{
++		subENIs:            map[string]*eniTypes.SubENI{},
++		instanceSubENIs:    map[string]SubENIMap{},
++		subnets:            map[string]*ipamTypes.Subnet{},
++		vpcs:               map[string]*ipamTypes.VirtualNetwork{},
++		securityGroups:     map[string]*hwTypes.SecurityGroup{},
++		instanceLimits:     map[string]ipamTypes.Limits{},
++		portSecurityGroups: map[string][]string{},
++		nextIP:             nextIPv4(cidr.IP),
++		subnetErrors:       map[string]error{},
++	}
++
++	for _, subnet := range subnets {
++		api.AddSubnet(subnet)
++	}
++	for _, vpc := range vpcs {
++		api.AddVPC(vpc)
++	}
++	for _, securityGroup := range securityGroups {
++		api.AddSecurityGroup(securityGroup)
++	}
++
++	return api
++}
++
++func (a *API) AddSubENI(instanceID string, subENI *eniTypes.SubENI) {
++	if subENI == nil {
++		return
++	}
++
++	a.mutex.Lock()
++	defer a.mutex.Unlock()
++
++	cloned := subENI.DeepCopy()
++	if cloned.ID == "" {
++		cloned.ID = uuid.NewString()
++	}
++	if cloned.State == "" {
++		cloned.State = "ACTIVE"
++	}
++
++	a.subENIs[cloned.ID] = cloned
++
++	if instanceID != "" {
++		if _, ok := a.instanceSubENIs[instanceID]; !ok {
++			a.instanceSubENIs[instanceID] = SubENIMap{}
++		}
++		a.instanceSubENIs[instanceID][cloned.ID] = cloned.DeepCopy()
++	}
++}
++
++func (a *API) GetSubENIs(instanceID string) map[string]*eniTypes.SubENI {
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	result := map[string]*eniTypes.SubENI{}
++
++	if instanceID == "" {
++		for id, subENI := range a.subENIs {
++			result[id] = subENI.DeepCopy()
++		}
++		return result
++	}
++
++	for id, subENI := range a.instanceSubENIs[instanceID] {
++		result[id] = subENI.DeepCopy()
++	}
++
++	return result
++}
++
++func (a *API) AddVPC(vpc *ipamTypes.VirtualNetwork) {
++	if vpc == nil {
++		return
++	}
++
++	a.mutex.Lock()
++	a.vpcs[vpc.ID] = vpc.DeepCopy()
++	a.mutex.Unlock()
++}
++
++func (a *API) AddSubnet(subnet *ipamTypes.Subnet) {
++	if subnet == nil {
++		return
++	}
++
++	a.mutex.Lock()
++	a.subnets[subnet.ID] = subnet.DeepCopy()
++	a.mutex.Unlock()
++}
++
++// SetSubnetError configures the mock to return the given error when creating
++// a Sub-ENI in the specified subnet. Pass api.ErrSubnetInsufficientIP to
++// simulate IP exhaustion for fallback testing.
++func (a *API) SetSubnetError(subnetID string, err error) {
++	a.mutex.Lock()
++	a.subnetErrors[subnetID] = err
++	a.mutex.Unlock()
++}
++
++// ClearSubnetError removes any configured error for the specified subnet.
++func (a *API) ClearSubnetError(subnetID string) {
++	a.mutex.Lock()
++	delete(a.subnetErrors, subnetID)
++	a.mutex.Unlock()
++}
++
++func (a *API) AddSecurityGroup(securityGroup *hwTypes.SecurityGroup) {
++	if securityGroup == nil {
++		return
++	}
++
++	a.mutex.Lock()
++	a.securityGroups[securityGroup.ID] = copySecurityGroup(securityGroup)
++	a.mutex.Unlock()
++}
++
++func (a *API) SetInstanceLimit(instanceID string, l ipamTypes.Limits) {
++	a.mutex.Lock()
++	a.instanceLimits[instanceID] = l
++	a.mutex.Unlock()
++}
++
++func (a *API) SetPortSecurityGroups(portID string, groups []string) {
++	a.mutex.Lock()
++	a.portSecurityGroups[portID] = append([]string(nil), groups...)
++	a.mutex.Unlock()
++}
++
++func (a *API) CreateSubNetworkInterface(ctx context.Context, req hwAPI.CreateSubENIRequest) (string, *eniTypes.SubENI, error) {
++	_ = ctx
++
++	a.mutex.Lock()
++	defer a.mutex.Unlock()
++
++	// Return any configured error for this subnet (e.g. ErrSubnetInsufficientIP)
++	if err, ok := a.subnetErrors[req.SubnetID]; ok {
++		return "", nil, err
++	}
++
++	subnet, ok := a.subnets[req.SubnetID]
++	if !ok {
++		return "", nil, fmt.Errorf("subnet %s not found", req.SubnetID)
++	}
++
++	ip := a.allocateNextIP()
++
++	id := uuid.NewString()
++	generated := &eniTypes.SubENI{
++		ID:               id,
++		PrivateIPAddress: ip.String(),
++		MACAddress:       randomMAC(),
++		GatewayIP:        subnetGateway(subnet),
++		SubnetID:         req.SubnetID,
++		SecurityGroups:   append([]string(nil), req.SecurityGroupIDs...),
++		State:            "ACTIVE",
++		ParentID:         req.TrunkInterfaceID,
++		VPCID:            subnet.VirtualNetworkID,
++	}
++	if subnet.CIDR != nil {
++		generated.SubnetCIDR = subnet.CIDR.String()
++	}
++
++	a.subENIs[id] = generated
++
++	return id, generated.DeepCopy(), nil
++}
++
++func (a *API) BatchCreateSubNetworkInterfaces(ctx context.Context, count int, req hwAPI.CreateSubENIRequest) ([]*eniTypes.SubENI, error) {
++	if count <= 0 {
++		return nil, fmt.Errorf("count must be positive")
++	}
++	if count > 10 {
++		return nil, fmt.Errorf("batch create count exceeds max 10")
++	}
++
++	result := make([]*eniTypes.SubENI, 0, count)
++	for i := 0; i < count; i++ {
++		_, subENI, err := a.CreateSubNetworkInterface(ctx, req)
++		if err != nil {
++			return nil, err
++		}
++		result = append(result, subENI)
++	}
++
++	return result, nil
++}
++
++func (a *API) TagSubNetworkInterface(ctx context.Context, subENIID string, tags map[string]string) error {
++	_ = ctx
++	_ = tags
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++	if _, ok := a.subENIs[subENIID]; !ok {
++		return fmt.Errorf("sub-eni %s not found", subENIID)
++	}
++	return nil
++}
++
++func (a *API) DeleteSubNetworkInterface(ctx context.Context, subENIID string) error {
++	_ = ctx
++
++	a.mutex.Lock()
++	defer a.mutex.Unlock()
++
++	if _, ok := a.subENIs[subENIID]; !ok {
++		return fmt.Errorf("sub-eni %s not found", subENIID)
++	}
++
++	delete(a.subENIs, subENIID)
++	for instanceID, subENIs := range a.instanceSubENIs {
++		if _, ok := subENIs[subENIID]; ok {
++			delete(subENIs, subENIID)
++			if len(subENIs) == 0 {
++				delete(a.instanceSubENIs, instanceID)
++			}
++		}
++	}
++
++	return nil
++}
++
++func (a *API) GetSubNetworkInterface(ctx context.Context, subENIID string) (*eniTypes.SubENI, error) {
++	_ = ctx
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	subENI, ok := a.subENIs[subENIID]
++	if !ok {
++		return nil, fmt.Errorf("sub-eni %s not found", subENIID)
++	}
++
++	return subENI.DeepCopy(), nil
++}
++
++func (a *API) ListSubNetworkInterfaces(ctx context.Context, parentID string) ([]*eniTypes.SubENI, error) {
++	_ = ctx
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	result := make([]*eniTypes.SubENI, 0)
++	for _, subENI := range a.subENIs {
++		if parentID == "" || subENI.ParentID == parentID {
++			result = append(result, subENI.DeepCopy())
++		}
++	}
++
++	return result, nil
++}
++
++func (a *API) GetPortSecurityGroups(ctx context.Context, portID string) ([]string, error) {
++	_ = ctx
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++	return append([]string(nil), a.portSecurityGroups[portID]...), nil
++}
++
++func (a *API) GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error) {
++	_ = ctx
++
++	instance := &ipamTypes.Instance{Interfaces: map[string]ipamTypes.InterfaceRevision{}}
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	for subENIID, subENI := range a.instanceSubENIs[instanceID] {
++		instance.Interfaces[subENIID] = ipamTypes.InterfaceRevision{Resource: subENI.DeepCopy()}
++	}
++
++	return instance, nil
++}
++
++func (a *API) GetInstanceLimits(ctx context.Context, instanceID string) (ipamTypes.Limits, error) {
++	_ = ctx
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	if l, ok := a.instanceLimits[instanceID]; ok {
++		return l, nil
++	}
++
++	return ipamTypes.Limits{}, fmt.Errorf("instance limits not found for %s", instanceID)
++}
++
++func (a *API) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error) {
++	_ = ctx
++	_ = vpcs
++	_ = subnets
++
++	instances := ipamTypes.NewInstanceMap()
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	for instanceID, subENIs := range a.instanceSubENIs {
++		for _, subENI := range subENIs {
++			instances.Update(instanceID, ipamTypes.InterfaceRevision{Resource: subENI.DeepCopy()})
++		}
++	}
++
++	return instances, nil
++}
++
++func (a *API) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.SubnetMap, error) {
++	_ = ctx
++
++	result := ipamTypes.SubnetMap{}
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	for _, subnet := range a.subnets {
++		if vpcID != "" && subnet.VirtualNetworkID != vpcID {
++			continue
++		}
++		result[subnet.ID] = subnet.DeepCopy()
++	}
++
++	return result, nil
++}
++
++func (a *API) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error) {
++	_ = ctx
++
++	result := ipamTypes.VirtualNetworkMap{}
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	for _, vpc := range a.vpcs {
++		result[vpc.ID] = vpc.DeepCopy()
++	}
++
++	return result, nil
++}
++
++func (a *API) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.SecurityGroupMap, error) {
++	_ = ctx
++
++	result := hwTypes.SecurityGroupMap{}
++
++	a.mutex.RLock()
++	defer a.mutex.RUnlock()
++
++	for _, securityGroup := range a.securityGroups {
++		if vpcID != "" && securityGroup.VPCID != vpcID {
++			continue
++		}
++		result[securityGroup.ID] = copySecurityGroup(securityGroup)
++	}
++
++	return result, nil
++}
++
++func randomMAC() string {
++	id := uuid.New()
++	return fmt.Sprintf("fa:16:3e:%02x:%02x:%02x", id[0], id[1], id[2])
++}
++
++func (a *API) allocateNextIP() net.IP {
++	if a.nextIP == nil {
++		a.nextIP = net.IPv4(10, 0, 0, 1)
++	}
++	ip := append(net.IP(nil), a.nextIP...)
++	incrementIPv4(a.nextIP)
++	return ip
++}
++
++func nextIPv4(ip net.IP) net.IP {
++	v4 := ip.To4()
++	if v4 == nil {
++		return net.IPv4(10, 0, 0, 1)
++	}
++	out := append(net.IP(nil), v4...)
++	incrementIPv4(out)
++	return out
++}
++
++func incrementIPv4(ip net.IP) {
++	for i := len(ip) - 1; i >= 0; i-- {
++		ip[i]++
++		if ip[i] != 0 {
++			return
++		}
++	}
++}
++
++func subnetGateway(subnet *ipamTypes.Subnet) string {
++	if subnet == nil || subnet.CIDR == nil || subnet.CIDR.IPNet == nil {
++		return ""
++	}
++	return nextIPv4(subnet.CIDR.IP).String()
++}
++
++func copySecurityGroup(in *hwTypes.SecurityGroup) *hwTypes.SecurityGroup {
++	if in == nil {
++		return nil
++	}
++
++	out := &hwTypes.SecurityGroup{
++		ID:    in.ID,
++		VPCID: in.VPCID,
++	}
++
++	if in.Tags != nil {
++		out.Tags = make(map[string]string, len(in.Tags))
++		for key, value := range in.Tags {
++			out.Tags[key] = value
++		}
++	}
++
++	return out
++}
+diff --git a/pkg/huaweicloud/api/types.go b/pkg/huaweicloud/api/types.go
+new file mode 100644
+index 0000000000..87637c86c8
+--- /dev/null
++++ b/pkg/huaweicloud/api/types.go
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++// CreateSubENIRequest holds the parameters for creating a Sub-ENI.
++type CreateSubENIRequest struct {
++	TrunkInterfaceID string
++	SubnetID         string
++	SecurityGroupIDs []string
++	Tags             map[string]string
++}
+diff --git a/pkg/huaweicloud/eni/instances.go b/pkg/huaweicloud/eni/instances.go
+new file mode 100644
+index 0000000000..9e4ca160a2
+--- /dev/null
++++ b/pkg/huaweicloud/eni/instances.go
+@@ -0,0 +1,278 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package eni
++
++import (
++	"context"
++	"time"
++
++	"github.com/sirupsen/logrus"
++
++	hwAPI "github.com/cilium/cilium/pkg/huaweicloud/api"
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	hwTypes "github.com/cilium/cilium/pkg/huaweicloud/types"
++	"github.com/cilium/cilium/pkg/ipam"
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	"github.com/cilium/cilium/pkg/lock"
++)
++
++var _ ipam.AllocationImplementation = (*InstancesManager)(nil)
++
++type InstancesManager struct {
++	logger         *logrus.Entry
++	mutex          lock.RWMutex
++	resyncLock     lock.RWMutex
++	instances      *ipamTypes.InstanceMap
++	subnets        ipamTypes.SubnetMap
++	vpcs           ipamTypes.VirtualNetworkMap
++	securityGroups hwTypes.SecurityGroupMap
++	api            hwAPI.HuaweiCloudAPI
++	vpcID          string
++	subENITags     map[string]string
++}
++
++func NewInstancesManager(api hwAPI.HuaweiCloudAPI, vpcID string, subENITags map[string]string) *InstancesManager {
++	return &InstancesManager{
++		logger:     log,
++		instances:  ipamTypes.NewInstanceMap(),
++		api:        api,
++		vpcID:      vpcID,
++		subENITags: cloneTags(subENITags),
++	}
++}
++
++func (m *InstancesManager) CreateNode(obj *v2.CiliumNode, node *ipam.Node) ipam.NodeOperations {
++	return &Node{
++		logger:     m.logger,
++		k8sObj:     obj,
++		manager:    m,
++		node:       node,
++		instanceID: node.InstanceID(),
++		subENIs:    map[string]eniTypes.SubENI{},
++	}
++}
++
++func cloneTags(tags map[string]string) map[string]string {
++	if len(tags) == 0 {
++		return nil
++	}
++	cloned := make(map[string]string, len(tags))
++	for k, v := range tags {
++		cloned[k] = v
++	}
++	return cloned
++}
++
++func (m *InstancesManager) HasInstance(instanceID string) bool {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++	return m.instances.Exists(instanceID)
++}
++
++func (m *InstancesManager) DeleteInstance(instanceID string) {
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++	m.instances.Delete(instanceID)
++}
++
++func (m *InstancesManager) GetPoolQuota() ipamTypes.PoolQuotaMap {
++	pool := ipamTypes.PoolQuotaMap{}
++	for subnetID, subnet := range m.GetSubnets() {
++		pool[ipamTypes.PoolID(subnetID)] = ipamTypes.PoolQuota{
++			AvailabilityZone: subnet.AvailabilityZone,
++			AvailableIPs:     subnet.AvailableAddresses,
++		}
++	}
++
++	return pool
++}
++
++func (m *InstancesManager) Resync(ctx context.Context) time.Time {
++	m.resyncLock.Lock()
++	defer m.resyncLock.Unlock()
++	return m.resync(ctx, "")
++}
++
++func (m *InstancesManager) InstanceSync(ctx context.Context, instanceID string) time.Time {
++	m.resyncLock.RLock()
++	defer m.resyncLock.RUnlock()
++	return m.resync(ctx, instanceID)
++}
++
++func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.Time {
++	resyncStart := time.Now()
++
++	vpcs, err := m.api.GetVPCs(ctx)
++	if err != nil {
++		m.logger.WithError(err).Warn("Unable to synchronize VPC list")
++		return time.Time{}
++	}
++
++	subnets, err := m.api.GetSubnets(ctx, "")
++	if err != nil {
++		m.logger.WithError(err).Warn("Unable to retrieve subnet list")
++		return time.Time{}
++	}
++
++	securityGroups, err := m.api.GetSecurityGroups(ctx, m.vpcID)
++	if err != nil {
++		m.logger.WithError(err).Warn("Unable to retrieve security group list")
++		return time.Time{}
++	}
++
++	if instanceID == "" {
++		instances, err := m.api.GetInstances(ctx, vpcs, subnets)
++		if err != nil {
++			m.logger.WithError(err).Warn("Unable to synchronize instance list")
++			return time.Time{}
++		}
++
++		m.logger.WithFields(logrus.Fields{
++			"numInstances":      instances.NumInstances(),
++			"numVPCs":           len(vpcs),
++			"numSubnets":        len(subnets),
++			"numSecurityGroups": len(securityGroups),
++		}).Info("Synchronized Sub-ENI information")
++
++		m.mutex.Lock()
++		m.instances = instances
++		m.subnets = subnets
++		m.vpcs = vpcs
++		m.securityGroups = securityGroups
++		m.mutex.Unlock()
++	} else {
++		instance, err := m.api.GetInstance(ctx, instanceID)
++		if err != nil {
++			m.logger.WithError(err).Warn("Unable to synchronize instance")
++			return time.Time{}
++		}
++
++		m.mutex.Lock()
++		m.instances.UpdateInstance(instanceID, instance)
++		m.subnets = subnets
++		m.vpcs = vpcs
++		m.securityGroups = securityGroups
++		m.mutex.Unlock()
++	}
++
++	return resyncStart
++}
++
++func (m *InstancesManager) GetSubnets() ipamTypes.SubnetMap {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++
++	subnetsCopy := make(ipamTypes.SubnetMap, len(m.subnets))
++	for k, v := range m.subnets {
++		subnetsCopy[k] = v
++	}
++
++	return subnetsCopy
++}
++
++func (m *InstancesManager) GetSubnet(id string) *ipamTypes.Subnet {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++	return m.subnets[id]
++}
++
++func (m *InstancesManager) GetVPC(id string) *ipamTypes.VirtualNetwork {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++	return m.vpcs[id]
++}
++
++func (m *InstancesManager) ForeachInstance(instanceID string, fn ipamTypes.InterfaceIterator) {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++	m.instances.ForeachInterface(instanceID, fn)
++}
++
++func (m *InstancesManager) UpdateSubENI(instanceID string, subENI *eniTypes.SubENI) {
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++	m.instances.Update(instanceID, ipamTypes.InterfaceRevision{Resource: subENI})
++}
++
++func (m *InstancesManager) FindOneSubnet(spec eniTypes.Spec, toAllocate int) *ipamTypes.Subnet {
++	if len(spec.Subnets) > 0 {
++		return m.findSubnetByIDs(spec, toAllocate)
++	}
++
++	var bestSubnet *ipamTypes.Subnet
++	for _, subnet := range m.GetSubnets() {
++		if subnet.VirtualNetworkID != spec.VPCID {
++			continue
++		}
++		if subnet.AvailabilityZone != spec.AvailabilityZone {
++			continue
++		}
++		if subnet.AvailableAddresses > 0 && subnet.AvailableAddresses < toAllocate {
++			continue
++		}
++		if len(spec.SubnetTags) > 0 && !subnet.Tags.Match(spec.SubnetTags) {
++			continue
++		}
++		if bestSubnet == nil || bestSubnet.AvailableAddresses < subnet.AvailableAddresses {
++			bestSubnet = subnet
++		}
++	}
++
++	return bestSubnet
++}
++
++func (m *InstancesManager) findSubnetByIDs(spec eniTypes.Spec, toAllocate int) *ipamTypes.Subnet {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++
++	var bestSubnet *ipamTypes.Subnet
++	for _, subnet := range m.subnets {
++		if subnet.VirtualNetworkID != spec.VPCID || subnet.AvailabilityZone != spec.AvailabilityZone {
++			continue
++		}
++		if subnet.AvailableAddresses > 0 && subnet.AvailableAddresses < toAllocate {
++			continue
++		}
++		for _, subnetID := range spec.Subnets {
++			if subnet.ID != subnetID {
++				continue
++			}
++			if bestSubnet == nil || bestSubnet.AvailableAddresses < subnet.AvailableAddresses {
++				bestSubnet = subnet
++			}
++		}
++	}
++
++	return bestSubnet
++}
++
++func (m *InstancesManager) FindSecurityGroupByTags(vpcID string, required ipamTypes.Tags) []*hwTypes.SecurityGroup {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++
++	groups := []*hwTypes.SecurityGroup{}
++	for _, sg := range m.securityGroups {
++		// sg.VPCID is populated by the operator at cache time using the operator's
++		// own VPCID. If that was unavailable (metadata failure), sg.VPCID is "".
++		// In that case skip the VPC filter rather than silently excluding all SGs.
++		if sg.VPCID != "" && sg.VPCID != vpcID {
++			continue
++		}
++
++		match := true
++		for k, v := range required {
++			if sg.Tags[k] != v {
++				match = false
++				break
++			}
++		}
++
++		if match {
++			groups = append(groups, sg)
++		}
++	}
++
++	return groups
++}
+diff --git a/pkg/huaweicloud/eni/limits/limits.go b/pkg/huaweicloud/eni/limits/limits.go
+new file mode 100644
+index 0000000000..46442a9ec5
+--- /dev/null
++++ b/pkg/huaweicloud/eni/limits/limits.go
+@@ -0,0 +1,299 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++// Instance type limits are sourced from the official Huawei Cloud ECS documentation:
++// https://support.huaweicloud.com/productdesc-ecs/zh-cn_topic_0086381982.html (通用计算增强型)
++// https://support.huaweicloud.com/productdesc-ecs/ecs_01_0031.html (内存优化型)
++// https://support.huaweicloud.com/productdesc-ecs/zh-cn_topic_0094118976.html (超高I/O型)
++//
++// IPv4 corresponds to 辅助网卡个数上限 (max SubENI count per node = max pods per node).
++// Adapters is always 1, representing the single trunk ENI used in the SubENI model.
++// Last updated: 2026-04-10
++
++package limits
++
++import (
++	"sync"
++
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++)
++
++var limits struct {
++	mutex sync.RWMutex
++	table map[string]ipamTypes.Limits
++}
++
++func init() {
++	limits.table = map[string]ipamTypes.Limits{}
++	populateStaticLimits()
++}
++
++func populateStaticLimits() {
++	// ---- 通用计算增强型 C7 ----
++	// https://support.huaweicloud.com/productdesc-ecs/zh-cn_topic_0086381982.html
++	update("c7.large.2", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c7.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c7.xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c7.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c7.2xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c7.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c7.3xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("c7.3xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("c7.4xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c7.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c7.6xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c7.6xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c7.8xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.12xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.16xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.24xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.32xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7.32xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 通用计算增强型 C7n ----
++	update("c7n.large.2", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c7n.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c7n.xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c7n.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c7n.2xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c7n.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c7n.3xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("c7n.3xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("c7n.4xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c7n.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c7n.6xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c7n.6xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c7n.8xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.12xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.16xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.24xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7n.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 通用计算增强型 C7e ----
++	update("c7e.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c7e.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c7e.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c7e.3xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("c7e.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c7e.6xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c7e.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7e.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7e.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7e.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c7e.32xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 通用计算增强型 C9 ----
++	update("c9.large.2", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c9.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("c9.xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c9.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("c9.2xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c9.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("c9.3xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c9.3xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c9.4xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c9.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("c9.6xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c9.6xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("c9.8xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.12xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.16xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.24xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.32xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.32xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.48xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("c9.48xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 通用计算增强型 aC7 ----
++	update("ac7.large.2", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("ac7.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("ac7.xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("ac7.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("ac7.2xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ac7.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ac7.4xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ac7.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ac7.8xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.12xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.16xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.24xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.32xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.32xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.48xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac7.48xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 通用计算增强型 aC8 ----
++	update("ac8.large.2", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++	update("ac8.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++	update("ac8.xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("ac8.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("ac8.2xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("ac8.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("ac8.4xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ac8.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ac8.8xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ac8.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ac8.12xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.16xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.24xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.32xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.32xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.48xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac8.48xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 通用计算增强型 aC9 ----
++	update("ac9.large.2", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++	update("ac9.large.4", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++	update("ac9.xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("ac9.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("ac9.2xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("ac9.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("ac9.4xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ac9.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ac9.8xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ac9.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ac9.16xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac9.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac9.32xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac9.32xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac9.48xlarge.2", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ac9.48xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 内存优化型 M7 ----
++	// https://support.huaweicloud.com/productdesc-ecs/ecs_01_0031.html
++	update("m7.large.8", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("m7.xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("m7.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("m7.3xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("m7.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("m7.6xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("m7.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m7.12xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m7.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m7.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m7.32xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 内存优化型 aM7 ----
++	update("am7.large.8", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("am7.xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("am7.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("am7.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("am7.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am7.12xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am7.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am7.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am7.32xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am7.48xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 内存优化型 aM8 ----
++	update("am8.large.8", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++	update("am8.xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("am8.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("am8.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("am8.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("am8.12xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am8.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am8.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am8.32xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am8.48xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 内存优化型 M9 ----
++	update("m9.large.8", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("m9.xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("m9.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("m9.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("m9.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m9.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m9.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m9.32xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("m9.48xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 内存优化型 aM9 ----
++	update("am9.large.8", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++	update("am9.xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 16})
++	update("am9.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 32})
++	update("am9.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("am9.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("am9.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("am9.32xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 超高I/O型 I7 ----
++	// https://support.huaweicloud.com/productdesc-ecs/zh-cn_topic_0094118976.html
++	update("i7.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("i7.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("i7.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("i7.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("i7.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("i7.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("i7.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7.12xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 超高I/O型 I7n ----
++	update("i7n.2xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("i7n.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("i7n.4xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("i7n.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 96})
++	update("i7n.8xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("i7n.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 192})
++	update("i7n.12xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7n.12xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7n.16xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7n.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7n.24xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("i7n.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 超高I/O型 aI7 ----
++	update("ai7.2xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 64})
++	update("ai7.4xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 128})
++	update("ai7.8xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ai7.12xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ai7.16xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++	update("ai7.24xlarge.8", ipamTypes.Limits{Adapters: 1, IPv4: 256})
++
++	// ---- 高性能计算型 HC3 ----
++	// NOTE: HC3 is not found in current official docs. Values are retained from
++	// the original implementation and may need to be updated or removed.
++	update("hc3.large.8", ipamTypes.Limits{Adapters: 1, IPv4: 4})
++	update("hc3.xlarge.4", ipamTypes.Limits{Adapters: 1, IPv4: 8})
++}
++
++func update(instanceType string, l ipamTypes.Limits) {
++	limits.table[instanceType] = l
++}
++
++func Get(instanceType string) (ipamTypes.Limits, bool) {
++	limits.mutex.RLock()
++	defer limits.mutex.RUnlock()
++
++	l, ok := limits.table[instanceType]
++	return l, ok
++}
++
++func Update(instanceType string, l ipamTypes.Limits) {
++	limits.mutex.Lock()
++	defer limits.mutex.Unlock()
++
++	update(instanceType, l)
++}
+diff --git a/pkg/huaweicloud/eni/log.go b/pkg/huaweicloud/eni/log.go
+new file mode 100644
+index 0000000000..33d656cf0b
+--- /dev/null
++++ b/pkg/huaweicloud/eni/log.go
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package eni
++
++import (
++	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/logging/logfields"
++)
++
++var (
++	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "huaweicloud-node")
++)
++
++const (
++	fieldSubENIID = "subENIID"
++)
+diff --git a/pkg/huaweicloud/eni/node.go b/pkg/huaweicloud/eni/node.go
+new file mode 100644
+index 0000000000..990177982b
+--- /dev/null
++++ b/pkg/huaweicloud/eni/node.go
+@@ -0,0 +1,552 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package eni
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"sort"
++	"time"
++
++	"github.com/sirupsen/logrus"
++
++	hwAPI "github.com/cilium/cilium/pkg/huaweicloud/api"
++	"github.com/cilium/cilium/pkg/huaweicloud/eni/limits"
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	"github.com/cilium/cilium/pkg/ipam"
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	"github.com/cilium/cilium/pkg/lock"
++)
++
++const (
++	errUnableToDetermineLimits    = "unable to determine limits"
++	unableToDetermineLimits       = "unableToDetermineLimits"
++	errUnableToGetSecurityGroups  = "unable to get security groups"
++	unableToGetSecurityGroups     = "unableToGetSecurityGroups"
++	errUnableToDetermineParentENI = "unable to determine parent ENI"
++	unableToDetermineParentENI    = "unableToDetermineParentENI"
++	errUnableToCreateSubENI       = "unable to create Sub-ENI"
++	unableToCreateSubENI          = "unableToCreateSubENI"
++	unableToFindSubnet            = "unableToFindSubnet"
++	maxSubENIBatchCreate          = 10
++)
++
++type ipamNodeActions interface {
++	InstanceID() string
++}
++
++type Node struct {
++	logger     *logrus.Entry
++	node       ipamNodeActions
++	mutex      lock.RWMutex
++	subENIs    map[string]eniTypes.SubENI
++	k8sObj     *v2.CiliumNode
++	manager    *InstancesManager
++	instanceID string
++}
++
++var _ ipam.NodeOperations = (*Node)(nil)
++
++func (n *Node) UpdatedNode(obj *v2.CiliumNode) {
++	n.mutex.Lock()
++	defer n.mutex.Unlock()
++	n.k8sObj = obj
++	n.instanceID = obj.InstanceID()
++}
++
++func (n *Node) PopulateStatusFields(resource *v2.CiliumNode) {
++	if resource == nil {
++		return
++	}
++	if resource.Status.HuaweiCloud == nil {
++		resource.Status.HuaweiCloud = &eniTypes.ENIStatus{}
++	}
++	resource.Status.HuaweiCloud.VPCPrimaryCIDR = ""
++	resource.Status.HuaweiCloud.VPCCIDRs = nil
++	if resource.Spec.HuaweiCloud != nil {
++		if vpc := n.manager.GetVPC(resource.Spec.HuaweiCloud.VPCID); vpc != nil {
++			resource.Status.HuaweiCloud.VPCPrimaryCIDR = vpc.PrimaryCIDR
++			resource.Status.HuaweiCloud.VPCCIDRs = append([]string(nil), vpc.CIDRs...)
++		}
++	}
++
++	resource.Status.HuaweiCloud.SubENIs = map[string]eniTypes.SubENI{}
++	n.manager.ForeachInstance(n.node.InstanceID(),
++		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
++			e, ok := rev.Resource.(*eniTypes.SubENI)
++			if ok {
++				subENI := e.DeepCopy()
++				if resource.Spec.HuaweiCloud != nil {
++					if subENI.TrunkInterface == "" {
++						subENI.TrunkInterface = resource.Spec.HuaweiCloud.TrunkInterface
++					}
++					if subENI.TrunkInterfaceID == "" {
++						subENI.TrunkInterfaceID = resource.Spec.HuaweiCloud.TrunkInterfaceID
++					}
++				}
++				resource.Status.HuaweiCloud.SubENIs[interfaceID] = *subENI
++			}
++			return nil
++		})
++}
++
++func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *logrus.Entry) (int, string, error) {
++	l, limitsAvailable := n.getLimits()
++	if !limitsAvailable {
++		return 0, unableToDetermineLimits, errors.New(errUnableToDetermineLimits)
++	}
++
++	n.mutex.RLock()
++	if n.k8sObj == nil {
++		n.mutex.RUnlock()
++		return 0, unableToDetermineLimits, errors.New(errUnableToDetermineLimits)
++	}
++	resource := n.k8sObj.DeepCopy()
++	n.mutex.RUnlock()
++
++	if resource.Spec.HuaweiCloud == nil {
++		return 0, unableToDetermineLimits, errors.New(errUnableToDetermineLimits)
++	}
++
++	toAllocate := minInt(allocation.MaxIPsToAllocate, l.IPv4)
++	toAllocate = minInt(allocation.AvailableInterfaces, toAllocate)
++	toAllocate = minInt(maxSubENIBatchCreate, toAllocate)
++	if toAllocate == 0 {
++		return 0, "", nil
++	}
++
++	spec := *resource.Spec.HuaweiCloud
++
++	securityGroupIDs, err := n.getSecurityGroupIDs(ctx, spec)
++	if err != nil {
++		return 0, unableToGetSecurityGroups, fmt.Errorf("%s: %w", errUnableToGetSecurityGroups, err)
++	}
++
++	// If explicit subnet list is configured, use ordered fallback.
++	if len(spec.Subnets) > 0 {
++		trunkInterfaceID := spec.TrunkInterfaceID
++		if trunkInterfaceID == "" {
++			trunkInterfaceID = n.getParentENIID()
++		}
++		if trunkInterfaceID == "" {
++			return 0, unableToDetermineParentENI, errors.New(errUnableToDetermineParentENI)
++		}
++		return n.createSubENIWithFallback(ctx, spec.Subnets, trunkInterfaceID, securityGroupIDs, toAllocate, allocation, scopedLog)
++	}
++
++	// No explicit subnet list: use FindOneSubnet (legacy path).
++	bestSubnet := n.manager.FindOneSubnet(spec, toAllocate)
++	if bestSubnet == nil {
++		return 0, unableToFindSubnet, fmt.Errorf(
++			"no matching subnet for Sub-ENI creation (VPC=%s AZ=%s)",
++			spec.VPCID,
++			spec.AvailabilityZone,
++		)
++	}
++	allocation.PoolID = ipamTypes.PoolID(bestSubnet.ID)
++
++	parentENIID := spec.TrunkInterfaceID
++	if parentENIID == "" {
++		parentENIID = n.getParentENIID()
++	}
++	if parentENIID == "" {
++		return 0, unableToDetermineParentENI, errors.New(errUnableToDetermineParentENI)
++	}
++
++	scopedLog = scopedLog.WithFields(logrus.Fields{
++		"securityGroupIDs": securityGroupIDs,
++		"subnetID":         bestSubnet.ID,
++		"parentENIID":      parentENIID,
++		"toAllocate":       toAllocate,
++	})
++	scopedLog.Info("Creating Sub-ENIs")
++
++	subENIs, err := n.manager.api.BatchCreateSubNetworkInterfaces(ctx, toAllocate, hwAPI.CreateSubENIRequest{
++		TrunkInterfaceID: parentENIID,
++		SubnetID:         bestSubnet.ID,
++		SecurityGroupIDs: securityGroupIDs,
++		Tags:             n.manager.subENITags,
++	})
++	if err != nil {
++		return 0, unableToCreateSubENI, fmt.Errorf("%s: %w", errUnableToCreateSubENI, err)
++	}
++
++	n.mutex.Lock()
++	if n.subENIs == nil {
++		n.subENIs = map[string]eniTypes.SubENI{}
++	}
++	instanceID := n.node.InstanceID()
++	for _, subENI := range subENIs {
++		if subENI == nil {
++			continue
++		}
++		n.subENIs[subENI.ID] = *subENI
++		n.manager.UpdateSubENI(instanceID, subENI)
++	}
++	n.mutex.Unlock()
++
++	scopedLog.WithField("created", len(subENIs)).Info("Created Sub-ENIs")
++	return len(subENIs), "", nil
++}
++
++// createSubENIWithFallback tries each subnet in order, skipping to the next
++// when ErrSubnetInsufficientIP is returned. Other errors abort immediately.
++func (n *Node) createSubENIWithFallback(
++	ctx context.Context,
++	subnetIDs []string,
++	trunkInterfaceID string,
++	securityGroupIDs []string,
++	toAllocate int,
++	allocation *ipam.AllocationAction,
++	scopedLog *logrus.Entry,
++) (int, string, error) {
++	var lastErr error
++
++	for _, subnetID := range subnetIDs {
++		scopedLog = scopedLog.WithFields(logrus.Fields{
++			"securityGroupIDs": securityGroupIDs,
++			"subnetID":         subnetID,
++			"trunkInterfaceID": trunkInterfaceID,
++			"toAllocate":       toAllocate,
++		})
++		scopedLog.Info("Creating Sub-ENIs (subnet fallback)")
++
++		subENIs, err := n.manager.api.BatchCreateSubNetworkInterfaces(ctx, toAllocate, hwAPI.CreateSubENIRequest{
++			TrunkInterfaceID: trunkInterfaceID,
++			SubnetID:         subnetID,
++			SecurityGroupIDs: securityGroupIDs,
++			Tags:             n.manager.subENITags,
++		})
++		if err == nil {
++			allocation.PoolID = ipamTypes.PoolID(subnetID)
++
++			n.mutex.Lock()
++			if n.subENIs == nil {
++				n.subENIs = map[string]eniTypes.SubENI{}
++			}
++			instanceID := n.node.InstanceID()
++			for _, subENI := range subENIs {
++				if subENI == nil {
++					continue
++				}
++				n.subENIs[subENI.ID] = *subENI
++				n.manager.UpdateSubENI(instanceID, subENI)
++			}
++			n.mutex.Unlock()
++
++			scopedLog.WithField("created", len(subENIs)).Info("Created Sub-ENIs")
++			return len(subENIs), "", nil
++		}
++
++		if errors.Is(err, hwAPI.ErrSubnetInsufficientIP) {
++			scopedLog.WithField("subnetID", subnetID).Warn("Subnet IP exhausted, trying next subnet")
++			lastErr = err
++			continue
++		}
++
++		return 0, unableToCreateSubENI, fmt.Errorf("%s: %w", errUnableToCreateSubENI, err)
++	}
++
++	return 0, unableToCreateSubENI, fmt.Errorf("all subnets exhausted: %w", lastErr)
++}
++
++func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Entry) (ipamTypes.AllocationMap, error) {
++	scopedLog.Info("Starting HuaweiCloud ResyncInterfacesAndIPs")
++	scopedLog.Info("Resolving HuaweiCloud instance limits")
++	l, limitsAvailable := n.getLimits()
++	scopedLog.WithFields(logrus.Fields{"limitsAvailable": limitsAvailable, "ipv4Limit": l.IPv4}).Info("Resolved HuaweiCloud instance limits")
++	if !limitsAvailable {
++		return nil, fmt.Errorf(errUnableToDetermineLimits)
++	}
++
++	instanceID := n.node.InstanceID()
++	available := ipamTypes.AllocationMap{}
++
++	n.mutex.Lock()
++	defer n.mutex.Unlock()
++	n.subENIs = map[string]eniTypes.SubENI{}
++
++	subENICount := 0
++	scopedLog.WithField("instanceID", instanceID).Info("Iterating HuaweiCloud instance interfaces")
++	n.manager.ForeachInstance(instanceID,
++		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
++			e, ok := rev.Resource.(*eniTypes.SubENI)
++			if !ok {
++				return nil
++			}
++
++			n.subENIs[e.ID] = *e
++			subENICount++
++
++			if e.PrivateIPAddress != "" {
++				available[e.PrivateIPAddress] = ipamTypes.AllocationIP{Resource: e.ID}
++			}
++
++			return nil
++		})
++	scopedLog.WithFields(logrus.Fields{"instanceID": instanceID, "subENICount": subENICount, "availableIPs": len(available)}).Info("Completed HuaweiCloud instance interface iteration")
++
++	scopedLog.WithField("remainingInterfaces", maxInt(l.IPv4-subENICount, 0)).Info("Completed HuaweiCloud ResyncInterfacesAndIPs")
++	return available, nil
++}
++
++func (n *Node) PrepareIPAllocation(scopedLog *logrus.Entry) (*ipam.AllocationAction, error) {
++	l, limitsAvailable := n.getLimits()
++	if !limitsAvailable {
++		return nil, errors.New(errUnableToDetermineLimits)
++	}
++
++	a := &ipam.AllocationAction{}
++
++	n.mutex.RLock()
++	defer n.mutex.RUnlock()
++
++	currentCount := len(n.subENIs)
++	a.AvailableForAllocation = 0
++	a.AvailableInterfaces = maxInt(l.IPv4-currentCount, 0)
++	a.MaxIPsToAllocate = a.AvailableInterfaces
++
++	return a, nil
++}
++
++func (n *Node) AllocateIPs(ctx context.Context, allocation *ipam.AllocationAction) error {
++	return nil
++}
++
++// AllocateStaticIP is not supported for HuaweiCloud Sub-ENI IPAM. Static IP
++// allocation requires dedicated API support that is not yet available in this
++// provider. Callers must not enable static IP mode when using HuaweiCloud IPAM.
++func (n *Node) AllocateStaticIP(_ context.Context, _ ipamTypes.Tags) (string, error) {
++	return "", fmt.Errorf("AllocateStaticIP is not supported by HuaweiCloud Sub-ENI IPAM")
++}
++
++// ReleaseIPPrefixes is a no-op on HuaweiCloud since Sub-ENIs don't support prefix delegation.
++func (n *Node) ReleaseIPPrefixes(ctx context.Context, r *ipam.ReleaseAction) error {
++	return nil
++}
++
++func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.ReleaseAction {
++	r := &ipam.ReleaseAction{}
++
++	n.mutex.RLock()
++	defer n.mutex.RUnlock()
++
++	if n.k8sObj == nil {
++		return r
++	}
++
++	var freeIPs []string
++	for _, subENI := range n.subENIs {
++		if subENI.PrivateIPAddress == "" {
++			continue
++		}
++
++		_, used := n.k8sObj.Status.IPAM.Used[subENI.PrivateIPAddress]
++		if !used {
++			freeIPs = append(freeIPs, subENI.PrivateIPAddress)
++		}
++	}
++
++	if len(freeIPs) > 0 {
++		// Keep release candidates stable across reconciliation loops. Go map
++		// iteration is randomized, while the generic release handshake requires
++		// an IP to remain a release candidate until the agent acknowledges it.
++		sort.Strings(freeIPs)
++		toRelease := minInt(len(freeIPs), excessIPs)
++		if toRelease > 0 {
++			r.IPsToRelease = freeIPs[:toRelease]
++		}
++	}
++
++	return r
++}
++
++func minInt(a, b int) int {
++	if a < b {
++		return a
++	}
++	return b
++}
++
++func maxInt(a, b int) int {
++	if a > b {
++		return a
++	}
++	return b
++}
++
++func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
++	if r == nil || len(r.IPsToRelease) == 0 {
++		return nil
++	}
++
++	n.mutex.RLock()
++	ipToSubENI := make(map[string]string, len(n.subENIs))
++	for _, subENI := range n.subENIs {
++		if subENI.PrivateIPAddress != "" {
++			ipToSubENI[subENI.PrivateIPAddress] = subENI.ID
++		}
++	}
++	n.mutex.RUnlock()
++
++	for _, ip := range r.IPsToRelease {
++		subENIID, ok := ipToSubENI[ip]
++		if !ok {
++			continue
++		}
++
++		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil {
++			return fmt.Errorf("failed to delete Sub-ENI %s (IP %s): %w", subENIID, ip, err)
++		}
++
++		n.mutex.Lock()
++		delete(n.subENIs, subENIID)
++		n.mutex.Unlock()
++	}
++
++	return nil
++}
++
++func (n *Node) GetMaximumAllocatableIPv4() int {
++	l, ok := n.getLimits()
++	if !ok {
++		return 0
++	}
++
++	return l.IPv4
++}
++
++func (n *Node) GetMinimumAllocatableIPv4() int {
++	return 2
++}
++
++func (n *Node) IsPrefixDelegated() bool {
++	return false
++}
++
++func (n *Node) GetUsedIPWithPrefixes() int {
++	if n.k8sObj == nil {
++		return 0
++	}
++
++	return len(n.k8sObj.Status.IPAM.Used)
++}
++
++func (n *Node) getLimits() (ipamTypes.Limits, bool) {
++	n.mutex.RLock()
++	if n.k8sObj == nil || n.k8sObj.Spec.HuaweiCloud == nil {
++		n.mutex.RUnlock()
++		return ipamTypes.Limits{}, false
++	}
++	instanceType := n.k8sObj.Spec.HuaweiCloud.InstanceType
++	instanceID := n.instanceID
++	n.mutex.RUnlock()
++
++	if n.manager != nil && n.manager.api != nil && instanceID != "" {
++		lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		defer cancel()
++
++		l, err := n.manager.api.GetInstanceLimits(lookupCtx, instanceID)
++		if err == nil {
++			if instanceType != "" {
++				limits.Update(instanceType, l)
++			}
++
++			return l, true
++		}
++	}
++	if l, ok := limits.Get(instanceType); ok {
++		return l, true
++	}
++
++	return ipamTypes.Limits{}, false
++}
++
++func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]string, error) {
++	if len(spec.SecurityGroups) > 0 {
++		return spec.SecurityGroups, nil
++	}
++
++	if len(spec.SecurityGroupTags) > 0 {
++		groups := n.manager.FindSecurityGroupByTags(spec.VPCID, spec.SecurityGroupTags)
++		if len(groups) > 0 {
++			ids := make([]string, 0, len(groups))
++			for _, sg := range groups {
++				ids = append(ids, sg.ID)
++			}
++			return ids, nil
++		}
++	}
++
++	if spec.TrunkInterfaceID != "" {
++		groups, err := n.manager.api.GetPortSecurityGroups(ctx, spec.TrunkInterfaceID)
++		if err != nil {
++			return nil, fmt.Errorf("get trunk port security groups: %w", err)
++		}
++		if len(groups) > 0 {
++			return groups, nil
++		}
++	}
++
++	securityGroups := make([]string, 0)
++	seen := map[string]struct{}{}
++
++	n.manager.ForeachInstance(n.node.InstanceID(),
++		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
++			e, ok := rev.Resource.(*eniTypes.SubENI)
++			if !ok || len(e.SecurityGroups) == 0 {
++				return nil
++			}
++
++			for _, secGroupID := range e.SecurityGroups {
++				if secGroupID == "" {
++					continue
++				}
++				if _, ok := seen[secGroupID]; ok {
++					continue
++				}
++				seen[secGroupID] = struct{}{}
++				securityGroups = append(securityGroups, secGroupID)
++			}
++
++			return nil
++		})
++
++	if len(securityGroups) > 0 {
++		return securityGroups, nil
++	}
++
++	return nil, errors.New("failed to get security group ids")
++}
++
++func (n *Node) getParentENIID() string {
++	n.mutex.RLock()
++	for _, subENI := range n.subENIs {
++		if subENI.ParentID != "" {
++			parentID := subENI.ParentID
++			n.mutex.RUnlock()
++			return parentID
++		}
++	}
++	n.mutex.RUnlock()
++
++	var parentENIID string
++	n.manager.ForeachInstance(n.node.InstanceID(),
++		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
++			if parentENIID != "" {
++				return nil
++			}
++
++			e, ok := rev.Resource.(*eniTypes.SubENI)
++			if ok && e.ParentID != "" {
++				parentENIID = e.ParentID
++			}
++
++			return nil
++		})
++
++	return parentENIID
++}
+diff --git a/pkg/huaweicloud/eni/types/doc.go b/pkg/huaweicloud/eni/types/doc.go
+new file mode 100644
+index 0000000000..0b0cb83f7f
+--- /dev/null
++++ b/pkg/huaweicloud/eni/types/doc.go
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++// +k8s:deepcopy-gen=package
++// +deepequal-gen=package
++
++package types
+diff --git a/pkg/huaweicloud/eni/types/types.go b/pkg/huaweicloud/eni/types/types.go
+new file mode 100644
+index 0000000000..451e2a741a
+--- /dev/null
++++ b/pkg/huaweicloud/eni/types/types.go
+@@ -0,0 +1,184 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package types
++
++import (
++	"github.com/cilium/cilium/pkg/ipam/types"
++)
++
++// Spec is the Sub-ENI specification of a node for HuaweiCloud.
++// This specification is used by the cilium-operator to manage Sub-ENI based IPAM.
++type Spec struct {
++	// +kubebuilder:validation:Optional
++	InstanceID string `json:"instance-id,omitempty"`
++
++	// InstanceType is the ECS instance type, e.g. "c7.large.4"
++	//
++	// +kubebuilder:validation:Optional
++	InstanceType string `json:"instance-type,omitempty"`
++
++	// AvailabilityZone is the availability zone to use when allocating Sub-ENIs.
++	//
++	// +kubebuilder:validation:Optional
++	AvailabilityZone string `json:"availability-zone,omitempty"`
++
++	// VPCID is the VPC ID to use when allocating Sub-ENIs.
++	//
++	// +kubebuilder:validation:Optional
++	VPCID string `json:"vpc-id,omitempty"`
++
++	// Subnets is the list of subnet IDs available for Sub-ENI allocation.
++	//
++	// +kubebuilder:validation:Optional
++	Subnets []string `json:"subnet-ids,omitempty"`
++
++	// SubnetTags is the list of tags to use when evaluating which
++	// subnet to use for Sub-ENI allocation.
++	//
++	// +kubebuilder:validation:Optional
++	SubnetTags map[string]string `json:"subnet-tags,omitempty"`
++
++	// SecurityGroups is the list of security group IDs to attach to Sub-ENIs.
++	// If empty, the node's security groups will be inherited.
++	//
++	// +kubebuilder:validation:Optional
++	SecurityGroups []string `json:"security-group-ids,omitempty"`
++
++	// SecurityGroupTags is the list of tags to use when evaluating which
++	// security groups to use for the Sub-ENI.
++	//
++	// +kubebuilder:validation:Optional
++	SecurityGroupTags map[string]string `json:"security-group-tags,omitempty"`
++
++	// TrunkMode indicates whether the node uses trunk ENI mode for Sub-ENIs.
++	//
++	// +kubebuilder:validation:Optional
++	TrunkMode bool `json:"trunk-mode,omitempty"`
++
++	// TrunkInterface is the name of the trunk ENI network interface (e.g. "eth0").
++	//
++	// +kubebuilder:validation:Optional
++	TrunkInterface string `json:"trunk-interface,omitempty"`
++
++	// TrunkInterfaceID is the port ID of the trunk ENI, obtained from instance metadata.
++	//
++	// +kubebuilder:validation:Optional
++	TrunkInterfaceID string `json:"trunk-interface-id,omitempty"`
++}
++
++// SubENI represents a HuaweiCloud Supplementary Network Interface (辅助弹性网卡).
++// Each SubENI has exactly one private IP address, independent MAC, and security groups.
++type SubENI struct {
++	// ID is the unique identifier of the Sub-ENI
++	//
++	// +optional
++	ID string `json:"id,omitempty"`
++
++	// PrivateIPAddress is the private IPv4 address of the Sub-ENI
++	//
++	// +optional
++	PrivateIPAddress string `json:"ipv4-address,omitempty"`
++
++	// MACAddress is the MAC address of the Sub-ENI
++	//
++	// +optional
++	MACAddress string `json:"mac,omitempty"`
++
++	// VlanID is the VLAN ID of the Sub-ENI (1-4094, assigned by system)
++	//
++	// +optional
++	VlanID int32 `json:"vlan-id,omitempty"`
++
++	// GatewayMAC is the MAC address of the subnet's distributed router port.
++	//
++	// +optional
++	GatewayMAC string `json:"gateway-mac,omitempty"`
++
++	// GatewayIP is the IPv4 address of the subnet's distributed router port.
++	//
++	// +optional
++	GatewayIP string `json:"gateway-ip,omitempty"`
++
++	// SubnetID is the subnet (virsubnet) to which the Sub-ENI belongs
++	//
++	// +optional
++	SubnetID string `json:"subnet-id,omitempty"`
++
++	// SubnetCIDR is the IPv4 CIDR of the subnet to which the Sub-ENI belongs.
++	//
++	// +optional
++	SubnetCIDR string `json:"subnet-cidr,omitempty"`
++
++	// SecurityGroups is the list of security group IDs attached to this Sub-ENI
++	//
++	// +optional
++	SecurityGroups []string `json:"security-group-ids,omitempty"`
++
++	// State is the current state of the Sub-ENI (ACTIVE, BUILD, DOWN, ERROR)
++	//
++	// +optional
++	State string `json:"state,omitempty"`
++
++	// ParentID is the ID of the parent ENI (宿主网卡)
++	//
++	// +optional
++	ParentID string `json:"parent-id,omitempty"`
++
++	// VPCID is the VPC the Sub-ENI belongs to
++	//
++	// +optional
++	VPCID string `json:"vpc-id,omitempty"`
++
++	// IPv6Address is the private IPv6 address of the Sub-ENI, if assigned.
++	//
++	// +optional
++	IPv6Address string `json:"ipv6-address,omitempty"`
++
++	// TrunkInterface is the name of the trunk ENI network interface this Sub-ENI belongs to.
++	//
++	// +optional
++	TrunkInterface string `json:"trunk-interface,omitempty"`
++
++	// TrunkInterfaceID is the port ID of the trunk ENI that owns this Sub-ENI.
++	//
++	// +optional
++	TrunkInterfaceID string `json:"trunk-interface-id,omitempty"`
++}
++
++// DeepCopyInterface returns a deep copy implementing the ipam.Interface interface
++func (s *SubENI) DeepCopyInterface() types.Interface {
++	return s.DeepCopy()
++}
++
++// InterfaceID returns the identifier of the Sub-ENI
++func (s *SubENI) InterfaceID() string {
++	return s.ID
++}
++
++// ForeachAddress iterates over the single IP address of this Sub-ENI and calls fn.
++// Each Sub-ENI has exactly 1 private IP address (unlike ENI which can have multiple).
++func (s *SubENI) ForeachAddress(instanceID string, fn types.AddressIterator) error {
++	if s.PrivateIPAddress == "" {
++		return nil
++	}
++	return fn(instanceID, s.ID, s.PrivateIPAddress, s.SubnetID, s)
++}
++
++// ENIStatus is the status of Sub-ENI addressing of the node
++type ENIStatus struct {
++	// VPCPrimaryCIDR is the primary IPv4 CIDR of the node's VPC.
++	//
++	// +optional
++	VPCPrimaryCIDR string `json:"vpc-primary-cidr,omitempty"`
++
++	// VPCCIDRs contains additional IPv4 CIDRs of the node's VPC.
++	//
++	// +optional
++	VPCCIDRs []string `json:"vpc-cidrs,omitempty"`
++
++	// SubENIs is the map of Sub-ENIs on the node, keyed by Sub-ENI ID
++	//
++	// +optional
++	SubENIs map[string]SubENI `json:"subenis,omitempty"`
++}
+diff --git a/pkg/huaweicloud/metadata/metadata.go b/pkg/huaweicloud/metadata/metadata.go
+new file mode 100644
+index 0000000000..41b7e91061
+--- /dev/null
++++ b/pkg/huaweicloud/metadata/metadata.go
+@@ -0,0 +1,206 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package metadata
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"time"
++)
++
++var (
++	// metadataEC2URL is the EC2-compatible metadata path.
++	metadataEC2URL = "http://169.254.169.254/latest/meta-data"
++	// metadataOpenStackURL is the OpenStack metadata path.
++	metadataOpenStackURL = "http://169.254.169.254/openstack/latest/meta_data.json"
++	// metadataNetworkDataURL is the OpenStack network_data.json metadata path.
++	metadataNetworkDataURL = "http://169.254.169.254/openstack/latest/network_data.json"
++	metadataMaxRead        = int64(1 << 20)
++)
++
++// openStackMetadata is the JSON structure returned by the OpenStack metadata endpoint.
++type openStackMetadata struct {
++	// UUID is the full UUID of the ECS instance (used for HuaweiCloud ECS API calls).
++	// NOTE: The EC2-compatible path (/latest/meta-data/instance-id) returns a short
++	// "i-xxxxxxxx" format which HuaweiCloud ECS ShowServer API does not accept.
++	// Must use this OpenStack UUID instead.
++	UUID string `json:"uuid"`
++	Meta struct {
++		VPCID string `json:"vpc_id"`
++	} `json:"meta"`
++	AvailabilityZone string `json:"availability_zone"`
++}
++
++// networkData is the JSON structure of the network_data.json metadata endpoint.
++type networkData struct {
++	Links []struct {
++		VifID string `json:"vif_id"`
++	} `json:"links"`
++}
++
++// GetInstanceID returns the ECS instance UUID from OpenStack metadata.
++// The EC2-compatible path (/latest/meta-data/instance-id) returns a short "i-xxxxxxxx"
++// format that HuaweiCloud ECS API (ShowServer) does not accept. The OpenStack
++// meta_data.json "uuid" field returns the correct UUID format required by the API.
++func GetInstanceID(ctx context.Context) (string, error) {
++	meta, err := getOpenStackMetadata(ctx)
++	if err != nil {
++		return "", err
++	}
++	if meta.UUID == "" {
++		return "", fmt.Errorf("uuid not found in OpenStack metadata")
++	}
++	return meta.UUID, nil
++}
++
++// GetInstanceType returns the instance type from metadata.
++func GetInstanceType(ctx context.Context) (string, error) {
++	return getMetadata(ctx, "instance-type")
++}
++
++// GetRegionID returns the region ID from metadata.
++// HuaweiCloud does not expose a direct region-id path, so region is derived from AZ.
++func GetRegionID(ctx context.Context) (string, error) {
++	meta, err := getOpenStackMetadata(ctx)
++	if err != nil {
++		return "", err
++	}
++
++	az := meta.AvailabilityZone
++	if az == "" {
++		return "", fmt.Errorf("availability_zone not found in OpenStack metadata")
++	}
++
++	if len(az) > 1 {
++		return az[:len(az)-1], nil
++	}
++
++	return az, nil
++}
++
++// GetZoneID returns the zone ID from metadata.
++func GetZoneID(ctx context.Context) (string, error) {
++	return getMetadata(ctx, "placement/availability-zone")
++}
++
++// GetVPCID returns the VPC ID that belongs to the ECS instance from metadata.
++func GetVPCID(ctx context.Context) (string, error) {
++	meta, err := getOpenStackMetadata(ctx)
++	if err != nil {
++		return "", err
++	}
++
++	if meta.Meta.VPCID == "" {
++		return "", fmt.Errorf("vpc_id not found in OpenStack metadata")
++	}
++
++	return meta.Meta.VPCID, nil
++}
++
++// getMetadata gets metadata.
++func getMetadata(ctx context.Context, path string) (string, error) {
++	client := &http.Client{
++		Timeout: time.Second * 10,
++	}
++
++	url := fmt.Sprintf("%s/%s", metadataEC2URL, path)
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
++	if err != nil {
++		return "", err
++	}
++
++	resp, err := client.Do(req)
++	if err != nil {
++		return "", err
++	}
++	defer resp.Body.Close()
++
++	if resp.StatusCode != http.StatusOK {
++		return "", fmt.Errorf("metadata service returned status code %d for path %s", resp.StatusCode, path)
++	}
++
++	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, metadataMaxRead))
++	if err != nil {
++		return "", err
++	}
++
++	return string(respBytes), nil
++}
++
++// getOpenStackMetadata gets and parses OpenStack metadata JSON.
++func getOpenStackMetadata(ctx context.Context) (*openStackMetadata, error) {
++	client := &http.Client{
++		Timeout: time.Second * 10,
++	}
++
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataOpenStackURL, nil)
++	if err != nil {
++		return nil, err
++	}
++
++	resp, err := client.Do(req)
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("OpenStack metadata service returned status code %d", resp.StatusCode)
++	}
++
++	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, metadataMaxRead))
++	if err != nil {
++		return nil, err
++	}
++
++	var meta openStackMetadata
++	if err := json.Unmarshal(respBytes, &meta); err != nil {
++		return nil, fmt.Errorf("failed to parse OpenStack metadata JSON: %w", err)
++	}
++
++	return &meta, nil
++}
++
++// GetTrunkInterfaceID returns the port ID of the trunk ENI for this instance.
++// It reads the network_data.json metadata endpoint and extracts links[0].vif_id.
++func GetTrunkInterfaceID(ctx context.Context) (string, error) {
++	client := &http.Client{Timeout: time.Second * 10}
++
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataNetworkDataURL, nil)
++	if err != nil {
++		return "", err
++	}
++
++	resp, err := client.Do(req)
++	if err != nil {
++		return "", err
++	}
++	defer resp.Body.Close()
++
++	if resp.StatusCode != http.StatusOK {
++		return "", fmt.Errorf("network_data metadata returned status code %d", resp.StatusCode)
++	}
++
++	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, metadataMaxRead))
++	if err != nil {
++		return "", err
++	}
++
++	var data networkData
++	if err := json.Unmarshal(respBytes, &data); err != nil {
++		return "", fmt.Errorf("failed to parse network_data.json: %w", err)
++	}
++
++	if len(data.Links) == 0 {
++		return "", fmt.Errorf("network_data.json: links array is empty")
++	}
++	if data.Links[0].VifID == "" {
++		return "", fmt.Errorf("network_data.json: links[0].vif_id is empty")
++	}
++
++	return data.Links[0].VifID, nil
++}
+diff --git a/pkg/huaweicloud/subenimap/manager.go b/pkg/huaweicloud/subenimap/manager.go
+new file mode 100644
+index 0000000000..ec52513bce
+--- /dev/null
++++ b/pkg/huaweicloud/subenimap/manager.go
+@@ -0,0 +1,241 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package subenimap
++
++import (
++	"errors"
++	"fmt"
++	"net"
++
++	"github.com/sirupsen/logrus"
++	"golang.org/x/sys/unix"
++
++	"github.com/cilium/cilium/pkg/bpf"
++	"github.com/cilium/cilium/pkg/lock"
++)
++
++const (
++	srcIPMapName   = "cilium_hwc_srcip4"
++	vlanMACMapName = "cilium_hwc_vlan_mac"
++	maxEntries     = 65536
++)
++
++// EndpointInfo provides the data needed to populate the SubENI BPF maps.
++type EndpointInfo interface {
++	// GetIPv4Address returns the Pod IPv4 address (e.g. "10.0.0.5").
++	GetIPv4Address() string
++	// GetID returns the endpoint's LXC ID.
++	GetID() uint32
++	// GetIfIndex returns the interface ifindex of the endpoint's veth.
++	GetIfIndex() uint32
++	// GetMACAddress returns the MAC address of the SubENI bound to this endpoint.
++	GetMACAddress() [6]byte
++	// GetVLANID returns the VLAN ID from the SubENI binding.
++	GetVLANID() int32
++}
++
++// mapBackend abstracts bpf.Map operations to allow test injection.
++type mapBackend interface {
++	Lookup(key bpf.MapKey) (bpf.MapValue, error)
++	Update(key bpf.MapKey, value bpf.MapValue) error
++	Delete(key bpf.MapKey) (bool, error)
++}
++
++// bpfMapAdapter wraps *bpf.Map so it satisfies mapBackend.
++// bpf.Map.Delete returns (error), but mapBackend.Delete returns (bool, error),
++// so we delegate to SilentDelete which already returns (bool, error).
++type bpfMapAdapter struct {
++	m *bpf.Map
++}
++
++func (a *bpfMapAdapter) Update(key bpf.MapKey, value bpf.MapValue) error {
++	return a.m.Update(key, value)
++}
++
++func (a *bpfMapAdapter) Lookup(key bpf.MapKey) (bpf.MapValue, error) {
++	return a.m.Lookup(key)
++}
++
++func (a *bpfMapAdapter) Delete(key bpf.MapKey) (bool, error) {
++	return a.m.SilentDelete(key)
++}
++
++// SubENIMapManager maintains two BPF maps used by the HuaweiCloud SubENI
++// datapath:
++//
++//   - cilium_hwc_srcip4   (egress):  Pod IPv4 → SubENI VLAN/MAC/LXC-ID
++//   - cilium_hwc_vlan_mac (ingress): (VLAN ID, dst MAC) → endpoint ifindex/LXC-ID
++type SubENIMapManager struct {
++	logger     *logrus.Entry
++	srcIPMap   mapBackend
++	vlanMACMap mapBackend
++	mutex      lock.RWMutex
++}
++
++// NewSubENIMapManager creates a SubENIMapManager that attaches to the pinned
++// HuaweiCloud datapath maps on first use.
++func NewSubENIMapManager(logger *logrus.Entry) (*SubENIMapManager, error) {
++	return &SubENIMapManager{
++		logger: logger,
++	}, nil
++}
++
++func (m *SubENIMapManager) ensureMapsOpenLocked() error {
++	if m.srcIPMap != nil && m.vlanMACMap != nil {
++		return nil
++	}
++
++	srcIP, err := bpf.OpenMap(bpf.MapPath(srcIPMapName))
++	if err != nil {
++		return fmt.Errorf("failed to open pinned %s: %w", srcIPMapName, err)
++	}
++
++	vlanMAC, err := bpf.OpenMap(bpf.MapPath(vlanMACMapName))
++	if err != nil {
++		_ = srcIP.Close()
++		return fmt.Errorf("failed to open pinned %s: %w", vlanMACMapName, err)
++	}
++
++	m.srcIPMap = &bpfMapAdapter{m: srcIP}
++	m.vlanMACMap = &bpfMapAdapter{m: vlanMAC}
++
++	return nil
++}
++
++// newWithBackends is used in tests to inject fake map backends without opening
++// real BPF file descriptors.
++func newWithBackends(logger *logrus.Entry, srcIP mapBackend, vlanMAC mapBackend) *SubENIMapManager {
++	return &SubENIMapManager{
++		logger:     logger,
++		srcIPMap:   srcIP,
++		vlanMACMap: vlanMAC,
++	}
++}
++
++func parseIPv4(addr string) ([4]byte, error) {
++	ip := net.ParseIP(addr)
++	if ip == nil {
++		return [4]byte{}, fmt.Errorf("invalid IPv4 address: %q", addr)
++	}
++	ip4 := ip.To4()
++	if ip4 == nil {
++		return [4]byte{}, fmt.Errorf("address is not IPv4: %q", addr)
++	}
++	var out [4]byte
++	copy(out[:], ip4)
++	return out, nil
++}
++
++// OnEndpointReady upserts one entry in each BPF map for the given endpoint.
++// It is safe to call concurrently.
++func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
++	addrBytes, err := parseIPv4(ep.GetIPv4Address())
++	if err != nil {
++		return fmt.Errorf("OnEndpointReady: %w", err)
++	}
++
++	mac := ep.GetMACAddress()
++	var macArr [6]uint8
++	copy(macArr[:], mac[:])
++
++	vlanID := uint16(ep.GetVLANID()) //nolint:gosec // vlan IDs fit in uint16
++
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++
++	if err := m.ensureMapsOpenLocked(); err != nil {
++		return fmt.Errorf("OnEndpointReady: %w", err)
++	}
++
++	// --- Map 1: srcip → subeni info (egress) ---
++	srcKey := &SrcIPKey4{Addr: addrBytes}
++	srcVal := &SubENIInfo{
++		VlanID: vlanID,
++		MAC:    macArr,
++		LxcID:  ep.GetID(),
++	}
++	oldSrcVal, err := m.srcIPMap.Lookup(srcKey)
++	if err != nil && !errors.Is(err, unix.ENOENT) {
++		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", srcIPMapName, srcKey, err)
++	}
++	if err := m.srcIPMap.Update(srcKey, srcVal); err != nil {
++		return fmt.Errorf("OnEndpointReady: update %s key=%s: %w", srcIPMapName, srcKey, err)
++	}
++
++	// --- Map 2: (vlan-id, dst-mac) → endpoint (ingress) ---
++	vlanKey := &VLANMACKey{
++		VlanID: vlanID,
++		MAC:    macArr,
++	}
++	epVal := &EPInfo{
++		IfIndex: ep.GetIfIndex(),
++		LxcID:   uint16(ep.GetID()), //nolint:gosec // LXC IDs fit in uint16
++	}
++	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
++		var rollbackErr error
++		if oldSrcVal != nil {
++			rollbackErr = m.srcIPMap.Update(srcKey, oldSrcVal)
++		} else {
++			_, rollbackErr = m.srcIPMap.Delete(srcKey)
++		}
++		if rollbackErr != nil {
++			return fmt.Errorf("OnEndpointReady: update %s key=%s: %w; rollback %s: %v", vlanMACMapName, vlanKey, err, srcIPMapName, rollbackErr)
++		}
++		return fmt.Errorf("OnEndpointReady: update %s key=%s: %w", vlanMACMapName, vlanKey, err)
++	}
++
++	return nil
++}
++
++// OnEndpointDelete removes the entries for the given endpoint from both BPF
++// maps on a best-effort basis (individual delete errors are logged but not
++// returned).
++func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
++	addrBytes, err := parseIPv4(ep.GetIPv4Address())
++	if err != nil {
++		return fmt.Errorf("OnEndpointDelete: %w", err)
++	}
++
++	mac := ep.GetMACAddress()
++	var macArr [6]uint8
++	copy(macArr[:], mac[:])
++
++	vlanID := uint16(ep.GetVLANID()) //nolint:gosec
++
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++
++	if err := m.ensureMapsOpenLocked(); err != nil {
++		return fmt.Errorf("OnEndpointDelete: %w", err)
++	}
++
++	// best-effort: log errors but do not propagate them.
++	if _, err := m.srcIPMap.Delete(&SrcIPKey4{Addr: addrBytes}); err != nil {
++		m.logger.WithError(err).WithFields(logrus.Fields{
++			"map":  srcIPMapName,
++			"addr": ep.GetIPv4Address(),
++		}).Warn("failed to delete srcip entry")
++	}
++
++	if _, err := m.vlanMACMap.Delete(&VLANMACKey{VlanID: vlanID, MAC: macArr}); err != nil {
++		m.logger.WithError(err).WithFields(logrus.Fields{
++			"map":  vlanMACMapName,
++			"addr": ep.GetIPv4Address(),
++		}).Warn("failed to delete vlan-mac entry")
++	}
++
++	return nil
++}
++
++// Close releases any resources held by the manager.
++// After Close the manager must not be used.
++func (m *SubENIMapManager) Close() {
++	// If the underlying backends are real bpf.Map adapters, close the maps.
++	if a, ok := m.srcIPMap.(*bpfMapAdapter); ok {
++		_ = a.m.Close()
++	}
++	if a, ok := m.vlanMACMap.(*bpfMapAdapter); ok {
++		_ = a.m.Close()
++	}
++}
+diff --git a/pkg/huaweicloud/subenimap/types.go b/pkg/huaweicloud/subenimap/types.go
+new file mode 100644
+index 0000000000..e4e1d0bc83
+--- /dev/null
++++ b/pkg/huaweicloud/subenimap/types.go
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package subenimap
++
++import (
++	"fmt"
++	"net"
++	"unsafe"
++
++	"github.com/cilium/cilium/pkg/bpf"
++)
++
++// SrcIPKey4 is the key for the cilium_hwc_srcip4 BPF map.
++// It corresponds to struct hwc_srcip_key4 in BPF C code.
++//
++// Egress path: look up SubENI info by Pod IPv4 source IP.
++type SrcIPKey4 struct {
++	Addr [4]byte `align:"addr"`
++}
++
++// String returns a human-readable representation of the key.
++func (k *SrcIPKey4) String() string {
++	return fmt.Sprintf("addr=%s", net.IP(k.Addr[:]).String())
++}
++
++// New returns a pointer to a new SrcIPKey4, satisfying bpf.MapKey.
++func (k *SrcIPKey4) New() bpf.MapKey { return &SrcIPKey4{} }
++
++// GetKeyPtr returns the unsafe pointer to this map key.
++func (k *SrcIPKey4) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
++
++// NewValue returns a new value for this key.
++func (k *SrcIPKey4) NewValue() bpf.MapValue { return &SubENIInfo{} }
++
++// DeepCopyMapKey returns a copy of this map key.
++func (k *SrcIPKey4) DeepCopyMapKey() bpf.MapKey {
++	if k == nil {
++		return nil
++	}
++	copy := *k
++	return &copy
++}
++
++// SubENIInfo is the value for the cilium_hwc_srcip4 BPF map.
++// It corresponds to struct hwc_subeni_info in BPF C code.
++type SubENIInfo struct {
++	// VlanID is the VLAN ID of the SubENI.
++	VlanID uint16 `align:"vlan_id"`
++	// MAC is the MAC address of the SubENI.
++	MAC [6]uint8 `align:"mac"`
++	// Pad is alignment padding.
++	Pad      uint16 `align:"pad"`
++	Reserved uint16 `align:"reserved"`
++	// LxcID is the endpoint (LXC) ID.
++	LxcID uint32 `align:"lxc_id"`
++}
++
++// String returns a human-readable representation of the value.
++func (v *SubENIInfo) String() string {
++	return fmt.Sprintf("vlan_id=%d mac=%02x:%02x:%02x:%02x:%02x:%02x lxc_id=%d",
++		v.VlanID,
++		v.MAC[0], v.MAC[1], v.MAC[2], v.MAC[3], v.MAC[4], v.MAC[5],
++		v.LxcID,
++	)
++}
++
++// New returns a pointer to a new SubENIInfo, satisfying bpf.MapValue.
++func (v *SubENIInfo) New() bpf.MapValue { return &SubENIInfo{} }
++
++// GetValuePtr returns the unsafe pointer to this map value.
++func (v *SubENIInfo) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
++
++// DeepCopyMapValue returns a copy of this map value.
++func (v *SubENIInfo) DeepCopyMapValue() bpf.MapValue {
++	if v == nil {
++		return nil
++	}
++	copy := *v
++	return &copy
++}
++
++// VLANMACKey is the key for the cilium_hwc_vlan_mac BPF map.
++// It corresponds to struct hwc_vlan_mac_key in BPF C code.
++//
++// Ingress path: look up endpoint by (VLAN ID, destination MAC).
++type VLANMACKey struct {
++	// VlanID is the VLAN ID of the SubENI.
++	VlanID uint16 `align:"vlan_id"`
++	// MAC is the destination MAC address.
++	MAC [6]uint8 `align:"mac"`
++}
++
++// String returns a human-readable representation of the key.
++func (k *VLANMACKey) String() string {
++	return fmt.Sprintf("vlan_id=%d mac=%02x:%02x:%02x:%02x:%02x:%02x",
++		k.VlanID,
++		k.MAC[0], k.MAC[1], k.MAC[2], k.MAC[3], k.MAC[4], k.MAC[5],
++	)
++}
++
++// New returns a pointer to a new VLANMACKey, satisfying bpf.MapKey.
++func (k *VLANMACKey) New() bpf.MapKey { return &VLANMACKey{} }
++
++// GetKeyPtr returns the unsafe pointer to this map key.
++func (k *VLANMACKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
++
++// NewValue returns a new value for this key.
++func (k *VLANMACKey) NewValue() bpf.MapValue { return &EPInfo{} }
++
++// DeepCopyMapKey returns a copy of this map key.
++func (k *VLANMACKey) DeepCopyMapKey() bpf.MapKey {
++	if k == nil {
++		return nil
++	}
++	copy := *k
++	return &copy
++}
++
++// EPInfo is the value for the cilium_hwc_vlan_mac BPF map.
++// It corresponds to struct hwc_ep_info in BPF C code.
++type EPInfo struct {
++	// IfIndex is the interface index of the endpoint's veth.
++	IfIndex uint32 `align:"ifindex"`
++	// LxcID is the endpoint (LXC) ID.
++	LxcID uint16 `align:"lxc_id"`
++	// Flags holds endpoint flags.
++	Flags uint16 `align:"flags"`
++}
++
++// String returns a human-readable representation of the value.
++func (v *EPInfo) String() string {
++	return fmt.Sprintf("ifindex=%d lxc_id=%d flags=0x%04x", v.IfIndex, v.LxcID, v.Flags)
++}
++
++// New returns a pointer to a new EPInfo, satisfying bpf.MapValue.
++func (v *EPInfo) New() bpf.MapValue { return &EPInfo{} }
++
++// GetValuePtr returns the unsafe pointer to this map value.
++func (v *EPInfo) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
++
++// DeepCopyMapValue returns a copy of this map value.
++func (v *EPInfo) DeepCopyMapValue() bpf.MapValue {
++	if v == nil {
++		return nil
++	}
++	copy := *v
++	return &copy
++}
+diff --git a/pkg/huaweicloud/types/types.go b/pkg/huaweicloud/types/types.go
+new file mode 100644
+index 0000000000..a4d6b74cc5
+--- /dev/null
++++ b/pkg/huaweicloud/types/types.go
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package types
++
++// SecurityGroup represents a HuaweiCloud security group
++type SecurityGroup struct {
++	// ID is the ID of the security group
++	ID string
++	// VPCID is the VPC this security group is associated with
++	VPCID string
++	// Tags is the tags on this security group
++	Tags map[string]string
++}
++
++// SecurityGroupMap is the map of security groups indexed by security group ID
++type SecurityGroupMap map[string]*SecurityGroup
+diff --git a/pkg/huaweicloud/utils/utils.go b/pkg/huaweicloud/utils/utils.go
+new file mode 100644
+index 0000000000..024f70d3a1
+--- /dev/null
++++ b/pkg/huaweicloud/utils/utils.go
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package utils
++
++import (
++	"strconv"
++
++	"github.com/sirupsen/logrus"
++)
++
++const subENIIndexTagKey = "cilium-sub-eni-index"
++
++// GetSubENIIndexFromTags returns the Sub-ENI index from the given tags.
++// Returns the index and true if found, or 0 and false if not.
++func GetSubENIIndexFromTags(tags map[string]string) (int, bool) {
++	v, ok := tags[subENIIndexTagKey]
++	if !ok {
++		return 0, false
++	}
++	index, err := strconv.Atoi(v)
++	if err != nil {
++		logrus.WithError(err).Warning("Unable to retrieve index from Sub-ENI tags")
++		return 0, false
++	}
++	return index, true
++}
++
++// FillTagWithSubENIIndex sets the Sub-ENI index in the tags map and returns it.
++func FillTagWithSubENIIndex(tags map[string]string, index int) map[string]string {
++	if tags == nil {
++		tags = map[string]string{}
++	}
++	tags[subENIIndexTagKey] = strconv.Itoa(index)
++	return tags
++}
+diff --git a/pkg/ipam/allocator/huaweicloud/huaweicloud.go b/pkg/ipam/allocator/huaweicloud/huaweicloud.go
+new file mode 100644
+index 0000000000..0d202c2ecd
+--- /dev/null
++++ b/pkg/ipam/allocator/huaweicloud/huaweicloud.go
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package huaweicloud
++
++import (
++	"context"
++	"fmt"
++
++	operatorMetrics "github.com/cilium/cilium/operator/metrics"
++	operatorOption "github.com/cilium/cilium/operator/option"
++	hwAPI "github.com/cilium/cilium/pkg/huaweicloud/api"
++	"github.com/cilium/cilium/pkg/huaweicloud/eni"
++	"github.com/cilium/cilium/pkg/huaweicloud/metadata"
++	"github.com/cilium/cilium/pkg/ipam"
++	"github.com/cilium/cilium/pkg/ipam/allocator"
++	ipamMetrics "github.com/cilium/cilium/pkg/ipam/metrics"
++	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/logging/logfields"
++)
++
++var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "ipam-allocator-huawei-cloud")
++
++type AllocatorHuaweiCloud struct {
++	client *hwAPI.Client
++	vpcID  string
++}
++
++func (a *AllocatorHuaweiCloud) Init(ctx context.Context) error {
++	ak := operatorOption.Config.HuaweiCloudAccessKey
++	sk := operatorOption.Config.HuaweiCloudSecretKey
++	projectID := operatorOption.Config.HuaweiCloudProjectID
++	region := operatorOption.Config.HuaweiCloudRegion
++	vpcID := operatorOption.Config.HuaweiCloudVPCID
++	endpoint := operatorOption.Config.HuaweiCloudEndpoint
++
++	if ak == "" {
++		return fmt.Errorf("--huawei-cloud-access-key is required for HuaweiCloud IPAM")
++	}
++	if sk == "" {
++		return fmt.Errorf("--huawei-cloud-secret-key is required for HuaweiCloud IPAM")
++	}
++	if projectID == "" {
++		return fmt.Errorf("--huawei-cloud-project-id is required for HuaweiCloud IPAM")
++	}
++	if len(operatorOption.Config.HuaweiCloudSubENITags) > 20 {
++		return fmt.Errorf("--huawei-cloud-subeni-tags supports at most 20 tags")
++	}
++
++	if region == "" {
++		var err error
++		region, err = metadata.GetRegionID(ctx)
++		if err != nil {
++			return fmt.Errorf("--huawei-cloud-region not set and failed to get region from instance metadata: %w", err)
++		}
++	}
++
++	if vpcID == "" {
++		var err error
++		vpcID, err = metadata.GetVPCID(ctx)
++		if err != nil {
++			log.WithError(err).Warn("Unable to get VPC ID from instance metadata, proceeding without VPC ID constraint")
++		}
++	}
++
++	a.vpcID = vpcID
++
++	client, err := hwAPI.NewClient(ak, sk, projectID, region, endpoint)
++	if err != nil {
++		return fmt.Errorf("unable to create HuaweiCloud API client: %w", err)
++	}
++
++	a.client = client
++	log.Info("HuaweiCloud IPAM allocator initialized")
++	return nil
++}
++
++func (a *AllocatorHuaweiCloud) Start(ctx context.Context, getterUpdater ipam.CiliumNodeGetterUpdater) (allocator.NodeEventHandler, error) {
++	var iMetrics ipam.MetricsAPI
++
++	log.Info("Starting HuaweiCloud Sub-ENI allocator...")
++
++	if operatorOption.Config.EnableMetrics {
++		iMetrics = ipamMetrics.NewPrometheusMetrics(operatorMetrics.Namespace, operatorMetrics.Registry)
++	} else {
++		iMetrics = &ipamMetrics.NoOpMetrics{}
++	}
++
++	instances := eni.NewInstancesManager(a.client, a.vpcID, operatorOption.Config.HuaweiCloudSubENITags)
++	nodeManager, err := ipam.NewNodeManager(instances, getterUpdater, iMetrics,
++		operatorOption.Config.ParallelAllocWorkers,
++		operatorOption.Config.HuaweiCloudReleaseExcessIPs,
++		false,
++	)
++	if err != nil {
++		return nil, fmt.Errorf("unable to initialize HuaweiCloud node manager: %w", err)
++	}
++
++	if err := nodeManager.Start(ctx); err != nil {
++		return nil, err
++	}
++
++	return nodeManager, nil
++}
+diff --git a/pkg/ipam/crd.go b/pkg/ipam/crd.go
+index 48181a71ee..2ad6c075e3 100644
+--- a/pkg/ipam/crd.go
++++ b/pkg/ipam/crd.go
+@@ -24,6 +24,7 @@ import (
+ 
+ 	alibabaCloud "github.com/cilium/cilium/pkg/alibabacloud/utils"
+ 	"github.com/cilium/cilium/pkg/cidr"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	"github.com/cilium/cilium/pkg/ip"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+@@ -239,6 +240,18 @@ func deriveVpcCIDRs(node *ciliumv2.CiliumNode) (primaryCIDR *cidr.CIDR, secondar
+ 			return
+ 		}
+ 	}
++	if node.Status.HuaweiCloud != nil {
++		c, err := cidr.ParseCIDR(node.Status.HuaweiCloud.VPCPrimaryCIDR)
++		if err == nil {
++			primaryCIDR = c
++			for _, secondary := range node.Status.HuaweiCloud.VPCCIDRs {
++				if c, err = cidr.ParseCIDR(secondary); err == nil {
++					secondaryCIDRs = append(secondaryCIDRs, c)
++				}
++			}
++			return
++		}
++	}
+ 	return
+ }
+ 
+@@ -314,7 +327,7 @@ func (n *nodeStore) hasMinimumIPsInPool() (minimumReached bool, required, numAva
+ 			minimumReached = true
+ 		}
+ 
+-		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud {
++		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud || n.conf.IPAMMode() == ipamOption.IPAMHuaweiCloud {
+ 			if !n.autoDetectIPv4NativeRoutingCIDR() {
+ 				minimumReached = false
+ 			}
+@@ -722,11 +735,63 @@ func (a *crdAllocator) buildAllocationResult(ip net.IP, ipInfo *ipamTypes.Alloca
+ 			return
+ 		}
+ 		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
++
++	case ipamOption.IPAMHuaweiCloud:
++		if a.store.ownNode.Status.HuaweiCloud != nil {
++			for _, subENI := range a.store.ownNode.Status.HuaweiCloud.SubENIs {
++				if subENI.ID != ipInfo.Resource {
++					continue
++				}
++				if subENI.VlanID <= 0 {
++					return nil, fmt.Errorf("missing vlan ID for HuaweiCloud Sub-ENI %s", subENI.ID)
++				}
++				primaryMAC, err := a.resolveHuaweiCloudPrimaryMAC(subENI)
++				if err != nil {
++					return nil, err
++				}
++				result.PrimaryMAC = primaryMAC
++				if subENI.SubnetCIDR != "" {
++					result.CIDRs = append(result.CIDRs, subENI.SubnetCIDR)
++				}
++				if cidr := a.conf.GetIPv4NativeRoutingCIDR(); cidr != nil {
++					result.CIDRs = append(result.CIDRs, cidr.String())
++				}
++				result.GatewayIP = subENI.GatewayIP
++				if result.GatewayIP == "" {
++					return nil, fmt.Errorf("missing gateway IP for HuaweiCloud Sub-ENI %s", subENI.ID)
++				}
++				result.InterfaceNumber = strconv.Itoa(int(subENI.VlanID))
++				return result, nil
++			}
++		}
++		return nil, fmt.Errorf("unable to find Sub-ENI %s", ipInfo.Resource)
+ 	}
+ 
+ 	return
+ }
+ 
++func (a *crdAllocator) resolveHuaweiCloudPrimaryMAC(subENI huaweiCloudTypes.SubENI) (string, error) {
++	if a.store.ownNode != nil && a.store.ownNode.Spec.HuaweiCloud != nil {
++		trunkInterface := a.store.ownNode.Spec.HuaweiCloud.TrunkInterface
++		if trunkInterface != "" {
++			link, err := netlink.LinkByName(trunkInterface)
++			if err != nil {
++				return "", fmt.Errorf("unable to resolve HuaweiCloud trunk interface %s: %w", trunkInterface, err)
++			}
++			if mac := link.Attrs().HardwareAddr.String(); mac != "" {
++				return mac, nil
++			}
++			return "", fmt.Errorf("HuaweiCloud trunk interface %s has empty MAC address", trunkInterface)
++		}
++	}
++
++	if subENI.MACAddress != "" {
++		return subENI.MACAddress, nil
++	}
++
++	return "", fmt.Errorf("HuaweiCloud primary MAC is unavailable for Sub-ENI %s", subENI.ID)
++}
++
+ // Allocate will attempt to find the specified IP in the custom resource and
+ // allocate it if it is available. If the IP is unavailable or already
+ // allocated, an error is returned. The custom resource will be updated to
+diff --git a/pkg/ipam/ipam.go b/pkg/ipam/ipam.go
+index b6010a41df..7fc311e12c 100644
+--- a/pkg/ipam/ipam.go
++++ b/pkg/ipam/ipam.go
+@@ -136,7 +136,7 @@ func NewIPAM(nodeAddressing types.NodeAddressing, c Configuration, owner Owner,
+ 		if c.IPv4Enabled() {
+ 			ipam.IPv4Allocator = newClusterPoolAllocator(IPv4, c, owner, k8sEventReg)
+ 		}
+-	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 		log.Info("Initializing CRD-based IPAM")
+ 		if c.IPv6Enabled() {
+ 			ipam.IPv6Allocator = newCRDAllocator(IPv6, c, owner, k8sEventReg, mtuConfig)
+diff --git a/pkg/ipam/option/option.go b/pkg/ipam/option/option.go
+index caef66b1a4..1121ee29ae 100644
+--- a/pkg/ipam/option/option.go
++++ b/pkg/ipam/option/option.go
+@@ -29,6 +29,9 @@ const (
+ 	// IPAMAlibabaCloud is the value to select the AlibabaCloud ENI IPAM plugin for option.IPAM
+ 	IPAMAlibabaCloud = "alibabacloud"
+ 
++	// IPAMHuaweiCloud is the value to select the HuaweiCloud Sub-ENI IPAM plugin for option.IPAM
++	IPAMHuaweiCloud = "huaweicloud"
++
+ 	// IPAMDelegatedPlugin is the value to select CNI delegated IPAM plugin mode.
+ 	// In this mode, Cilium CNI invokes another CNI binary (the delegated plugin) for IPAM.
+ 	// See https://www.cni.dev/docs/spec/#section-4-plugin-delegation
+diff --git a/pkg/ipam/types/types.go b/pkg/ipam/types/types.go
+index 1d893c013a..bddd0b86e5 100644
+--- a/pkg/ipam/types/types.go
++++ b/pkg/ipam/types/types.go
+@@ -211,6 +211,9 @@ type Subnet struct {
+ 	// CIDR is the CIDR associated with the subnet
+ 	CIDR *cidr.CIDR
+ 
++	// GatewayIP is the subnet's default gateway.
++	GatewayIP string
++
+ 	// AvailabilityZone is the availability zone of the subnet
+ 	AvailabilityZone string
+ 
+@@ -339,6 +342,13 @@ func NewInstanceMap() *InstanceMap {
+ 	return &InstanceMap{data: map[string]*Instance{}}
+ }
+ 
++// UpdateInstance updates the full instance definition.
++func (m *InstanceMap) UpdateInstance(instanceID string, instance *Instance) {
++	m.mutex.Lock()
++	m.data[instanceID] = instance
++	m.mutex.Unlock()
++}
++
+ // Update updates the definition of an interface for a particular instance. If
+ // the interface is already known, the definition is updated, otherwise the
+ // interface is added to the instance.
+@@ -482,3 +492,17 @@ func (m *InstanceMap) NumInstances() (size int) {
+ 	m.mutex.RUnlock()
+ 	return
+ }
++
++// Exists returns true if the instance exists in the map.
++func (m *InstanceMap) Exists(instanceID string) bool {
++	m.mutex.RLock()
++	defer m.mutex.RUnlock()
++	return m.data[instanceID] != nil
++}
++
++// Delete removes the instance from the map.
++func (m *InstanceMap) Delete(instanceID string) {
++	m.mutex.Lock()
++	delete(m.data, instanceID)
++	m.mutex.Unlock()
++}
+diff --git a/pkg/k8s/apis/cilium.io/v2/types.go b/pkg/k8s/apis/cilium.io/v2/types.go
+index 01db8aaf1b..7cb5f43375 100644
+--- a/pkg/k8s/apis/cilium.io/v2/types.go
++++ b/pkg/k8s/apis/cilium.io/v2/types.go
+@@ -12,6 +12,7 @@ import (
+ 	alibabaCloudTypes "github.com/cilium/cilium/pkg/alibabacloud/eni/types"
+ 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
+ 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+ 	"github.com/cilium/cilium/pkg/node/addressing"
+ )
+@@ -384,6 +385,11 @@ type NodeSpec struct {
+ 	// +kubebuilder:validation:Optional
+ 	AlibabaCloud alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
+ 
++	// HuaweiCloud is the HuaweiCloud Sub-ENI IPAM specific configuration.
++	//
++	// +kubebuilder:validation:Optional
++	HuaweiCloud *huaweiCloudTypes.Spec `json:"huawei-cloud,omitempty"`
++
+ 	// IPAM is the address management specification. This section can be
+ 	// populated by a user or it can be automatically populated by an IPAM
+ 	// operator.
+@@ -441,6 +447,11 @@ type NodeStatus struct {
+ 	//
+ 	// +kubebuilder:validation:Optional
+ 	AlibabaCloud alibabaCloudTypes.ENIStatus `json:"alibaba-cloud,omitempty"`
++
++	// HuaweiCloud is the HuaweiCloud Sub-ENI specific status of the node.
++	//
++	// +kubebuilder:validation:Optional
++	HuaweiCloud *huaweiCloudTypes.ENIStatus `json:"huawei-cloud,omitempty"`
+ }
+ 
+ // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+@@ -463,6 +474,9 @@ func (n *CiliumNode) InstanceID() (instanceID string) {
+ 		if instanceID == "" {
+ 			instanceID = n.Spec.ENI.InstanceID
+ 		}
++		if instanceID == "" && n.Spec.HuaweiCloud != nil {
++			instanceID = n.Spec.HuaweiCloud.InstanceID
++		}
+ 	}
+ 	return
+ }
+diff --git a/pkg/nodediscovery/nodediscovery.go b/pkg/nodediscovery/nodediscovery.go
+index 7dba7c9017..f5ed5d7fbb 100644
+--- a/pkg/nodediscovery/nodediscovery.go
++++ b/pkg/nodediscovery/nodediscovery.go
+@@ -26,6 +26,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/controller"
+ 	"github.com/cilium/cilium/pkg/datapath"
+ 	"github.com/cilium/cilium/pkg/defaults"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	huaweiCloudMetadata "github.com/cilium/cilium/pkg/huaweicloud/metadata"
+ 	"github.com/cilium/cilium/pkg/identity"
+ 	"github.com/cilium/cilium/pkg/ipam"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+@@ -80,7 +82,8 @@ func enableLocalNodeRoute() bool {
+ 	return option.Config.EnableLocalNodeRoute &&
+ 		option.Config.IPAM != ipamOption.IPAMENI &&
+ 		option.Config.IPAM != ipamOption.IPAMAzure &&
+-		option.Config.IPAM != ipamOption.IPAMAlibabaCloud
++		option.Config.IPAM != ipamOption.IPAMAlibabaCloud &&
++		option.Config.IPAM != ipamOption.IPAMHuaweiCloud
+ }
+ 
+ // NewNodeDiscovery returns a pointer to new node discovery object
+@@ -731,11 +734,79 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+ 				nodeResource.Spec.IPAM.PreAllocate = c.IPAM.PreAllocate
+ 			}
+ 		}
++
++	case ipamOption.IPAMHuaweiCloud:
++		nodeResource.Spec.HuaweiCloud = &huaweiCloudTypes.Spec{}
++
++		huaweiInstanceID, err := huaweiCloudMetadata.GetInstanceID(context.TODO())
++		if err != nil {
++			log.WithError(err).Fatal("Unable to retrieve InstanceID of own ECS instance")
++		}
++		if huaweiInstanceID == "" {
++			return errors.New("InstanceID of own ECS instance is empty")
++		}
++
++		huaweiInstanceType, err := huaweiCloudMetadata.GetInstanceType(context.TODO())
++		if err != nil {
++			log.WithError(err).Fatal("Unable to retrieve InstanceType of own ECS instance")
++		}
++		huaweiVPCID, err := huaweiCloudMetadata.GetVPCID(context.TODO())
++		if err != nil {
++			log.WithError(err).Fatal("Unable to retrieve VPC ID of own ECS instance")
++		}
++		huaweiZoneID, err := huaweiCloudMetadata.GetZoneID(context.TODO())
++		if err != nil {
++			log.WithError(err).Fatal("Unable to retrieve Zone ID of own ECS instance")
++		}
++		trunkInterfaceID, err := huaweiCloudMetadata.GetTrunkInterfaceID(context.TODO())
++		if err != nil {
++			log.WithError(err).Fatal("Unable to retrieve TrunkInterfaceID from instance metadata")
++		}
++
++		nodeResource.Spec.InstanceID = huaweiInstanceID
++		nodeResource.Spec.HuaweiCloud.InstanceID = huaweiInstanceID
++		nodeResource.Spec.HuaweiCloud.InstanceType = huaweiInstanceType
++		nodeResource.Spec.HuaweiCloud.VPCID = huaweiVPCID
++		nodeResource.Spec.HuaweiCloud.AvailabilityZone = huaweiZoneID
++		nodeResource.Spec.HuaweiCloud.TrunkMode = true
++		nodeResource.Spec.HuaweiCloud.TrunkInterface = option.Config.HuaweiCloudTrunkInterface
++		nodeResource.Spec.HuaweiCloud.TrunkInterfaceID = trunkInterfaceID
++
++		if len(option.Config.HuaweiCloudSubnetIDs) > 0 {
++			nodeResource.Spec.HuaweiCloud.Subnets = option.Config.HuaweiCloudSubnetIDs
++		}
++		if len(option.Config.HuaweiCloudSecurityGroupIDs) > 0 {
++			nodeResource.Spec.HuaweiCloud.SecurityGroups = option.Config.HuaweiCloudSecurityGroupIDs
++		}
++		if c := n.NetConf; c != nil {
++			applyHuaweiCloudNetConf(nodeResource.Spec.HuaweiCloud, c.HuaweiCloud)
++			if c.IPAM.PreAllocate != 0 {
++				nodeResource.Spec.IPAM.PreAllocate = c.IPAM.PreAllocate
++			}
++		}
+ 	}
+ 
+ 	return nil
+ }
+ 
++func applyHuaweiCloudNetConf(dst *huaweiCloudTypes.Spec, src huaweiCloudTypes.Spec) {
++	if dst == nil {
++		return
++	}
++	if len(src.Subnets) > 0 {
++		dst.Subnets = src.Subnets
++	}
++	if len(src.SubnetTags) > 0 {
++		dst.SubnetTags = src.SubnetTags
++	}
++	if len(src.SecurityGroups) > 0 {
++		dst.SecurityGroups = src.SecurityGroups
++	}
++	if len(src.SecurityGroupTags) > 0 {
++		dst.SecurityGroupTags = src.SecurityGroupTags
++	}
++}
++
+ func (n *NodeDiscovery) RegisterK8sGetters(k8sGetters k8sGetters) {
+ 	n.k8sGetters = k8sGetters
+ }
+diff --git a/pkg/option/config.go b/pkg/option/config.go
+index 0ab115ad1d..f9c212f41b 100644
+--- a/pkg/option/config.go
++++ b/pkg/option/config.go
+@@ -833,6 +833,15 @@ const (
+ 	// IPAM is the IPAM method to use
+ 	IPAM = "ipam"
+ 
++	// HuaweiCloudTrunkInterface is the trunk interface used for HuaweiCloud Sub-ENI VLAN mode.
++	HuaweiCloudTrunkInterface = "huawei-cloud-trunk-interface"
++
++	// HuaweiCloudSubnetIDs is the ordered list of subnet IDs for HuaweiCloud Sub-ENI creation.
++	HuaweiCloudSubnetIDs = "huawei-cloud-subnet-ids"
++
++	// HuaweiCloudSecurityGroupIDs is the list of security groups for HuaweiCloud Sub-ENIs.
++	HuaweiCloudSecurityGroupIDs = "huawei-cloud-security-group-ids"
++
+ 	// XDPModeNative for loading progs with XDPModeLinkDriver
+ 	XDPModeNative = "native"
+ 
+@@ -1312,6 +1321,10 @@ func LogRegisteredOptions(entry *logrus.Entry) {
+ 	}
+ 	sort.Strings(keys)
+ 	for _, k := range keys {
++		if isSensitiveOption(k) {
++			entry.Infof("  --%s='<redacted>'", k)
++			continue
++		}
+ 		v := viper.GetStringSlice(k)
+ 		if len(v) > 0 {
+ 			entry.Infof("  --%s='%s'", k, strings.Join(v, ","))
+@@ -1321,6 +1334,11 @@ func LogRegisteredOptions(entry *logrus.Entry) {
+ 	}
+ }
+ 
++func isSensitiveOption(name string) bool {
++	return strings.Contains(name, "access-key") ||
++		(strings.Contains(name, "secret") && strings.Contains(name, "key"))
++}
++
+ // DaemonConfig is the configuration used by Daemon.
+ type DaemonConfig struct {
+ 	CreationTime        time.Time
+@@ -1752,6 +1770,15 @@ type DaemonConfig struct {
+ 	// the allocation prefix of the local node.
+ 	EnableLocalNodeRoute bool
+ 
++	// HuaweiCloudTrunkInterface is the trunk interface used for HuaweiCloud Sub-ENI VLAN mode.
++	HuaweiCloudTrunkInterface string
++
++	// HuaweiCloudSubnetIDs is the ordered list of subnet IDs for HuaweiCloud Sub-ENI creation.
++	HuaweiCloudSubnetIDs []string
++
++	// HuaweiCloudSecurityGroupIDs is the list of security groups for HuaweiCloud Sub-ENIs.
++	HuaweiCloudSecurityGroupIDs []string
++
+ 	// EnableHealthChecking enables health checking between nodes and
+ 	// health endpoints
+ 	EnableHealthChecking bool
+@@ -2895,6 +2922,9 @@ func (c *DaemonConfig) Populate() {
+ 	c.IdentityChangeGracePeriod = viper.GetDuration(IdentityChangeGracePeriod)
+ 	c.IdentityRestoreGracePeriod = viper.GetDuration(IdentityRestoreGracePeriod)
+ 	c.IPAM = viper.GetString(IPAM)
++	c.HuaweiCloudTrunkInterface = viper.GetString(HuaweiCloudTrunkInterface)
++	c.HuaweiCloudSubnetIDs = viper.GetStringSlice(HuaweiCloudSubnetIDs)
++	c.HuaweiCloudSecurityGroupIDs = viper.GetStringSlice(HuaweiCloudSecurityGroupIDs)
+ 	c.IPv4Range = viper.GetString(IPv4Range)
+ 	c.IPv4NodeAddr = viper.GetString(IPv4NodeAddr)
+ 	c.IPv4ServiceRange = viper.GetString(IPv4ServiceRange)
+@@ -3502,7 +3532,7 @@ func (c *DaemonConfig) checkMapSizeLimits() error {
+ 
+ func (c *DaemonConfig) checkIPv4NativeRoutingCIDR() error {
+ 	if c.GetIPv4NativeRoutingCIDR() == nil && c.EnableIPv4Masquerade && c.Tunnel == TunnelDisabled &&
+-		c.IPAMMode() != ipamOption.IPAMENI && c.EnableIPv4 && c.IPAMMode() != ipamOption.IPAMAlibabaCloud {
++		c.IPAMMode() != ipamOption.IPAMENI && c.EnableIPv4 && c.IPAMMode() != ipamOption.IPAMAlibabaCloud && c.IPAMMode() != ipamOption.IPAMHuaweiCloud {
+ 		return fmt.Errorf(
+ 			"native routing cidr must be configured with option --%s "+
+ 				"in combination with --%s --%s=%s --%s=%s --%s=true",
+@@ -3984,6 +4014,7 @@ func EndpointStatusValuesMap() (values map[string]struct{}) {
+ func MightAutoDetectDevices() bool {
+ 	devices := Config.GetDevices()
+ 	return (Config.EnableHostFirewall && len(devices) == 0) ||
++		(Config.IPAM == ipamOption.IPAMHuaweiCloud && len(devices) == 0) ||
+ 		(Config.KubeProxyReplacement != KubeProxyReplacementDisabled &&
+ 			(len(devices) == 0 || Config.DirectRoutingDevice == ""))
+ }
+-- 
+2.43.0

@@ -1,0 +1,115 @@
+From d4ff96b93dd9e9407d3533ee761eb9a5d6bdc8da Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 19:49:18 +0800
+Subject: [PATCH 8/9] huaweicloud: handle inline VLAN ingress frames
+
+---
+ bpf/bpf_host.c        |  5 +++--
+ bpf/lib/huaweicloud.h | 38 ++++++++++++++++++++++++++++++++++----
+ 2 files changed, 37 insertions(+), 6 deletions(-)
+
+diff --git a/bpf/bpf_host.c b/bpf/bpf_host.c
+index 661c4dfa..b1198e35 100644
+--- a/bpf/bpf_host.c
++++ b/bpf/bpf_host.c
+@@ -957,9 +957,10 @@ int from_netdev(struct __ctx_buff *ctx)
+ {
+ 	__u32 __maybe_unused vlan_id;
+ 	int ret __maybe_unused;
++	bool hwc_vlan_handled = false;
+ 
+ #ifdef ENABLE_HUAWEICLOUD_VLAN
+-	ret = hwc_from_netdev(ctx);
++	ret = hwc_from_netdev(ctx, &hwc_vlan_handled);
+ 	if (IS_ERR(ret))
+ 		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
+ 					      METRIC_INGRESS);
+@@ -967,7 +968,7 @@ int from_netdev(struct __ctx_buff *ctx)
+ 
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 */
+-	if (ctx->vlan_present) {
++	if (!hwc_vlan_handled && ctx->vlan_present) {
+ 		vlan_id = ctx->vlan_tci & 0xfff;
+ 		if (vlan_id) {
+ 			if (allow_vlan(ctx->ifindex, vlan_id))
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+index 5e6dc305..187df88e 100644
+--- a/bpf/lib/huaweicloud.h
++++ b/bpf/lib/huaweicloud.h
+@@ -54,6 +54,11 @@ struct hwc_ep_info {
+ 	__u16 flags;
+ };
+ 
++struct hwc_vlan_hdr {
++	__be16 tci;
++	__be16 encapsulated_proto;
++};
++
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_HASH);
+ 	__type(key, struct hwc_vlan_mac_key);
+@@ -93,17 +98,19 @@ hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
+ }
+ 
+ static __always_inline int
+-hwc_from_netdev(struct __ctx_buff *ctx)
++hwc_from_netdev(struct __ctx_buff *ctx, bool *handled)
+ {
+ 	struct hwc_vlan_mac_key key __align_stack_8 = {};
+ 	struct hwc_ep_info *ep;
+ 	void *data, *data_end;
+ 	struct ethhdr *eth;
++	__u16 vlan_id;
++	bool inline_vlan = false;
++	bool metadata_vlan;
+ 
++	*handled = false;
+ 	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
+ 		return CTX_ACT_OK;
+-	if (!ctx->vlan_present)
+-		return CTX_ACT_OK;
+ 
+ 	data = (void *)(long)ctx->data;
+ 	data_end = (void *)(long)ctx->data_end;
+@@ -111,7 +118,25 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	if ((void *)(eth + 1) > data_end)
+ 		return DROP_INVALID;
+ 
+-	key.vlan_id = ctx->vlan_tci & 0xfff;
++	/* Prefer an inline VLAN header when both inline and skb metadata
++	 * representations are visible. HuaweiCloud virtio devices may deliver
++	 * either representation, or both at the same time.
++	 */
++	if (eth->h_proto == bpf_htons(ETH_P_8021Q) ||
++	    eth->h_proto == bpf_htons(ETH_P_8021AD)) {
++		struct hwc_vlan_hdr *vlan = (void *)(eth + 1);
++
++		if ((void *)(vlan + 1) > data_end)
++			return DROP_INVALID;
++		vlan_id = bpf_ntohs(vlan->tci) & 0x0fff;
++		inline_vlan = true;
++	} else if (ctx->vlan_present) {
++		vlan_id = ctx->vlan_tci & 0x0fff;
++	} else {
++		return CTX_ACT_OK;
++	}
++
++	key.vlan_id = vlan_id;
+ 	key.mac[0] = eth->h_dest[0];
+ 	key.mac[1] = eth->h_dest[1];
+ 	key.mac[2] = eth->h_dest[2];
+@@ -122,6 +147,11 @@ hwc_from_netdev(struct __ctx_buff *ctx)
+ 	ep = map_lookup_elem(&cilium_hwc_vlan_mac, &key);
+ 	if (!ep)
+ 		return CTX_ACT_OK;
++	*handled = true;
++
++	metadata_vlan = ctx->vlan_present;
++	if (inline_vlan && metadata_vlan && skb_vlan_pop(ctx) < 0)
++		return DROP_HWC_VLAN_POP_FAIL;
+ 
+ 	if (skb_vlan_pop(ctx) < 0)
+ 		return DROP_HWC_VLAN_POP_FAIL;
+-- 
+2.43.0

@@ -1,1 +1,15 @@
-0001-huaweicloud-add-production-SubENI-IPAM-and-datapath-.patch
+0001-huaweicloud-control-plane.patch
+0002-huaweicloud-datapath-runtime.patch
+0003-huaweicloud-generated-tests-dependencies.patch
+0004-images-fix-operator-runtime-command-expansion.patch
+0005-images-retain-variant-operator-binary-for-Helm-comma.patch
+0006-huaweicloud-support-subnet-selection-by-tags.patch
+0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
+0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
+0009-huaweicloud-require-external-operator-credentials.patch
+0010-huaweicloud-populate-subnet-available-addresses.patch
+0011-huaweicloud-honor-min-allocate-from-CNI-config.patch
+0012-kube-proxy-honor-explicit-NodePort-disable-in-probe.patch
+0013-huaweicloud-set-endpoint-route-source-to-cilium-host.patch
+0014-huaweicloud-preserve-local-service-source-semantics.patch
+0015-fix-huaweicloud-consolidate-validation-bug-fixes.patch

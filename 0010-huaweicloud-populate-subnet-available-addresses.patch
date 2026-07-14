@@ -1,0 +1,445 @@
+From 9a065ee01dd7a5018fb9b782eef798d810ee562e Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 20:22:56 +0800
+Subject: [PATCH] huaweicloud: populate subnet available addresses
+
+---
+ pkg/huaweicloud/api/api.go                  |  38 ++++-
+ pkg/huaweicloud/api/subnet_capacity.go      |  97 ++++++++++++
+ pkg/huaweicloud/api/subnet_capacity_test.go | 167 ++++++++++++++++++++
+ pkg/huaweicloud/eni/instances.go            |   4 +-
+ pkg/huaweicloud/eni/instances_test.go       |  47 ++++--
+ 5 files changed, 330 insertions(+), 23 deletions(-)
+ create mode 100644 pkg/huaweicloud/api/subnet_capacity.go
+ create mode 100644 pkg/huaweicloud/api/subnet_capacity_test.go
+
+diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
+index c67436d9..ffc692a0 100644
+--- a/pkg/huaweicloud/api/api.go
++++ b/pkg/huaweicloud/api/api.go
+@@ -604,6 +604,10 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+ 	}
++	availableAddresses, err := c.getSubnetAvailableAddresses(ctx, vpcID)
++	if err != nil {
++		return nil, err
++	}
+ 	request := &vpcmodel.ListVirsubnetsRequest{}
+ 	limit := int32(2000)
+ 	request.Limit = &limit
+@@ -621,12 +625,15 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+ 		}
+ 		if response.Virsubnets != nil {
+ 			for _, item := range *response.Virsubnets {
+-				gatewayIP, subnetCIDR := selectIPv4SubnetCIDRAndGateway(item.SubnetCidrs, "")
+-				subnet := &ipamTypes.Subnet{ID: item.Id, Name: item.Name, VirtualNetworkID: item.VpcId, AvailabilityZone: item.ZoneId, GatewayIP: gatewayIP, Tags: parseResponseTags(item.Tags)}
+-				if _, parsedCIDR, err := net.ParseCIDR(subnetCIDR); err == nil {
+-					subnet.CIDR = cidr.NewCIDR(parsedCIDR)
++				available, ok := availableAddresses[item.Id]
++				if !ok {
++					return nil, fmt.Errorf("available address count missing for subnet %s", item.Id)
+ 				}
+-				result[subnet.ID] = subnet
++				subnet, err := newIPAMSubnet(item, available)
++				if err != nil {
++					return nil, err
++				}
++				result[item.Id] = subnet
+ 			}
+ 		}
+ 		request.Marker = nextMarker(response.PageInfo)
+@@ -636,6 +643,27 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+ 	}
+ }
+ 
++func newIPAMSubnet(item vpcmodel.Virsubnet, availableAddresses int) (*ipamTypes.Subnet, error) {
++	if availableAddresses < 0 {
++		return nil, fmt.Errorf("invalid available address count %d for subnet %s", availableAddresses, item.Id)
++	}
++
++	gatewayIP, subnetCIDR := selectIPv4SubnetCIDRAndGateway(item.SubnetCidrs, "")
++	subnet := &ipamTypes.Subnet{
++		ID:                 item.Id,
++		Name:               item.Name,
++		VirtualNetworkID:   item.VpcId,
++		AvailabilityZone:   item.ZoneId,
++		GatewayIP:          gatewayIP,
++		AvailableAddresses: availableAddresses,
++		Tags:               parseResponseTags(item.Tags),
++	}
++	if _, parsedCIDR, err := net.ParseCIDR(subnetCIDR); err == nil {
++		subnet.CIDR = cidr.NewCIDR(parsedCIDR)
++	}
++	return subnet, nil
++}
++
+ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error) {
+ 	if err := ctx.Err(); err != nil {
+ 		return nil, err
+diff --git a/pkg/huaweicloud/api/subnet_capacity.go b/pkg/huaweicloud/api/subnet_capacity.go
+new file mode 100644
+index 00000000..4b57d0ac
+--- /dev/null
++++ b/pkg/huaweicloud/api/subnet_capacity.go
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/def"
++)
++
++type listSubnetsV2Request struct {
++	Limit  *int32  `json:"limit,omitempty"`
++	Marker *string `json:"marker,omitempty"`
++	VPCID  *string `json:"vpc_id,omitempty"`
++}
++
++type listSubnetsV2Response struct {
++	Subnets        *[]subnetCapacity `json:"subnets,omitempty"`
++	HttpStatusCode int               `json:"-"`
++}
++
++type subnetCapacity struct {
++	ID                      string `json:"id"`
++	AvailableIPAddressCount int32  `json:"available_ip_address_count"`
++}
++
++func listSubnetsV2RequestDef() *def.HttpRequestDef {
++	builder := def.NewHttpRequestDefBuilder().
++		WithMethod(http.MethodGet).
++		WithPath("/v1/{project_id}/subnets").
++		WithResponse(new(listSubnetsV2Response)).
++		WithContentType("application/json")
++	builder.WithRequestField(def.NewFieldDef().
++		WithName("Limit").
++		WithJsonTag("limit").
++		WithLocationType(def.Query))
++	builder.WithRequestField(def.NewFieldDef().
++		WithName("Marker").
++		WithJsonTag("marker").
++		WithLocationType(def.Query))
++	builder.WithRequestField(def.NewFieldDef().
++		WithName("VPCID").
++		WithJsonTag("vpc_id").
++		WithLocationType(def.Query))
++	return builder.Build()
++}
++
++func (c *Client) getSubnetAvailableAddresses(ctx context.Context, vpcID string) (map[string]int, error) {
++	const pageSize = int32(2000)
++	request := &listSubnetsV2Request{Limit: int32Ptr(pageSize)}
++	if vpcID != "" {
++		request.VPCID = stringPtr(vpcID)
++	}
++
++	result := map[string]int{}
++	for {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		c.limiter.Limit(ctx, "ListSubnets")
++		responseValue, err := c.vpcClient.HcClient.Sync(request, listSubnetsV2RequestDef())
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		response, ok := responseValue.(*listSubnetsV2Response)
++		if !ok || response == nil {
++			return nil, fmt.Errorf("unexpected ListSubnets response type %T", responseValue)
++		}
++
++		var subnets []subnetCapacity
++		if response.Subnets != nil {
++			subnets = *response.Subnets
++		}
++		for _, subnet := range subnets {
++			if subnet.ID == "" {
++				return nil, fmt.Errorf("ListSubnets returned an empty subnet ID")
++			}
++			if subnet.AvailableIPAddressCount < 0 {
++				return nil, fmt.Errorf("invalid available address count %d for subnet %s", subnet.AvailableIPAddressCount, subnet.ID)
++			}
++			result[subnet.ID] = int(subnet.AvailableIPAddressCount)
++		}
++
++		if len(subnets) < int(pageSize) {
++			return result, nil
++		}
++		marker := subnets[len(subnets)-1].ID
++		request.Marker = &marker
++	}
++}
++
++func int32Ptr(value int32) *int32 { return &value }
++
++func stringPtr(value string) *string { return &value }
+diff --git a/pkg/huaweicloud/api/subnet_capacity_test.go b/pkg/huaweicloud/api/subnet_capacity_test.go
+new file mode 100644
+index 00000000..7b9c65f4
+--- /dev/null
++++ b/pkg/huaweicloud/api/subnet_capacity_test.go
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth"
++	hwVPC "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3"
++	vpcmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/model"
++
++	"github.com/cilium/cilium/pkg/api/helpers"
++)
++
++func TestListSubnetsV2ResponseDecodesAvailableAddresses(t *testing.T) {
++	var response listSubnetsV2Response
++	err := json.Unmarshal([]byte(`{
++		"subnets": [
++			{"id": "subnet-empty", "available_ip_address_count": 0},
++			{"id": "subnet-ready", "available_ip_address_count": 37}
++		]
++	}`), &response)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if response.Subnets == nil || len(*response.Subnets) != 2 {
++		t.Fatalf("unexpected subnets response: %#v", response.Subnets)
++	}
++	if got := (*response.Subnets)[0].AvailableIPAddressCount; got != 0 {
++		t.Fatalf("unexpected empty subnet capacity: %d", got)
++	}
++	if got := (*response.Subnets)[1].AvailableIPAddressCount; got != 37 {
++		t.Fatalf("available address count was not decoded: %d", got)
++	}
++}
++
++func TestGetSubnetAvailableAddressesUsesV2SubnetAPI(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v1/project-1/subnets" {
++			t.Errorf("unexpected request path: %s", r.URL.Path)
++			http.NotFound(w, r)
++			return
++		}
++		if got := r.URL.Query().Get("vpc_id"); got != "vpc-1" {
++			t.Errorf("unexpected vpc_id: %q", got)
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = fmt.Fprint(w, `{
++			"subnets": [
++				{"id": "subnet-empty", "available_ip_address_count": 0},
++				{"id": "subnet-ready", "available_ip_address_count": 37}
++			]
++		}`)
++	}))
++	defer server.Close()
++
++	client := newTestClient(t, server.URL)
++
++	got, err := client.getSubnetAvailableAddresses(context.Background(), "vpc-1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got["subnet-empty"] != 0 || got["subnet-ready"] != 37 || len(got) != 2 {
++		t.Fatalf("unexpected available address map: %#v", got)
++	}
++}
++
++func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/v1/project-1/subnets":
++			_, _ = fmt.Fprint(w, `{
++				"subnets": [
++					{"id": "subnet-empty", "available_ip_address_count": 0},
++					{"id": "subnet-ready", "available_ip_address_count": 37}
++				]
++			}`)
++		case "/v3/project-1/vpc/virsubnets":
++			_, _ = fmt.Fprint(w, `{
++				"virsubnets": [
++					{"id": "subnet-empty", "name": "empty", "vpc_id": "vpc-1", "zone_id": "az-1", "subnet_cidrs": []},
++					{"id": "subnet-ready", "name": "ready", "vpc_id": "vpc-1", "zone_id": "az-1", "subnet_cidrs": [{"ip_version": "4", "cidr": "10.0.0.0/24", "gateway_ip": "10.0.0.1"}]}
++				]
++			}`)
++		default:
++			t.Errorf("unexpected request path: %s", r.URL.Path)
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	client := newTestClient(t, server.URL)
++	subnets, err := client.GetSubnets(context.Background(), "vpc-1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if subnets["subnet-empty"].AvailableAddresses != 0 {
++		t.Fatalf("unexpected empty subnet capacity: %#v", subnets["subnet-empty"])
++	}
++	if subnets["subnet-ready"].AvailableAddresses != 37 {
++		t.Fatalf("available addresses were not populated: %#v", subnets["subnet-ready"])
++	}
++}
++
++func newTestClient(t *testing.T, endpoint string) *Client {
++	t.Helper()
++	credentials, err := auth.NewBasicCredentialsBuilder().
++		WithAk("test-ak").
++		WithSk("test-sk").
++		WithProjectId("project-1").
++		SafeBuild()
++	if err != nil {
++		t.Fatal(err)
++	}
++	hcClient, err := hwVPC.VpcClientBuilder().
++		WithEndpoint(endpoint).
++		WithCredential(credentials).
++		SafeBuild()
++	if err != nil {
++		t.Fatal(err)
++	}
++	return &Client{
++		vpcClient: hwVPC.NewVpcClient(hcClient),
++		limiter:   helpers.NewApiLimiter(noOpRateLimitMetrics{}, 20, 40),
++	}
++}
++
++func TestNewIPAMSubnetSetsAvailableAddresses(t *testing.T) {
++	item := vpcmodel.Virsubnet{
++		Id:     "subnet-1",
++		Name:   "pod-subnet",
++		VpcId:  "vpc-1",
++		ZoneId: "az-1",
++		SubnetCidrs: []vpcmodel.SubnetCidr{{
++			IpVersion: "4",
++			Cidr:      "10.0.0.0/24",
++			GatewayIp: "10.0.0.1",
++		}},
++	}
++
++	subnet, err := newIPAMSubnet(item, 23)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if subnet.AvailableAddresses != 23 {
++		t.Fatalf("unexpected available addresses: %d", subnet.AvailableAddresses)
++	}
++	if subnet.ID != item.Id || subnet.VirtualNetworkID != item.VpcId || subnet.AvailabilityZone != item.ZoneId {
++		t.Fatalf("unexpected subnet conversion: %#v", subnet)
++	}
++	if subnet.CIDR == nil || subnet.CIDR.String() != "10.0.0.0/24" || subnet.GatewayIP != "10.0.0.1" {
++		t.Fatalf("unexpected IPv4 metadata: %#v", subnet)
++	}
++}
++
++func TestNewIPAMSubnetRejectsNegativeAvailableAddresses(t *testing.T) {
++	if _, err := newIPAMSubnet(vpcmodel.Virsubnet{Id: "subnet-1"}, -1); err == nil {
++		t.Fatal("expected negative available address count to be rejected")
++	}
++}
+diff --git a/pkg/huaweicloud/eni/instances.go b/pkg/huaweicloud/eni/instances.go
+index 9e4ca160..a60a02a6 100644
+--- a/pkg/huaweicloud/eni/instances.go
++++ b/pkg/huaweicloud/eni/instances.go
+@@ -209,7 +209,7 @@ func (m *InstancesManager) FindOneSubnet(spec eniTypes.Spec, toAllocate int) *ip
+ 		if subnet.AvailabilityZone != spec.AvailabilityZone {
+ 			continue
+ 		}
+-		if subnet.AvailableAddresses > 0 && subnet.AvailableAddresses < toAllocate {
++		if subnet.AvailableAddresses < toAllocate {
+ 			continue
+ 		}
+ 		if len(spec.SubnetTags) > 0 && !subnet.Tags.Match(spec.SubnetTags) {
+@@ -232,7 +232,7 @@ func (m *InstancesManager) findSubnetByIDs(spec eniTypes.Spec, toAllocate int) *
+ 		if subnet.VirtualNetworkID != spec.VPCID || subnet.AvailabilityZone != spec.AvailabilityZone {
+ 			continue
+ 		}
+-		if subnet.AvailableAddresses > 0 && subnet.AvailableAddresses < toAllocate {
++		if subnet.AvailableAddresses < toAllocate {
+ 			continue
+ 		}
+ 		for _, subnetID := range spec.Subnets {
+diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
+index 6ccb4529..c27c81bb 100644
+--- a/pkg/huaweicloud/eni/instances_test.go
++++ b/pkg/huaweicloud/eni/instances_test.go
+@@ -13,22 +13,6 @@ import (
+ 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ )
+ 
+-func TestFindOneSubnetAcceptsUnknownCapacity(t *testing.T) {
+-	api := mock.NewAPI(
+-		[]*ipamTypes.Subnet{{ID: "subnet-1", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1"}},
+-		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
+-	)
+-	manager := NewInstancesManager(api, "vpc-1", nil)
+-	if manager.Resync(context.Background()).IsZero() {
+-		t.Fatal("resync failed")
+-	}
+-
+-	got := manager.FindOneSubnet(eniTypes.Spec{VPCID: "vpc-1", AvailabilityZone: "az-1"}, 1)
+-	if got == nil || got.ID != "subnet-1" {
+-		t.Fatalf("unexpected subnet: %#v", got)
+-	}
+-}
+-
+ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
+ 	api := mock.NewAPI(
+ 		[]*ipamTypes.Subnet{
+@@ -62,6 +46,37 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
+ 	}
+ }
+ 
++func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *testing.T) {
++	api := mock.NewAPI(
++		[]*ipamTypes.Subnet{
++			{ID: "subnet-empty", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 0},
++			{ID: "subnet-small", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 2},
++			{ID: "subnet-ready", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 5},
++			{ID: "subnet-best", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 12},
++			{ID: "subnet-other-az", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-2", AvailableAddresses: 100},
++		},
++		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
++	)
++	manager := NewInstancesManager(api, "vpc-1", nil)
++	if manager.Resync(context.Background()).IsZero() {
++		t.Fatal("resync failed")
++	}
++
++	got := manager.FindOneSubnet(eniTypes.Spec{VPCID: "vpc-1", AvailabilityZone: "az-1"}, 3)
++	if got == nil || got.ID != "subnet-best" {
++		t.Fatalf("expected subnet-best, got %#v", got)
++	}
++
++	got = manager.FindOneSubnet(eniTypes.Spec{
++		VPCID:            "vpc-1",
++		AvailabilityZone: "az-1",
++		Subnets:          []string{"subnet-empty", "subnet-small"},
++	}, 3)
++	if got != nil {
++		t.Fatalf("expected no explicit subnet with sufficient capacity, got %#v", got)
++	}
++}
++
+ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
+ 	api := mock.NewAPI(nil, nil, nil)
+ 	api.SetPortSecurityGroups("trunk-1", []string{"sg-1", "sg-2"})
+-- 
+2.43.0
+
