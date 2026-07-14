@@ -1,11 +1,11 @@
-From a8e44ef945c9133fec50824e7383c40824b2cceb Mon Sep 17 00:00:00 2001
-From: lchany <lchany@users.noreply.github.com>
-Date: Wed, 15 Jul 2026 07:00:42 +0800
+From 596cd3a1366b8e9e2451e3857ba9f0a2089f7339 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-8564-1.novalocal>
+Date: Wed, 15 Jul 2026 07:53:17 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
  bpf/lib/huaweicloud.h                         |   69 +-
- bpf/tests/huaweicloud_test.c                  |  322 ++++++
+ bpf/tests/huaweicloud_test.c                  |  322 +++++
  daemon/cmd/kube_proxy_replacement.go          |   19 +
  daemon/cmd/kube_proxy_replacement_test.go     |   35 +
  .../templates/cilium-operator/_helpers.tpl    |   15 +
@@ -23,15 +23,15 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  .../huaweicloud_subeni_privileged_test.go     |  292 +++++
  .../huaweicloud_subeni_test.go                |  221 ++++
  pkg/huaweicloud/api/api.go                    |  497 ++++++--
- pkg/huaweicloud/api/api_boundary_test.go      |  718 ++++++++++++
+ pkg/huaweicloud/api/api_boundary_test.go      |  718 +++++++++++
  pkg/huaweicloud/api/error_test.go             |   58 +
  pkg/huaweicloud/api/subnet_capacity.go        |   42 +-
  pkg/huaweicloud/api/subnet_capacity_test.go   |  203 +++-
  pkg/huaweicloud/eni/instances.go              |   36 +-
- pkg/huaweicloud/eni/instances_test.go         | 1009 ++++++++++++++++-
+ pkg/huaweicloud/eni/instances_test.go         | 1058 ++++++++++++++++-
  pkg/huaweicloud/eni/node.go                   |  166 ++-
  pkg/huaweicloud/metadata/metadata.go          |   83 +-
- .../metadata/metadata_privileged_test.go      |   64 ++
+ .../metadata/metadata_privileged_test.go      |   64 +
  pkg/huaweicloud/metadata/metadata_test.go     |  216 ++++
  pkg/huaweicloud/subenimap/manager.go          |  371 +++++-
  .../subenimap/manager_privileged_test.go      |   95 ++
@@ -44,7 +44,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/nodediscovery/nodediscovery.go            |   63 +-
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 40 files changed, 6410 insertions(+), 266 deletions(-)
+ 40 files changed, 6459 insertions(+), 266 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -4965,7 +4965,7 @@ index a60a02a64..fe30ba647 100644
  
  func (m *InstancesManager) FindSecurityGroupByTags(vpcID string, required ipamTypes.Tags) []*hwTypes.SecurityGroup {
 diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
-index c27c81bb0..d3afebf9d 100644
+index c27c81bb0..98ccc0ce2 100644
 --- a/pkg/huaweicloud/eni/instances_test.go
 +++ b/pkg/huaweicloud/eni/instances_test.go
 @@ -5,14 +5,108 @@ package eni
@@ -5077,7 +5077,7 @@ index c27c81bb0..d3afebf9d 100644
  func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
  	api := mock.NewAPI(
  		[]*ipamTypes.Subnet{
-@@ -46,6 +140,67 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
+@@ -46,6 +140,116 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
  	}
  }
  
@@ -5118,6 +5118,55 @@ index c27c81bb0..d3afebf9d 100644
 +	}
 +}
 +
++func TestFindOneSubnetMatchesEmptyAndSpecialTagValuesExactly(t *testing.T) {
++	const specialValue = "prod:=+_./@-"
++	api := mock.NewAPI(
++		[]*ipamTypes.Subnet{
++			{
++				ID:                 "exact",
++				VirtualNetworkID:   "vpc-1",
++				AvailabilityZone:   "az-1",
++				AvailableAddresses: 5,
++				Tags: ipamTypes.Tags{
++					"empty-value":           "",
++					"team.example.com/role": specialValue,
++				},
++			},
++			{
++				ID:                 "missing-empty-key",
++				VirtualNetworkID:   "vpc-1",
++				AvailabilityZone:   "az-1",
++				AvailableAddresses: 100,
++				Tags: ipamTypes.Tags{
++					"team.example.com/role": specialValue,
++				},
++			},
++		},
++		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
++	)
++	manager := NewInstancesManager(api, "vpc-1", nil)
++	if manager.Resync(context.Background()).IsZero() {
++		t.Fatal("resync failed")
++	}
++
++	spec := eniTypes.Spec{
++		VPCID:            "vpc-1",
++		AvailabilityZone: "az-1",
++		SubnetTags: map[string]string{
++			"empty-value":           "",
++			"team.example.com/role": specialValue,
++		},
++	}
++	if got := manager.FindOneSubnet(spec, 1); got == nil || got.ID != "exact" {
++		t.Fatalf("empty and special tag values selected unexpected subnet: %#v", got)
++	}
++
++	spec.SubnetTags["team.example.com/role"] = specialValue + "-different"
++	if got := manager.FindOneSubnet(spec, 1); got != nil {
++		t.Fatalf("non-exact special tag value selected subnet %#v", got)
++	}
++}
++
 +func TestFindOneSubnetTreatsNilAndEmptyTagsIdentically(t *testing.T) {
 +	api := mock.NewAPI(
 +		[]*ipamTypes.Subnet{
@@ -5145,7 +5194,7 @@ index c27c81bb0..d3afebf9d 100644
  func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *testing.T) {
  	api := mock.NewAPI(
  		[]*ipamTypes.Subnet{
-@@ -77,6 +232,89 @@ func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *test
+@@ -77,6 +281,89 @@ func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *test
  	}
  }
  
@@ -5235,7 +5284,7 @@ index c27c81bb0..d3afebf9d 100644
  func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
  	api := mock.NewAPI(nil, nil, nil)
  	api.SetPortSecurityGroups("trunk-1", []string{"sg-1", "sg-2"})
-@@ -91,9 +329,117 @@ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
+@@ -91,9 +378,117 @@ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
  	}
  }
  
@@ -5354,7 +5403,7 @@ index c27c81bb0..d3afebf9d 100644
  		subENIs: map[string]eniTypes.SubENI{
  			"eni-c": {ID: "eni-c", PrivateIPAddress: "172.31.1.30"},
  			"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.10"},
-@@ -108,3 +454,664 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
+@@ -108,3 +503,664 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
  		}
  	}
  }

@@ -7,7 +7,7 @@
 | BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit60：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `6fab161f8`、tree `e1d395fc4`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，audit81 0015 SHA256 `0737c4a7...`，干净重放 tree 与最终源码 `d116bd05...` 完全一致 |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix/验证测试统一为 0015；`series` 与目录均为 15 项，audit87 0015 SHA256 `b84beaca...`，干净重放 tree 与最终源码 `5deb2c9a...` 完全一致 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit60 干净回放：受影响 endpointmanager/metadata 普通、race、privileged 定向测试通过；endpointmanager 全包普通/race 单轮通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
@@ -97,7 +97,7 @@
 | IPAM-03 | P0/R | 四 worker 并发分配 | Pass | 两个 DaemonSet 并发形成 8 Pod/4 worker，全部 Ready |
 | IPAM-04 | P0/R | 按标签选择同 AZ 子网 | Pass | `TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs` 验证 VPC/AZ 过滤后按标签选择；连续 10 轮通过 |
 | IPAM-05 | P0/R | 多标签 AND | Pass | `TestFindOneSubnetTagConjunctionNoMatchAndMultipleCandidates` 使用 role+environment 两标签，排除任一部分匹配与错 AZ 子网，100 次均选中完整 AND 匹配且容量最高项；audit81 全包 10 轮通过 |
-| IPAM-06 | P1/R | 空标签值、特殊字符标签 | Pending | 待执行 |
+| IPAM-06 | P1/R | 空标签值、特殊字符标签 | Pass | audit87 新增精确匹配测试：要求值为空时，缺少 key 的高容量子网不得被当作空值匹配；含 `:=+_./@-` 的 key/value 仅按 opaque 字符串精确匹配。定向100轮、race20轮、ENI/full HuaweiCloud 普通与 race 各10轮及 vet 通过 |
 | IPAM-07 | P0/R | 标签无匹配 | Pass | 同一 AND 标签测试将 environment 改为不存在值，即使有 role 部分匹配也稳定返回 nil，不错选高容量子网；audit81 全包 10 轮通过 |
 | IPAM-08 | P0/R | 显式 subnet ID | Pass | `TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs` 验证显式 ID 精确命中；连续 10 轮通过 |
 | IPAM-09 | P0/R | ID 与标签同时配置 | Pass | 同一测试配置冲突的 ID/标签并证明显式 ID 优先；连续 10 轮通过 |
@@ -290,7 +290,7 @@
 | CLEAN-07 | P0/R | 外部 Secret 处理 | Pass | audit80/audit82 验证自定义 Secret 引用、错 namespace 失败边界及 EXIT 恢复；最终仅原 `cilium-huaweicloud` 引用存在，两个临时 Secret 在相应 namespace 均不存在 |
 | CLEAN-08 | P0/R | 证据脱敏和归档 | Pass | 执行工作树与全 Git 历史高置信凭据扫描：私钥 PEM、AKIA 样式、内联云 SK 均 0 命中；`ANALYSIS` 无 `.out/.log/.tar/.key` 敏感原始件，仅归档脱敏结论和 `/tmp` 证据路径 |
 | CLEAN-09 | P1/R | 五节点最终健康检查 | Pass | audit60 全量回归后 5 Node Ready、5 Agent Ready/OK、Operator 1/1；Agent/BPF/测试源码三哈希一致，map stale=0、相关错误=0、DiskPressure=0，mesh/HTTP/TCP/源IP 全通过 |
-| CLEAN-10 | P1/R | 清理后 30 分钟复核 | Pending | 待执行 |
+| CLEAN-10 | P1/R | 清理后 30 分钟复核 | Pass | audit86 在 audit81 最终清理后 1801s 执行独立复核：5 Node/5 Agent/1 Operator 全 Ready 且 restart0，pool40、used-outside0、operator error0、异常 Pod0、临时 Secret0、五节点独立表/永久 neighbor 完整，matrix 56/56 |
 | BMETA-01 | P0/S | OpenStack metadata `uuid` 为空 | Pass | 新增单测验证明确报错 |
 | BMETA-02 | P0/S | `vpc_id` 为空 | Pass | 新增单测验证明确报错 |
 | BMETA-03 | P0/S | `availability_zone` 为空 | Pass | 新增单测验证明确报错 |
