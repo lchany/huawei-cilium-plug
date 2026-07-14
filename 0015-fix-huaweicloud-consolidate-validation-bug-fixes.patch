@@ -1,6 +1,6 @@
-From 178dfca5b62fb8e6fb8c1c43ca98f38aa7189d55 Mon Sep 17 00:00:00 2001
+From a8896bb2e87620af22aac9daf80e82b08193a874 Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
-Date: Tue, 14 Jul 2026 18:21:36 +0800
+Date: Tue, 14 Jul 2026 19:29:31 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
@@ -19,8 +19,9 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/datapath/linux/routing/info_test.go       |  71 ++
  pkg/datapath/linux/routing/routing.go         | 277 ++++-
  pkg/datapath/linux/routing/routing_test.go    | 354 +++++++
- pkg/endpointmanager/huaweicloud_subeni.go     | 179 +++-
- .../huaweicloud_subeni_test.go                | 160 +++
+ pkg/endpointmanager/huaweicloud_subeni.go     | 208 +++-
+ .../huaweicloud_subeni_privileged_test.go     | 102 ++
+ .../huaweicloud_subeni_test.go                | 185 ++++
  pkg/huaweicloud/api/api.go                    | 406 +++++++-
  pkg/huaweicloud/api/api_boundary_test.go      | 695 +++++++++++++
  pkg/huaweicloud/api/error_test.go             |  58 ++
@@ -30,6 +31,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/huaweicloud/eni/instances_test.go         | 964 +++++++++++++++++-
  pkg/huaweicloud/eni/node.go                   | 164 ++-
  pkg/huaweicloud/metadata/metadata.go          |  83 +-
+ .../metadata/metadata_privileged_test.go      |  64 ++
  pkg/huaweicloud/metadata/metadata_test.go     | 216 ++++
  pkg/huaweicloud/subenimap/manager.go          | 371 ++++++-
  .../subenimap/manager_privileged_test.go      |  95 ++
@@ -42,12 +44,14 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/nodediscovery/nodediscovery.go            |  63 +-
  plugins/cilium-cni/types/types.go             | 118 ++-
  plugins/cilium-cni/types/types_test.go        |  49 +
- 38 files changed, 5630 insertions(+), 226 deletions(-)
+ 40 files changed, 5846 insertions(+), 230 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
+ create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_test.go
  create mode 100644 pkg/huaweicloud/api/api_boundary_test.go
  create mode 100644 pkg/huaweicloud/api/error_test.go
+ create mode 100644 pkg/huaweicloud/metadata/metadata_privileged_test.go
  create mode 100644 pkg/huaweicloud/metadata/metadata_test.go
  create mode 100644 pkg/huaweicloud/subenimap/manager_privileged_test.go
 
@@ -1819,10 +1823,14 @@ index f4f81a673..123ca1323 100644
  	ipWithMask := &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
  	rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
 diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
-index f357fafe7..1cffa4bb8 100644
+index f357fafe7..d1e5ec537 100644
 --- a/pkg/endpointmanager/huaweicloud_subeni.go
 +++ b/pkg/endpointmanager/huaweicloud_subeni.go
-@@ -7,6 +7,7 @@ import (
+@@ -4,9 +4,11 @@
+ package endpointmanager
+ 
+ import (
++	"bytes"
  	"context"
  	"fmt"
  	"net"
@@ -1830,7 +1838,7 @@ index f357fafe7..1cffa4bb8 100644
  
  	"github.com/sirupsen/logrus"
  	"github.com/vishvananda/netlink"
-@@ -26,16 +27,33 @@ import (
+@@ -26,16 +28,34 @@ import (
  var huaweiCloudSubENILog = logging.DefaultLogger.WithField(logfields.LogSubsys, "endpointmanager-huaweicloud-subeni")
  
  type subENIMapUpdater interface {
@@ -1843,13 +1851,14 @@ index f357fafe7..1cffa4bb8 100644
  type huaweiCloudSubENISubscriber struct {
 -	logger *logrus.Entry
 -	mapMgr subENIMapUpdater
-+	logger      *logrus.Entry
-+	mapMgr      subENIMapUpdater
-+	mutex       sync.Mutex
-+	initialized bool
-+	pending     []pendingSubENIEvent
-+	cacheMutex  sync.RWMutex
-+	cache       map[string]subenimap.EndpointInfo
++	logger        *logrus.Entry
++	mapMgr        subENIMapUpdater
++	neighborMutex sync.Mutex
++	mutex         sync.Mutex
++	initialized   bool
++	pending       []pendingSubENIEvent
++	cacheMutex    sync.RWMutex
++	cache         map[string]subenimap.EndpointInfo
  }
  
 +type pendingSubENIEvent struct {
@@ -1866,7 +1875,7 @@ index f357fafe7..1cffa4bb8 100644
  type subENIEndpoint interface {
  	GetIPv4Address() string
  	GetID() uint64
-@@ -69,11 +87,42 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
+@@ -69,11 +89,38 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
  		return nil, fmt.Errorf("create HuaweiCloud SubENI map manager: %w", err)
  	}
  
@@ -1893,25 +1902,21 @@ index f357fafe7..1cffa4bb8 100644
 +			continue
 +		}
 +		if err := subscriber.ensureGatewayNeighbor(info); err != nil {
-+			subscriber.logger.WithError(err).WithFields(logrus.Fields{
-+				logfields.EndpointID: ep.GetID(),
-+				logfields.IPv4:       ep.GetIPv4Address(),
-+				"reason":             "initial-reconcile",
-+			}).Warn("Failed to install HuaweiCloud gateway neighbor entry")
++			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud gateway neighbor for endpoint %d: %w", ep.GetID(), err))
 +		}
 +		desired = append(desired, info)
 +	}
 +	if err := mapMgr.Reconcile(desired); err != nil {
 +		return cleanupOnError(fmt.Errorf("reconcile initial HuaweiCloud SubENI maps: %w", err))
- 	}
++	}
 +	for _, info := range desired {
 +		subscriber.cacheEndpointInfo(info)
-+	}
+ 	}
 +	subscriber.finishInitialization()
  
  	return func() {
  		mgr.Unsubscribe(subscriber)
-@@ -82,22 +131,66 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
+@@ -82,22 +129,66 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
  }
  
  func (s *huaweiCloudSubENISubscriber) EndpointCreated(ep *endpoint.Endpoint) {
@@ -1984,7 +1989,7 @@ index f357fafe7..1cffa4bb8 100644
  	if info == nil {
  		return
  	}
-@@ -106,7 +199,9 @@ func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ e
+@@ -106,7 +197,9 @@ func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ e
  			logfields.EndpointID: ep.GetID(),
  			logfields.IPv4:       ep.GetIPv4Address(),
  		}).Warn("Failed to delete HuaweiCloud SubENI BPF map entries")
@@ -1994,8 +1999,30 @@ index f357fafe7..1cffa4bb8 100644
  }
  
  func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
-@@ -135,7 +230,44 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reas
- 			logfields.IPv4:       ep.GetIPv4Address(),
+@@ -122,20 +215,62 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reas
+ 	if info == nil {
+ 		return
+ 	}
++	s.upsertEndpointInfo(info, ep.GetID(), ep.GetIPv4Address(), reason)
++}
++
++func (s *huaweiCloudSubENISubscriber) upsertEndpointInfo(info *huaweiCloudEndpointInfo, endpointID uint64, ipv4, reason string) {
+ 	if err := s.ensureGatewayNeighbor(info); err != nil {
+ 		s.logger.WithError(err).WithFields(logrus.Fields{
+-			logfields.EndpointID: ep.GetID(),
+-			logfields.IPv4:       ep.GetIPv4Address(),
++			logfields.EndpointID: endpointID,
++			logfields.IPv4:       ipv4,
+ 			"reason":             reason,
+ 		}).Warn("Failed to install HuaweiCloud gateway neighbor entry")
++		return
+ 	}
+ 	if err := s.mapMgr.OnEndpointReady(info); err != nil {
+ 		s.logger.WithError(err).WithFields(logrus.Fields{
+-			logfields.EndpointID: ep.GetID(),
+-			logfields.IPv4:       ep.GetIPv4Address(),
++			logfields.EndpointID: endpointID,
++			logfields.IPv4:       ipv4,
  			"reason":             reason,
  		}).Warn("Failed to upsert HuaweiCloud SubENI BPF map entries")
 +		return
@@ -2039,7 +2066,7 @@ index f357fafe7..1cffa4bb8 100644
  }
  
  func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint) (*huaweiCloudEndpointInfo, error) {
-@@ -152,11 +284,18 @@ func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint)
+@@ -152,11 +287,18 @@ func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint)
  }
  
  func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiCloudEndpointInfo, error) {
@@ -2059,7 +2086,7 @@ index f357fafe7..1cffa4bb8 100644
  	for _, subENI := range cn.Status.HuaweiCloud.SubENIs {
  		if subENI.PrivateIPAddress != ipv4 {
  			continue
-@@ -166,6 +305,9 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
+@@ -166,6 +308,9 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
  		if err != nil {
  			return nil, fmt.Errorf("parse HuaweiCloud SubENI MAC %q for %s: %w", subENI.MACAddress, ipv4, err)
  		}
@@ -2069,7 +2096,7 @@ index f357fafe7..1cffa4bb8 100644
  		var macArr [6]byte
  		copy(macArr[:], parsedMAC)
  
-@@ -177,8 +319,17 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
+@@ -177,8 +322,17 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
  		if err != nil {
  			return nil, fmt.Errorf("parse HuaweiCloud gateway IP %q for %s: %w", subENI.GatewayIP, ipv4, err)
  		}
@@ -2088,7 +2115,7 @@ index f357fafe7..1cffa4bb8 100644
  			ipv4:           ipv4,
  			id:             uint32(ep.GetID()),
  			ifIndex:        uint32(ep.GetIfIndex()),
-@@ -187,10 +338,10 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
+@@ -187,10 +341,10 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
  			gatewayIP:      gatewayIP,
  			gatewayMAC:     gatewayMAC,
  			trunkInterface: subENI.TrunkInterface,
@@ -2101,12 +2128,145 @@ index f357fafe7..1cffa4bb8 100644
  }
  
  func parseOptionalMAC(raw string) (net.HardwareAddr, error) {
+@@ -221,6 +375,24 @@ func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEnd
+ 		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
+ 	}
+ 
++	s.neighborMutex.Lock()
++	defer s.neighborMutex.Unlock()
++
++	neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		return fmt.Errorf("list neighbors on trunk interface %s: %w", info.trunkInterface, err)
++	}
++	for _, neighbor := range neighbors {
++		if neighbor.State&netlink.NUD_PERMANENT == 0 || !neighbor.IP.Equal(info.gatewayIP) {
++			continue
++		}
++		if !bytes.Equal(neighbor.HardwareAddr, info.gatewayMAC) {
++			return fmt.Errorf("permanent neighbor %s on trunk interface %s already uses MAC %s, conflicts with %s",
++				info.gatewayIP, info.trunkInterface, neighbor.HardwareAddr, info.gatewayMAC)
++		}
++		return nil
++	}
++
+ 	return netlink.NeighSet(&netlink.Neigh{
+ 		LinkIndex:    link.Attrs().Index,
+ 		Family:       netlink.FAMILY_V4,
+diff --git a/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go b/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
+new file mode 100644
+index 000000000..6f063d197
+--- /dev/null
++++ b/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++//go:build privileged_tests
++
++package endpointmanager
++
++import (
++	"bytes"
++	"net"
++	"strings"
++	"testing"
++
++	"github.com/vishvananda/netlink"
++)
++
++func testHuaweiCloudDummyLink(t *testing.T, name string) netlink.Link {
++	t.Helper()
++	attrs := netlink.NewLinkAttrs()
++	attrs.Name = name
++	link := &netlink.Dummy{LinkAttrs: attrs}
++	if err := netlink.LinkAdd(link); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = netlink.LinkDel(link) })
++	if err := netlink.LinkSetUp(link); err != nil {
++		t.Fatal(err)
++	}
++	return link
++}
++
++func testHuaweiCloudNeighbor(t *testing.T, link netlink.Link, ip net.IP) *netlink.Neigh {
++	t.Helper()
++	neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for i := range neighbors {
++		if neighbors[i].IP.Equal(ip) {
++			return &neighbors[i]
++		}
++	}
++	t.Fatalf("neighbor %s not found on %s", ip, link.Attrs().Name)
++	return nil
++}
++
++func TestEnsureGatewayNeighborRejectsPermanentMACConflict(t *testing.T) {
++	link := testHuaweiCloudDummyLink(t, "hwc-bmap15")
++	gateway := net.ParseIP("10.42.15.1").To4()
++	originalMAC, _ := net.ParseMAC("02:00:00:00:15:01")
++	conflictingMAC, _ := net.ParseMAC("02:00:00:00:15:02")
++	if err := netlink.NeighSet(&netlink.Neigh{
++		LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4,
++		State: netlink.NUD_PERMANENT, IP: gateway, HardwareAddr: originalMAC,
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	subscriber := &huaweiCloudSubENISubscriber{}
++	err := subscriber.ensureGatewayNeighbor(&huaweiCloudEndpointInfo{
++		gatewayIP: gateway, gatewayMAC: conflictingMAC, trunkInterface: link.Attrs().Name,
++	})
++	if err == nil || !strings.Contains(err.Error(), "conflicts") {
++		t.Fatalf("permanent MAC conflict was not rejected: %v", err)
++	}
++	if got := testHuaweiCloudNeighbor(t, link, gateway); !bytes.Equal(got.HardwareAddr, originalMAC) {
++		t.Fatalf("conflicting neighbor was modified: got %s want %s", got.HardwareAddr, originalMAC)
++	}
++}
++
++func TestEnsureGatewayNeighborScopesSameGatewayByLink(t *testing.T) {
++	firstLink := testHuaweiCloudDummyLink(t, "hwc-bmap16a")
++	secondLink := testHuaweiCloudDummyLink(t, "hwc-bmap16b")
++	gateway := net.ParseIP("10.42.16.1").To4()
++	firstMAC, _ := net.ParseMAC("02:00:00:00:16:01")
++	secondMAC, _ := net.ParseMAC("02:00:00:00:16:02")
++	subscriber := &huaweiCloudSubENISubscriber{}
++
++	first := &huaweiCloudEndpointInfo{
++		gatewayIP: gateway, gatewayMAC: firstMAC, trunkInterface: firstLink.Attrs().Name,
++	}
++	if err := subscriber.ensureGatewayNeighbor(first); err != nil {
++		t.Fatal(err)
++	}
++	if err := subscriber.ensureGatewayNeighbor(&huaweiCloudEndpointInfo{
++		gatewayIP: gateway, gatewayMAC: secondMAC, trunkInterface: firstLink.Attrs().Name,
++	}); err == nil || !strings.Contains(err.Error(), "conflicts") {
++		t.Fatalf("same-link gateway conflict was not rejected: %v", err)
++	}
++	if got := testHuaweiCloudNeighbor(t, firstLink, gateway); !bytes.Equal(got.HardwareAddr, firstMAC) {
++		t.Fatalf("first link neighbor changed: got %s want %s", got.HardwareAddr, firstMAC)
++	}
++
++	if err := subscriber.ensureGatewayNeighbor(&huaweiCloudEndpointInfo{
++		gatewayIP: gateway, gatewayMAC: secondMAC, trunkInterface: secondLink.Attrs().Name,
++	}); err != nil {
++		t.Fatalf("same gateway on a different trunk was rejected: %v", err)
++	}
++	if got := testHuaweiCloudNeighbor(t, secondLink, gateway); !bytes.Equal(got.HardwareAddr, secondMAC) {
++		t.Fatalf("second link neighbor MAC: got %s want %s", got.HardwareAddr, secondMAC)
++	}
++}
 diff --git a/pkg/endpointmanager/huaweicloud_subeni_test.go b/pkg/endpointmanager/huaweicloud_subeni_test.go
 new file mode 100644
-index 000000000..d2a8e51d4
+index 000000000..bd47d4ffd
 --- /dev/null
 +++ b/pkg/endpointmanager/huaweicloud_subeni_test.go
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,185 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -2128,11 +2288,13 @@ index 000000000..d2a8e51d4
 +
 +type fakeSubENIMapUpdater struct {
 +	deleted []subenimap.EndpointInfo
++	ready   []subenimap.EndpointInfo
 +	err     error
 +}
 +
 +func (f *fakeSubENIMapUpdater) Reconcile([]subenimap.EndpointInfo) error { return nil }
-+func (f *fakeSubENIMapUpdater) OnEndpointReady(subenimap.EndpointInfo) error {
++func (f *fakeSubENIMapUpdater) OnEndpointReady(info subenimap.EndpointInfo) error {
++	f.ready = append(f.ready, info)
 +	return nil
 +}
 +func (f *fakeSubENIMapUpdater) OnEndpointDelete(info subenimap.EndpointInfo) error {
@@ -2156,6 +2318,29 @@ index 000000000..d2a8e51d4
 +	}
 +	if err := subscriber.ensureGatewayNeighbor(info); err == nil || !strings.Contains(err.Error(), "resolve trunk interface") {
 +		t.Fatalf("nonexistent trunk did not fail closed: %v", err)
++	}
++}
++
++func TestGatewayNeighborFailureBlocksBPFMapUpdate(t *testing.T) {
++	mapMgr := &fakeSubENIMapUpdater{}
++	subscriber := &huaweiCloudSubENISubscriber{
++		logger: logging.DefaultLogger.WithField("test", t.Name()),
++		mapMgr: mapMgr,
++		cache:  map[string]subenimap.EndpointInfo{},
++	}
++	info := &huaweiCloudEndpointInfo{
++		ipv4:           "10.0.0.2",
++		id:             1,
++		gatewayIP:      net.ParseIP("10.0.0.1").To4(),
++		gatewayMAC:     net.HardwareAddr{0xfa, 0x16, 0x3e, 0, 0, 1},
++		trunkInterface: "cilium-test-nonexistent-trunk",
++	}
++	subscriber.upsertEndpointInfo(info, 1, info.ipv4, "test")
++	if len(mapMgr.ready) != 0 {
++		t.Fatalf("BPF map was updated after gateway neighbor failure: %d calls", len(mapMgr.ready))
++	}
++	if len(subscriber.cache) != 0 {
++		t.Fatalf("endpoint was cached after gateway neighbor failure: %#v", subscriber.cache)
 +	}
 +}
 +
@@ -5756,6 +5941,76 @@ index 41b7e9106..3c095086e 100644
 +	}
 +	return data, nil
  }
+diff --git a/pkg/huaweicloud/metadata/metadata_privileged_test.go b/pkg/huaweicloud/metadata/metadata_privileged_test.go
+new file mode 100644
+index 000000000..970a14fe9
+--- /dev/null
++++ b/pkg/huaweicloud/metadata/metadata_privileged_test.go
+@@ -0,0 +1,64 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++//go:build privileged_tests
++
++package metadata
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/vishvananda/netlink"
++)
++
++func TestGetTrunkInterfaceIDAfterExplicitLinkRename(t *testing.T) {
++	mac, err := net.ParseMAC("02:00:00:00:14:01")
++	if err != nil {
++		t.Fatal(err)
++	}
++	attrs := netlink.NewLinkAttrs()
++	attrs.Name = "hwc-meta-old"
++	attrs.HardwareAddr = mac
++	link := &netlink.Dummy{LinkAttrs: attrs}
++	if err := netlink.LinkAdd(link); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = netlink.LinkDel(link) })
++	if err := netlink.LinkSetUp(link); err != nil {
++		t.Fatal(err)
++	}
++
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		_, _ = fmt.Fprintf(w, `{"links":[{"vif_id":"stable-port-id","ethernet_mac_address":%q}]}`, mac)
++	}))
++	t.Cleanup(server.Close)
++	oldURL := metadataNetworkDataURL
++	metadataNetworkDataURL = server.URL
++	t.Cleanup(func() { metadataNetworkDataURL = oldURL })
++
++	got, err := GetTrunkInterfaceID(context.Background(), attrs.Name)
++	if err != nil || got != "stable-port-id" {
++		t.Fatalf("initial trunk lookup: port=%q err=%v", got, err)
++	}
++	if err := netlink.LinkSetDown(link); err != nil {
++		t.Fatal(err)
++	}
++	if err := netlink.LinkSetName(link, "hwc-meta-new"); err != nil {
++		t.Fatal(err)
++	}
++	if err := netlink.LinkSetUp(link); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := GetTrunkInterfaceID(context.Background(), attrs.Name); err == nil {
++		t.Fatal("stale trunk interface name was accepted after rename")
++	}
++	got, err = GetTrunkInterfaceID(context.Background(), "hwc-meta-new")
++	if err != nil || got != "stable-port-id" {
++		t.Fatalf("renamed trunk lookup: port=%q err=%v", got, err)
++	}
++}
 diff --git a/pkg/huaweicloud/metadata/metadata_test.go b/pkg/huaweicloud/metadata/metadata_test.go
 new file mode 100644
 index 000000000..fc49efd9c
