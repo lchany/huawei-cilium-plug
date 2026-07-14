@@ -260,11 +260,11 @@
 | UPG-03 | P0/C | `0008` 前→支持线内 VLAN | Pending | 待执行 |
 | UPG-04 | P0/C | values 凭据→`existingSecret` | Pending | 待执行 |
 | UPG-05 | P1/C | 新旧 Agent 短时混部 | Pass | audit64 五节点逐台升级每步mesh 56/56；audit66 进一步形成4台audit64+1台audit60真实混部，旧节点Agent Ready/OK且全向mesh 56/56，随后恢复audit64 |
-| UPG-06 | P1/C | 新旧 Operator 切换 | Pending | 待执行 |
+| UPG-06 | P1/C | 新旧 Operator 切换 | Pass | audit77 在 release=false 下实机 audit76→audit20→audit76；两侧均 1/1 Ready、restart0、severe0，切换后 mesh 各 56/56，完整 pool 资源映射不变 |
 | UPG-07 | P0/C | 同版本新 digest 滚动 | Pass | audit64 在DaemonSet镜像名保持`audit25b`不变时逐节点将manifest从audit60切换为audit64新digest；每步Agent哈希/状态和mesh通过，最终五节点imageID完全一致 |
 | UPG-08 | P0/C | Helm rollback | Pending | 待执行 |
 | UPG-09 | P0/C | Agent 镜像回滚 | Pass | audit66 node0004 将`audit25b`从audit64回指保留的audit60并重建Agent，旧哈希/完整BPF/状态OK且混部mesh 56/56；再回指audit64，路由/neighbor完整、五节点哈希一致且mesh 56/56 |
-| UPG-10 | P1/C | Operator 镜像回滚 | Pending | 待执行 |
+| UPG-10 | P1/C | Operator 镜像回滚 | Pass | audit77 五节点预置保留的 audit20 镜像后执行真实 Deployment 回滚及恢复；旧版窗口和恢复窗口均通过健康、数据面与 pool 恒等校验，最终 audit76 二进制 SHA256 精确匹配 |
 | UPG-11 | P1/C | 升级中单节点失败 | Pass | audit67 node0003 单节点因缺镜像进入ImagePullBackOff时其余4 Agent保持Ready，客户pod2→pod3持续20/20；恢复别名后该节点Agent Ready/OK、策略表/neighbor完整且全mesh 56/56 |
 | UPG-12 | P1/C | 回滚中途失败后继续 | Pending | 待执行 |
 | UPG-13 | P1/R | CRD 字段向前/向后兼容 | Pending | 待执行 |
