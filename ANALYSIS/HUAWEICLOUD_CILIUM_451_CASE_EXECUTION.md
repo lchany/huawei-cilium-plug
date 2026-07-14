@@ -88,7 +88,7 @@
 | API-14 | P1/S | batch 部分成功 | Pass | `TestValidateCreatedSubENIs/CreateResponsesAreValidatedBeforeFinalize` 覆盖短数组、nil、空 ID、重复 ID、过多结果并 fail closed；连续 10 轮通过 |
 | API-15 | P1/C | 打标签失败 | Pass | `TestFinalizeRollsBackAllCreatedSubENIsOnLastTagFailure` 验证末项标签失败后两个已创建 SubENI 均回滚；连续 10 轮通过 |
 | API-16 | P1/C | 回滚删除失败 | Pass | `TestRollbackReportsEveryDeleteFailure` 验证所有删除均尝试且两个资源 ID/失败均保留；连续 10 轮通过 |
-| API-17 | P1/R | API 最终一致性延迟 | Pending | 待执行 |
+| API-17 | P1/R | API 最终一致性延迟 | Pass | `waitSubENIActive` 单测注入 NotFound→BUILD→ACTIVE 并验证 timeout/context 边界；audit81 真实创建后 Show/List 可见，删除后轮询到 NotFound，最终云端集合与 pool 精确一致 |
 | API-18 | P1/C | endpoint/region/project 配错 | Pending | 待执行 |
 | API-19 | P1/R | API QPS/突发限制 | Pass | `TestHuaweiCloudAPIRateLimitBoundaries` 验证 burst 40 无等待、第 41 次按 20 QPS 限流并上报 delay；连续 10 轮通过 |
 | API-20 | P2/S | 错误码标准化矩阵 | Pass | `TestAPIHTTPErrorNormalization` 覆盖 400/401/403/404/429/500，`TestAPINetworkDisconnectIsReturned` 覆盖 transport error；连续 10 轮通过 |
@@ -96,14 +96,14 @@
 | IPAM-02 | P0/R | 同节点多个 Pod | Pass | 每个 worker 同时运行 2 个 matrix Pod，IP 唯一 |
 | IPAM-03 | P0/R | 四 worker 并发分配 | Pass | 两个 DaemonSet 并发形成 8 Pod/4 worker，全部 Ready |
 | IPAM-04 | P0/R | 按标签选择同 AZ 子网 | Pass | `TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs` 验证 VPC/AZ 过滤后按标签选择；连续 10 轮通过 |
-| IPAM-05 | P0/R | 多标签 AND | Pending | 待执行 |
+| IPAM-05 | P0/R | 多标签 AND | Pass | `TestFindOneSubnetTagConjunctionNoMatchAndMultipleCandidates` 使用 role+environment 两标签，排除任一部分匹配与错 AZ 子网，100 次均选中完整 AND 匹配且容量最高项；audit81 全包 10 轮通过 |
 | IPAM-06 | P1/R | 空标签值、特殊字符标签 | Pending | 待执行 |
-| IPAM-07 | P0/R | 标签无匹配 | Pending | 待执行 |
+| IPAM-07 | P0/R | 标签无匹配 | Pass | 同一 AND 标签测试将 environment 改为不存在值，即使有 role 部分匹配也稳定返回 nil，不错选高容量子网；audit81 全包 10 轮通过 |
 | IPAM-08 | P0/R | 显式 subnet ID | Pass | `TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs` 验证显式 ID 精确命中；连续 10 轮通过 |
 | IPAM-09 | P0/R | ID 与标签同时配置 | Pass | 同一测试配置冲突的 ID/标签并证明显式 ID 优先；连续 10 轮通过 |
 | IPAM-10 | P1/C | 显式 ID 属于其他 AZ | Pass | `TestFindOneSubnetExplicitOrderValidationAndFallback` 注入 wrong-AZ 显式项并拒绝后按序选择合法项；连续 10 轮通过 |
 | IPAM-11 | P1/C | 显式 ID 属于其他 VPC | Pass | 同一测试注入 wrong-VPC 显式项并拒绝后按序选择合法项；连续 10 轮通过 |
-| IPAM-12 | P1/R | 多个合格标签子网 | Pending | 待执行 |
+| IPAM-12 | P1/R | 多个合格标签子网 | Pass | AND 标签测试同时提供 5/9 两个完整匹配候选，内层 100 次均确定性选中可用地址 9 的子网；audit81 全包 10 轮通过 |
 | IPAM-13 | P1/C | 首选子网容量耗尽 | Pass | `TestFindOneSubnetExplicitOrderValidationAndFallback` 证明首项仅余 1、申请 3 时 fallback 到第二项；连续 10 轮通过 |
 | IPAM-14 | P1/C | 所有子网容量为 0 | Pass | `TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable` 覆盖所有显式候选 0/不足时返回 nil；连续 10 轮通过 |
 | IPAM-15 | P1/R | 容量未知 | Pass | `TestFindOneSubnetAllocationAndTieBoundaries` 将 `AvailableAddresses=-1` 视为未知/不可选，且合法容量不足时 fail closed；连续 10 轮通过 |
@@ -112,7 +112,7 @@
 | IPAM-18 | P0/R | 未配置 SG 时继承 trunk | Pass | `TestSecurityGroupsInheritedFromTrunkPort` 及 precedence 测试验证从 trunk 继承并规范化；连续 10 轮通过 |
 | IPAM-19 | P1/C | SG ID 无效/跨 VPC | Pending | 待执行 |
 | IPAM-20 | P1/R | 多安全组 | Pass | 显式、标签、trunk 三条路径均验证多 SG、去重和稳定排序，且 101 个超过云上限会 fail closed；连续 10 轮通过 |
-| IPAM-21 | P1/R | SubENI 资源标签 | Pending | 待执行 |
+| IPAM-21 | P1/R | SubENI 资源标签 | Pass | audit81 修复为 Create/BatchCreate 请求内联 tags，生产 Client 在 cn-south-1 真实单建和批建后 Show 精确返回两项预期资源标签，清理/恢复后无残留 |
 | IPAM-22 | P1/R | Agent-only 配置 | Pass | `TestApplyHuaweiCloudIPAMNetConf/NetConf` 验证空 CNI 字段不覆盖 Agent 已有水位、子网和 SG；连续 10 轮通过 |
 | IPAM-23 | P1/R | CNI-only 配置 | Pass | CNI standalone/conflist HuaweiCloud 解析及 apply 测试验证 CNI-only 字段进入节点配置；连续 10 轮通过 |
 | IPAM-24 | P1/R | Agent+CNI 字段级合并 | Pass | apply 测试验证 CNI 非空字段逐字段覆盖、空字段保留 Agent 值且深拷贝隔离；连续 10 轮通过 |
