@@ -117,7 +117,7 @@
 | IPAM-23 | P1/R | CNI-only 配置 | Pass | CNI standalone/conflist HuaweiCloud 解析及 apply 测试验证 CNI-only 字段进入节点配置；连续 10 轮通过 |
 | IPAM-24 | P1/R | Agent+CNI 字段级合并 | Pass | apply 测试验证 CNI 非空字段逐字段覆盖、空字段保留 Agent 值且深拷贝隔离；连续 10 轮通过 |
 | IPAM-25 | P1/C | CNI JSON 错误/字段类型错误 | Pass | CNI 边界套件覆盖重复 key、负水位、错误字段类型、非法 prevResult、oversize、缺失/重复 plugin；全套连续 10 轮通过 |
-| IPAM-26 | P0/R | `releaseExcessIPs=false` | Pending | 待执行 |
+| IPAM-26 | P0/R | `releaseExcessIPs=false` | Pass | audit74确认运行配置为false；五节点各并发新增2个Pod并删除后，等待210秒超过默认180秒释放延迟，40个SubENI/IP池条目的IP与resource映射逐项不变，未触发主动回收 |
 | IPAM-27 | P0/C | `releaseExcessIPs=true` | Pending | 待执行 |
 | IPAM-28 | P0/C | 在用 IP 保护 | Pending | 待执行 |
 | IPAM-29 | P1/C | 回收 Delete 失败 | Pass | `TestReleaseIPsStopsAtDeleteFailure` 验证第 2 次删除失败后停止，保留未删资源且提交此前成功删除；连续 10 轮通过 |
@@ -281,8 +281,8 @@
 | OBS-10 | P0/R | 敏感信息二次扫描 | Pass | rendered resources、Pod spec、Operator logs 均无凭据值 |
 | OBS-11 | P1/R | 证据目录权限 | Pass | 本地 `ANALYSIS` 为 root:root 0755，核心台账/证据为 root:root 0644；递归检查无 group/other-writable 目录或文件 |
 | OBS-12 | P1/R | 指标长期趋势 | Pending | 待执行 |
-| CLEAN-01 | P0/C | 删除测试 namespace | Pending | 待执行 |
-| CLEAN-02 | P0/C | `releaseExcessIPs=false` 下清理 | Pending | 待执行 |
+| CLEAN-01 | P0/C | 删除测试 namespace | Pass | audit74删除含10个跨五节点Pod的隔离namespace，42.506秒完成且namespace无残留；五个CiliumNode used状态逐项回到创建前基线，末尾mesh 56/56 |
+| CLEAN-02 | P0/C | `releaseExcessIPs=false` 下清理 | Pass | audit74在false配置下删除隔离namespace后等待210秒，五节点各8个、合计40个池条目的IP/resource清单与删除前完全一致；节点/Agent/Operator健康且无重启 |
 | CLEAN-03 | P0/C | `releaseExcessIPs=true` 下清理 | Pending | 待执行 |
 | CLEAN-04 | P0/R | 云端孤儿检查 | Pending | 待执行 |
 | CLEAN-05 | P0/R | 节点 route/map/neighbor 残留检查 | Pass | audit57 对 5 节点 CiliumNode/SubENI、endpoint、双 pinned map、priority 20/110/111 rule、VLAN 路由表和 permanent neighbor 做交叉审计；活跃表全部精确匹配，未引用表均为允许的完整 default+nexthop 保留对，stale=0、malformed=0 |
