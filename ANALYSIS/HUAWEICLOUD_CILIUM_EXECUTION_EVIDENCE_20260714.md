@@ -737,3 +737,9 @@ here. A failed or methodologically invalid probe is never counted as Pass.
 - Post-rollout customer acceptance passed all 21 HTTP scenarios at `100/100`, all four bidirectional TCP scenarios at `5/5`, and all 19 source-IP assertions. A corrected independent final audit—not the excluded earlier jq attempt—proved five Ready nodes, five Running Agents, Operator audit81 at 1/1, 40 pool entries, zero used addresses outside their pools, zero CiliumNode operator errors, zero recent severe/authentication log matches, and matrix `56/56`.
 - Evidence: `/tmp/audit81-production-client.out`, `/tmp/audit81-customer-http.out`, `/tmp/audit81-customer-tcp.out`, `/tmp/audit81-customer-sourceip.out`, and `/tmp/audit81-final-health.out`. Diagnostic endpoint-attribution runs are retained only as root-cause evidence and are not counted as acceptance passes.
 - This closes API-01, API-02, API-03, API-04, API-06, API-07, IPAM-34, and REC-19. The ledger is now 361 Pass, 85 Pending, 5 approved environment Skips, and 0 Fail.
+
+# Current-candidate Operator rollback and restore audit81
+
+- With `huawei-cloud-release-excess-ips=false`, the retained audit76 image and current audit81 image were exercised through a real `audit81 -> audit76 -> audit81` Deployment transition. Both rollout windows had exactly one Ready Operator, zero restarts, no recent severe reconciliation log matches, and matrix `56/56`.
+- The exact sorted CiliumNode pool mapping SHA256 remained `0202559d518c2e47dd0c758290b9171ae6d2e0e1298b9640b265cc322425799a` before rollback, after the audit76 window, and after restoring audit81. The cleanup trap left audit81 active. Evidence: `/tmp/audit81-operator-rollback-restore.out`.
+- This independently refreshes UPG-06/UPG-10 coverage for the current candidate and closes UPG-01. The ledger is now 362 Pass, 84 Pending, 5 approved environment Skips, and 0 Fail.

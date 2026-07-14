@@ -255,7 +255,7 @@
 | STAB-02 | P1/R | 24 小时 Pod churn | Pending | 待执行 |
 | STAB-03 | P2/R | 72 小时发布候选 | Pending | 待执行 |
 | STAB-04 | P2/R | 长时间无变更空闲 | Pending | 待执行 |
-| UPG-01 | P0/C | 旧候选→9 patch 候选滚动升级 | Pending | 待执行 |
+| UPG-01 | P0/C | 旧候选→当前 15 patch 候选滚动升级 | Pass | audit81 真实执行 audit76→audit81 Operator 滚动恢复；新候选 1/1 Ready、restart0、severe0，pool 映射不变，matrix 56/56；并额外执行 audit81→audit76→audit81 完整回滚闭环 |
 | UPG-02 | P0/C | `0007` 前共享表→独立表 | Pending | 待执行 |
 | UPG-03 | P0/C | `0008` 前→支持线内 VLAN | Pending | 待执行 |
 | UPG-04 | P0/C | values 凭据→`existingSecret` | Pending | 待执行 |
