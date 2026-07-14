@@ -157,17 +157,17 @@
 | BPF-08 | P1/R | map 容量接近上限 | Pending | 待执行 |
 | VLAN-01 | P0/R | skb VLAN metadata 入方向 | Pending | 待执行 |
 | VLAN-02 | P0/R | 线内 802.1Q 入方向 | Pass | audit61 两端 `eth0` 的 RX VLAN offload 均为 fixed-off；物理入口抓到 VLAN 1443/662 单层 802.1Q，20/20 ICMP 与20/20 HTTP 到达目标 Pod，内核抓包0丢包 |
-| VLAN-03 | P0/R | 线内 802.1ad 入方向 | Pending | 待执行 |
-| VLAN-04 | P0/R | 线内 VLAN 与 metadata 同时存在 | Pending | 待执行 |
+| VLAN-03 | P0/R | 线内 802.1ad 入方向 | Pass | audit59 内核 BPF_PROG_TEST_RUN 以真实 `ETH_P_8021AD` 线内帧进入 HuaweiCloud 解析路径，未知 VLAN 稳定 fail-closed；audit84 复核 20/20 完整迭代通过且无 FAIL |
+| VLAN-04 | P0/R | 线内 VLAN 与 metadata 同时存在 | Pass | audit59 内核 BPF 测试同时构造线内 802.1Q 与同 VLAN metadata，命中实际 map 后两种表示均仅 pop 一次，最终帧长/乙太类型正确；20/20 通过 |
 | VLAN-05 | P0/R | 只有一种 VLAN 表示 | Pass | audit61 现场 RX VLAN offload=fixed-off，入口 skb 仅有线内 802.1Q；目标 Pod 正常接收 ICMP/HTTP，结合 audit59 packet-level 最终 ethertype/长度断言证明单次 pop 不破坏内层报文 |
-| VLAN-06 | P0/R | 处理后 `vlan_present` 仍为旧值 | Pending | 待执行 |
+| VLAN-06 | P0/R | 处理后 `vlan_present` 仍为旧值 | Pass | 双表示内核测试在 `hwc_from_netdev` 前断言 metadata 存在，处理后断言 `vlan_present=false`；metadata 非 IPv4 分支亦验证 pop 后状态清零，20/20 通过 |
 | VLAN-07 | P0/R | 出方向 VLAN 添加 | Pass | audit61 两端 TX VLAN offload=fixed-off；`-Q out` 各抓10帧，pod2 帧为源 MAC `fa:16:3e:ba:13:19`/VLAN1443，pod3 帧为 `fa:16:3e:ba:13:d9`/VLAN662，均发往 trunk 网关 MAC 且10/10往返成功 |
 | VLAN-08 | P0/R | 入方向目标 MAC+VLAN 命中 | Pass | audit61 物理入口分别抓到目标 MAC+VLAN `fa:16:3e:ba:13:19+1443`、`fa:16:3e:ba:13:d9+662`；实时 pinned map 精确存在相同 key 并映射到 pod2/pod3 endpoint，流量成功投递 |
 | VLAN-09 | P1/C | VLAN 正确但 MAC 不匹配 | Pending | 待执行 |
 | VLAN-10 | P1/C | MAC 正确但 VLAN 不匹配 | Pending | 待执行 |
 | VLAN-11 | P1/C | 截断/非法 VLAN header | Pending | 待执行 |
 | VLAN-12 | P1/C | VLAN pop helper 失败 | Pending | 待执行 |
-| VLAN-13 | P1/O | 双层 QinQ | Pending | 待执行 |
+| VLAN-13 | P1/O | 双层 QinQ | Pass | audit59 真实内核 BPF 包级测试分别构造 802.1ad→802.1Q 双标签与三标签，两者均稳定 `DROP_INVALID`/handled=false；20/20 完整迭代通过 |
 | VLAN-14 | P1/R | 非 trunk 接口 VLAN 流量 | Pending | 待执行 |
 | VLAN-15 | P1/R | GSO/GRO/checksum offload 开关矩阵 | Pending | 待执行 |
 | VLAN-16 | P1/R | ICMP/TCP/UDP、分片与大包 | Pass | audit61 跨节点双向 ICMP、双向1MiB TCP及双向100行 UDP 哈希一致；4KB ICMP 双向5/5，物理两端均抓到 VLAN 分片且0丢包；另覆盖56/1400/1472/2000字节与HTTP 20/20 |
