@@ -7,7 +7,7 @@
 | BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit60：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `6fab161f8`、tree `e1d395fc4`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，audit76 0015 SHA256 `f8d2f08c...`，干净重放 tree 与最终源码 `f0a68079a` 完全一致 |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，audit81 0015 SHA256 `0737c4a7...`，干净重放 tree 与最终源码 `d116bd05...` 完全一致 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit60 干净回放：受影响 endpointmanager/metadata 普通、race、privileged 定向测试通过；endpointmanager 全包普通/race 单轮通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
@@ -72,13 +72,13 @@
 | INS-13 | P1/R | Operator 单副本重启 | Pass | 删除后新 Pod Ready，五个 CiliumNode 稳定，数据面通过 |
 | INS-14 | P1/O | Operator 多副本/选主 | Pass | audit69 Operator扩至2副本均Ready，仅Lease holder执行leader；删除当前leader后standby取得不同holderIdentity且Deployment补齐2/2，客户链路20/20；最终恢复1/1 |
 | INS-15 | P1/R | CNI 文件落盘 | Pass | 五节点 JSON 校验通过且 SHA256 一致，cilium-cni 可执行 |
-| API-01 | P0/R | 单个 Create SubENI | Pending | 待执行 |
-| API-02 | P0/R | BatchCreate SubENI | Pending | 待执行 |
-| API-03 | P0/R | Get/Show SubENI | Pending | 待执行 |
-| API-04 | P0/R | List SubENI | Pending | 待执行 |
+| API-01 | P0/R | 单个 Create SubENI | Pass | audit81 暂停 Operator 后真实删除两个已确认空闲资源腾出配额；生产 Client 单个 Create 成功，响应、Show 与父网卡精确 List 均校验通过 |
+| API-02 | P0/R | BatchCreate SubENI | Pass | audit81 生产 Client BatchCreate count=2 成功，两个响应逐项通过身份、地址、父网卡、子网及 Show/List 校验 |
+| API-03 | P0/R | Get/Show SubENI | Pass | audit81 对基线、单建、批建及删除等待均执行真实 Show；创建资源字段完整，删除后均稳定返回 NotFound |
+| API-04 | P0/R | List SubENI | Pass | audit81 在变更前、单建后、批建后、清理后及恢复后执行父网卡精确集合校验，无遗漏、重复或残留 |
 | API-05 | P1/S | List 分页 marker | Pass | `TestListSubNetworkInterfacesRejectsRepeatedMarker/NextMarkerTerminalForms/ListAllowsNilItemsWhenPaginationAdvances` 连续 10 轮通过 |
-| API-06 | P0/R | SubENI 标签写入 | Pending | 待执行 |
-| API-07 | P0/R | Delete SubENI | Pending | 待执行 |
+| API-06 | P0/R | SubENI 标签写入 | Pass | audit81 发现旧实现误用仅深圳发布的 Port 标签接口；修复为单建/批建请求内联 SubENI tags，真实 cn-south-1 创建后 Show 精确核验两项标签，单元/竞态/全包及云端复测通过 |
+| API-07 | P0/R | Delete SubENI | Pass | audit81 删除两个基线空闲资源、一个单建资源和两个批建资源；每次均轮询到 NotFound，最终父网卡集合无测试资源残留 |
 | API-08 | P1/C | Delete 已不存在资源/404 | Pass | audit76 修复 404 提前返回导致本地状态残留；HTTP 404→`ErrNotFound` 归一化及 `TestReleaseIPsTreatsNotFoundAsConvergedAndContinues` 连续/竞态复测通过，证明清理本地状态并继续后续删除；新 Operator 实机回归全通过 |
 | API-09 | P1/C | Create 超时 | Pending | 待执行 |
 | API-10 | P1/C | Wait Active 超过 60 秒 | Pass | `TestWaitSubENIActiveStopsOnTimeoutAndContext` 以缩短测试时钟验证完整 timeout/cancel 分支，连续 10 轮通过 |
@@ -125,7 +125,7 @@
 | IPAM-31 | P1/R | 达到 flavor SubENI 上限 | Pass | 实机达到 8 上限后返回受控 `No more IPs available`，无崩溃 |
 | IPAM-32 | P1/R | 达到子网 IP 上限 | Pending | 待执行 |
 | IPAM-33 | P1/R | 达到项目配额 | Pending | 待执行 |
-| IPAM-34 | P1/C | 手工删除一个测试 SubENI | Pending | 待执行 |
+| IPAM-34 | P1/C | 手工删除一个测试 SubENI | Pass | audit81 在 Operator 停止且目标节点 cordon 后云端删除两个已确认空闲 SubENI；恢复 Operator 后池自动回到8，旧资源ID归零、used 全部仍在池内、错误为空 |
 | IPAM-35 | P1/C | 手工修改测试 SubENI SG/标签 | Pending | 待执行 |
 | IPAM-36 | P1/C | 删除测试节点/CiliumNode | Pending | 待执行 |
 | IPAM-37 | P1/R | Pod IP 快速复用 | Pass | 10 轮快速重建期间 `.230/.75/.12/.129` 等 IP 被重新分配，最终 endpoint Ready、mesh 56/56、客户矩阵全通过 |
@@ -233,7 +233,7 @@
 | REC-16 | P1/C | trunk 接口 down/up | Pass | audit64 真实 trunk 连续3轮 down 5秒/up；每轮125/150后20/20，Node/Agent Ready且restart=0，五个当前策略表均为完整两路由，permanent neighbor与map owner均正确；末尾mesh 56/56 |
 | REC-17 | P1/C | 删除一条测试策略路由 | Pass | audit64 实机删除 ordinary endpoint 与 router 策略路由并确认故障状态非no-op；周期reconcile在3秒内恢复两者规则/路由和neighbor，不重写BPF map，完整客户回归通过 |
 | REC-18 | P1/C | 删除一个测试 BPF map 条目 | Pass | audit57 实机删除 matrix Pod `192.168.1.246` 的 source-map entry 后跨机 ping 按预期失败；重启该节点 Agent 后 entry 自动恢复、Agent OK、定向 ping 和 mesh 56/56 恢复 |
-| REC-19 | P1/C | 云端手工删除空闲 SubENI | Pending | 待执行 |
+| REC-19 | P1/C | 云端手工删除空闲 SubENI | Pass | audit81 真实云端删除两个空闲资源并完成精确恢复；恢复后云端父网卡集合与 CiliumNode 新8项一致，matrix 56/56，完整客户 HTTP/TCP/源IP 回归通过 |
 | REC-20 | P1/C | 云端手工删除在用 SubENI | Pending | 待执行 |
 | REC-21 | P1/C | 节点 NotReady 超过回收窗口 | Pending | 待执行 |
 | REC-22 | P1/O | Operator 多副本 leader 切换 | Pass | audit69 删除Lease holder所在Operator，holder从node0003身份切到node0004 standby，2副本重新Ready；缩回1副本又安全切至node0002身份，Operator错误扫描0、Nodes 5/5、mesh 56/56 |
