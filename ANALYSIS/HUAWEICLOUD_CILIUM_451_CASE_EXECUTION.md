@@ -51,8 +51,8 @@
 | SEC-12 | P0/R | Pod spec、事件、日志扫描 | Pass | Pod spec 无内联值，Operator 最后 500 行无凭据泄漏 |
 | SEC-13 | P0/R | Helm upgrade/rollback | Pending | 待执行 |
 | SEC-14 | P0/R | Helm uninstall | Pending | 待执行 |
-| SEC-15 | P1/O | 自定义 Secret 名称 | Pending | 待执行 |
-| SEC-16 | P1/C | Secret 位于错误 namespace | Pending | 待执行 |
+| SEC-15 | P1/O | 自定义 Secret 名称 | Pass | audit80 从原 Secret 仅在集群内复制临时自定义名称并切换两个 secretKeyRef；新 Operator Ready/restart0、无鉴权错误，mesh 56/56、pool 恒等；最终恢复原引用并删除临时 Secret |
+| SEC-16 | P1/C | Secret 位于错误 namespace | Pass | audit80 将凭据副本仅放在 default、kube-system 引用同名缺失 Secret；候选 Pod 稳定 CreateContainerConfigError，旧 Operator 保持 Ready，mesh/pool 不变；恢复原引用后坏 Pod 与跨 namespace 临时 Secret 均清零 |
 | SEC-17 | P1/R | 特殊字符凭据 | Pass | `TestNewClientAcceptsOpaqueCredentialCharacters` 验证非空凭据中的标点按 opaque string 接受；API 边界批次连续 10 轮通过 |
 | SEC-18 | P1/O | External Secrets/CSI 控制器轮换 | Pending | 待执行 |
 | SEC-19 | P0/R | 最小云权限 | Pending | 待执行 |
