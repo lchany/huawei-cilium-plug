@@ -1,7 +1,7 @@
-From 28e4e9636c3526c49189ef543adce50299deb44c Mon Sep 17 00:00:00 2001
-From: root <root@liteserver-8564-1.novalocal>
-Date: Tue, 14 Jul 2026 09:04:41 +0800
-Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
+From b250fa8d6a6cfe0e4f2bcb672033099c3e27a32f Mon Sep 17 00:00:00 2001
+From: Cilium Build <build@example.invalid>
+Date: Tue, 14 Jul 2026 10:38:29 +0800
+Subject: [PATCH 15/15] fix(huaweicloud): consolidate validation bug fixes
 
 ---
  daemon/cmd/kube_proxy_replacement.go          |  19 +
@@ -15,22 +15,23 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/datapath/iptables/iptables_test.go        |  31 +
  pkg/datapath/linux/routing/info.go            |  15 +-
  pkg/datapath/linux/routing/info_test.go       |  71 ++
- pkg/datapath/linux/routing/routing.go         |  48 +
- pkg/datapath/linux/routing/routing_test.go    |  97 ++
+ pkg/datapath/linux/routing/routing.go         | 219 +++-
+ pkg/datapath/linux/routing/routing_test.go    | 227 +++++
  pkg/endpointmanager/huaweicloud_subeni.go     |  27 +-
  .../huaweicloud_subeni_test.go                |  90 ++
- pkg/huaweicloud/api/api.go                    | 406 ++++++--
+ pkg/huaweicloud/api/api.go                    | 406 +++++++-
  pkg/huaweicloud/api/api_boundary_test.go      | 695 +++++++++++++
  pkg/huaweicloud/api/error_test.go             |  58 ++
  pkg/huaweicloud/api/subnet_capacity.go        |  42 +-
  pkg/huaweicloud/api/subnet_capacity_test.go   | 203 +++-
  pkg/huaweicloud/eni/instances.go              |  36 +-
- pkg/huaweicloud/eni/instances_test.go         | 927 +++++++++++++++++-
- pkg/huaweicloud/eni/node.go                   | 164 +++-
+ pkg/huaweicloud/eni/instances_test.go         | 964 +++++++++++++++++-
+ pkg/huaweicloud/eni/node.go                   | 164 ++-
  pkg/huaweicloud/metadata/metadata.go          |  83 +-
  pkg/huaweicloud/metadata/metadata_test.go     | 216 ++++
- pkg/huaweicloud/subenimap/manager.go          | 152 ++-
- pkg/huaweicloud/subenimap/manager_test.go     | 287 +++++-
+ pkg/huaweicloud/subenimap/manager.go          | 225 +++-
+ .../subenimap/manager_privileged_test.go      |  60 ++
+ pkg/huaweicloud/subenimap/manager_test.go     | 309 +++++-
  pkg/ipam/crd.go                               |  20 +-
  pkg/ipam/huaweicloud_test.go                  |  47 +
  pkg/ipam/node_test.go                         |   1 +
@@ -39,12 +40,13 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/nodediscovery/nodediscovery.go            |  63 +-
  plugins/cilium-cni/types/types.go             | 118 ++-
  plugins/cilium-cni/types/types_test.go        |  49 +
- 35 files changed, 4063 insertions(+), 195 deletions(-)
+ 36 files changed, 4542 insertions(+), 209 deletions(-)
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_test.go
  create mode 100644 pkg/huaweicloud/api/api_boundary_test.go
  create mode 100644 pkg/huaweicloud/api/error_test.go
  create mode 100644 pkg/huaweicloud/metadata/metadata_test.go
+ create mode 100644 pkg/huaweicloud/subenimap/manager_privileged_test.go
 
 diff --git a/daemon/cmd/kube_proxy_replacement.go b/daemon/cmd/kube_proxy_replacement.go
 index aaf3abd48..5b2e924c2 100644
@@ -605,27 +607,178 @@ index 5fbcb6247..582da277a 100644
 +	}
 +}
 diff --git a/pkg/datapath/linux/routing/routing.go b/pkg/datapath/linux/routing/routing.go
-index d5a5fdf6c..1b7a26b6a 100644
+index d5a5fdf6c..aa9208956 100644
 --- a/pkg/datapath/linux/routing/routing.go
 +++ b/pkg/datapath/linux/routing/routing.go
-@@ -40,6 +40,9 @@ var (
+@@ -7,6 +7,8 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"net"
++	"strings"
++	"sync"
+ 
+ 	"github.com/sirupsen/logrus"
+ 	"github.com/vishvananda/netlink"
+@@ -25,8 +27,120 @@ import (
+ 
+ var (
+ 	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "linux-routing")
++
++	routingRouteReplace = netlink.RouteReplace
++	routingRouteDelete  = netlink.RouteDel
++	routingRuleList     = route.ListRules
++	routingRuleReplace  = route.ReplaceRule
++	routingRuleDelete   = route.DeleteRule
++
++	routingHuaweiCloudConfigureMu sync.Mutex
+ )
+ 
++type routeChange struct {
++	installed netlink.Route
++	previous  *netlink.Route
++}
++
++type configureTransaction struct {
++	rules  []route.Rule
++	routes []routeChange
++}
++
++func (tx *configureTransaction) replaceRule(spec route.Rule) error {
++	existing, err := routingRuleList(netlink.FAMILY_V4, &spec)
++	if err != nil {
++		return err
++	}
++	if err := routingRuleReplace(spec); err != nil {
++		return err
++	}
++	if len(existing) == 0 {
++		tx.rules = append(tx.rules, spec)
++	}
++	return nil
++}
++
++func sameRouteDestination(a, b *net.IPNet) bool {
++	isDefault := func(dst *net.IPNet) bool {
++		if dst == nil {
++			return true
++		}
++		ones, bits := dst.Mask.Size()
++		return bits == 32 && ones == 0 && dst.IP.To4() != nil && dst.IP.To4().Equal(net.IPv4zero)
++	}
++	if isDefault(a) || isDefault(b) {
++		return isDefault(a) && isDefault(b)
++	}
++	return a.String() == b.String()
++}
++
++func sameIP(a, b net.IP) bool {
++	if a == nil || b == nil {
++		return a == nil && b == nil
++	}
++	return a.Equal(b)
++}
++
++func routeAlreadySatisfies(existing, desired netlink.Route) bool {
++	return sameRouteDestination(existing.Dst, desired.Dst) &&
++		existing.Table == desired.Table &&
++		(desired.LinkIndex == 0 || existing.LinkIndex == desired.LinkIndex) &&
++		existing.Scope == desired.Scope &&
++		sameIP(existing.Gw, desired.Gw)
++}
++
++func (tx *configureTransaction) replaceRoute(spec netlink.Route) error {
++	existing, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: spec.Table}, netlink.RT_FILTER_TABLE)
++	if err != nil {
++		return err
++	}
++	var previous *netlink.Route
++	for i := range existing {
++		if sameRouteDestination(existing[i].Dst, spec.Dst) {
++			if routeAlreadySatisfies(existing[i], spec) {
++				return nil
++			}
++			copy := existing[i]
++			previous = &copy
++			break
++		}
++	}
++	if err := routingRouteReplace(&spec); err != nil {
++		return err
++	}
++	tx.routes = append(tx.routes, routeChange{installed: spec, previous: previous})
++	return nil
++}
++
++func (tx *configureTransaction) rollback() error {
++	var rollbackErrors []string
++	for i := len(tx.routes) - 1; i >= 0; i-- {
++		change := tx.routes[i]
++		var err error
++		if change.previous != nil {
++			err = routingRouteReplace(change.previous)
++		} else {
++			err = routingRouteDelete(&change.installed)
++			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
++				err = nil
++			}
++		}
++		if err != nil {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	for i := len(tx.rules) - 1; i >= 0; i-- {
++		if err := routingRuleDelete(tx.rules[i]); err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	if len(rollbackErrors) != 0 {
++		return errors.New(strings.Join(rollbackErrors, "; "))
++	}
++	return nil
++}
++
+ // Configure sets up the rules and routes needed when running in ENI, Azure,
+ // or HuaweiCloud IPAM mode.
+ // These rules and routes direct egress traffic out of the interface and
+@@ -39,7 +153,10 @@ var (
+ // mtu: The interface MTU.
  // compat: Whether to use the compat egress priority or not.
  // host: Whether the IP is a host IP and needs to be routed via the 'local' table
- func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) error {
+-func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) error {
++func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) (retErr error) {
 +	if mtu <= 0 {
 +		return fmt.Errorf("invalid MTU: %d", mtu)
 +	}
  	if ip.To4() == nil {
  		log.WithFields(logrus.Fields{
  			"endpointIP": ip,
-@@ -55,12 +58,34 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+@@ -55,19 +172,60 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
  	if err != nil {
  		return err
  	}
 +	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		routingHuaweiCloudConfigureMu.Lock()
++		defer routingHuaweiCloudConfigureMu.Unlock()
 +		if err := validateHuaweiCloudRouteTableOwnership(tableID, ifindex, info.IPv4Gateway); err != nil {
 +			return err
 +		}
++	}
++
++	var tx *configureTransaction
++	installRule := routingRuleReplace
++	installRoute := func(spec netlink.Route) error { return routingRouteReplace(&spec) }
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		tx = &configureTransaction{}
++		installRule = tx.replaceRule
++		installRoute = tx.replaceRoute
++		defer func() {
++			if retErr == nil {
++				return
++			}
++			if rollbackErr := tx.rollback(); rollbackErr != nil {
++				retErr = fmt.Errorf("%w; rollback failed: %v", retErr, rollbackErr)
++			}
++		}()
 +	}
  
  	ipWithMask := net.IPNet{
@@ -639,7 +792,7 @@ index d5a5fdf6c..1b7a26b6a 100644
 +	// ingress rule (notably cilium-health) remain reachable.
 +	if host && info.IpamMode == ipamOption.IPAMHuaweiCloud {
 +		for i := range info.IPv4CIDRs {
-+			if err := route.ReplaceRule(route.Rule{
++			if err := installRule(route.Rule{
 +				Priority: linux_defaults.RulePriorityIngress,
 +				From:     &ipWithMask,
 +				To:       &info.IPv4CIDRs[i],
@@ -653,7 +806,51 @@ index d5a5fdf6c..1b7a26b6a 100644
  	// Ingress rule. This rule is not installed for the cilium_host IP, because
  	// the cilium_host IP is a local IP and therefore must be routed via the
  	// 'local' table instead of 'main'.
-@@ -132,6 +157,29 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 	if !host {
+ 		// On ingress, route all traffic to the endpoint IP via the main routing
+ 		// table. Egress rules are created in a per-ENI routing table.
+-		if err := route.ReplaceRule(route.Rule{
++		if err := installRule(route.Rule{
+ 			Priority: linux_defaults.RulePriorityIngress,
+ 			To:       &ipWithMask,
+ 			Table:    route.MainTable,
+@@ -81,7 +239,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		// Lookup a VPC specific table for all traffic from an endpoint to the
+ 		// CIDR configured for the VPC on which the endpoint has the IP on.
+ 		for _, cidr := range info.IPv4CIDRs {
+-			if err := route.ReplaceRule(route.Rule{
++			if err := installRule(route.Rule{
+ 				Priority: egressPriority,
+ 				From:     &ipWithMask,
+ 				To:       &cidr,
+@@ -92,7 +250,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		}
+ 	} else {
+ 		// Lookup a VPC specific table for all traffic from an endpoint.
+-		if err := route.ReplaceRule(route.Rule{
++		if err := installRule(route.Rule{
+ 			Priority: egressPriority,
+ 			From:     &ipWithMask,
+ 			Table:    tableID,
+@@ -105,7 +263,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 	//
+ 	// Note: This is a /32 route to avoid any L2. The endpoint does no L2
+ 	// either.
+-	if err := netlink.RouteReplace(&netlink.Route{
++	if err := installRoute(netlink.Route{
+ 		LinkIndex: ifindex,
+ 		Dst:       &net.IPNet{IP: info.IPv4Gateway, Mask: net.CIDRMask(32, 32)},
+ 		Scope:     netlink.SCOPE_LINK,
+@@ -115,7 +273,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 	}
+ 
+ 	// Default route to the VPC or subnet gateway
+-	if err := netlink.RouteReplace(&netlink.Route{
++	if err := installRoute(netlink.Route{
+ 		Dst:   &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
+ 		Table: tableID,
+ 		Gw:    info.IPv4Gateway,
+@@ -132,36 +290,75 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
  	return nil
  }
  
@@ -683,11 +880,70 @@ index d5a5fdf6c..1b7a26b6a 100644
  // cleanupStaleHuaweiCloudEgressRules removes rules left by the former shared
  // trunk-ifindex scheme or by a compatibility-priority change. It runs only
  // after the new rule and both routes are installed, so removing a stale rule
+ // switches the endpoint to a complete per-VLAN routing table.
+ func cleanupStaleHuaweiCloudEgressRules(ip *net.IPNet, priority, tableID int) error {
++	var deleted []route.Rule
++	restoreDeleted := func(cause error) error {
++		var restoreErrors []string
++		for i := len(deleted) - 1; i >= 0; i-- {
++			if err := routingRuleReplace(deleted[i]); err != nil {
++				restoreErrors = append(restoreErrors, err.Error())
++			}
++		}
++		if len(restoreErrors) != 0 {
++			return fmt.Errorf("%w; restoring stale rules failed: %s", cause, strings.Join(restoreErrors, "; "))
++		}
++		return cause
++	}
++
+ 	for _, candidatePriority := range []int{
+ 		linux_defaults.RulePriorityEgress,
+ 		linux_defaults.RulePriorityEgressv2,
+ 	} {
+-		rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
++		rules, err := routingRuleList(netlink.FAMILY_V4, &route.Rule{
+ 			Priority: candidatePriority,
+ 			From:     ip,
+ 		})
+ 		if err != nil {
+-			return err
++			return restoreDeleted(err)
+ 		}
+ 
+ 		for _, ruleToDelete := range rules {
+ 			if ruleToDelete.Priority == priority && ruleToDelete.Table == tableID {
+ 				continue
+ 			}
+-			if err := route.DeleteRule(route.Rule{
++			spec := route.Rule{
+ 				Priority: ruleToDelete.Priority,
+ 				Mark:     ruleToDelete.Mark,
+ 				Mask:     ruleToDelete.Mask,
+ 				From:     ruleToDelete.Src,
+ 				To:       ruleToDelete.Dst,
+ 				Table:    ruleToDelete.Table,
+-			}); err != nil {
+-				return err
++			}
++			deleted = append(deleted, spec)
++			if err := routingRuleDelete(spec); err != nil {
++				return restoreDeleted(err)
+ 			}
+ 		}
+ 	}
 diff --git a/pkg/datapath/linux/routing/routing_test.go b/pkg/datapath/linux/routing/routing_test.go
-index f4f81a673..cfda86b6f 100644
+index f4f81a673..542947751 100644
 --- a/pkg/datapath/linux/routing/routing_test.go
 +++ b/pkg/datapath/linux/routing/routing_test.go
-@@ -46,6 +46,21 @@ func (e *LinuxRoutingSuite) TestConfigure(c *C) {
+@@ -6,6 +6,7 @@
+ package linuxrouting
+ 
+ import (
++	"errors"
+ 	"net"
+ 	"runtime"
+ 	"testing"
+@@ -46,6 +47,21 @@ func (e *LinuxRoutingSuite) TestConfigure(c *C) {
  	})
  }
  
@@ -709,7 +965,7 @@ index f4f81a673..cfda86b6f 100644
  func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudIsolatesSubENIRouteTables(c *C) {
  	_, first := getFakes(c)
  	first.IpamMode = ipamOption.IPAMHuaweiCloud
-@@ -91,6 +106,88 @@ func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudIsolatesSubENIRouteTables(c
+@@ -91,6 +107,217 @@ func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudIsolatesSubENIRouteTables(c
  	})
  }
  
@@ -766,6 +1022,135 @@ index f4f81a673..cfda86b6f 100644
 +		assertHuaweiCloudEgressRuleAndDefaultRoute(c, firstIP, first.IPv4Gateway, table)
 +		c.Assert(Delete(firstIP, false), IsNil)
 +	})
++}
++
++func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudRollsBackOnNexthopRouteFailure(c *C) {
++	e.testConfigureHuaweiCloudRouteFailureRollback(c, 1)
++}
++
++func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudRollsBackOnDefaultRouteFailure(c *C) {
++	e.testConfigureHuaweiCloudRouteFailureRollback(c, 2)
++}
++
++func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudRestoresStaleRulesOnCleanupFailure(c *C) {
++	ip, info := getFakes(c)
++	info.IpamMode = ipamOption.IPAMHuaweiCloud
++	info.Masquerade = false
++	info.InterfaceNumber = 101
++	masterMAC := info.MasterIfMAC
++	ipWithMask := &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
++	stale := []route.Rule{
++		{Priority: linux_defaults.RulePriorityEgress, From: ipWithMask, Table: 401},
++		{Priority: linux_defaults.RulePriorityEgress, From: ipWithMask, Table: 402},
++	}
++
++	runFuncInNetNS(c, func() {
++		ifaceCleanup := createDummyDevice(c, masterMAC)
++		defer ifaceCleanup()
++		for _, spec := range stale {
++			c.Assert(route.ReplaceRule(spec), IsNil)
++		}
++
++		originalRuleDelete := routingRuleDelete
++		defer func() { routingRuleDelete = originalRuleDelete }()
++		calls := 0
++		routingRuleDelete = func(spec route.Rule) error {
++			calls++
++			if calls == 2 {
++				return errors.New("injected stale-rule deletion failure")
++			}
++			return originalRuleDelete(spec)
++		}
++
++		c.Assert(info.Configure(ip, 1500, false, false), ErrorMatches, ".*injected stale-rule deletion failure.*")
++		for _, spec := range stale {
++			rules, err := route.ListRules(netlink.FAMILY_V4, &spec)
++			c.Assert(err, IsNil)
++			c.Assert(rules, HasLen, 1)
++		}
++		assertNoHuaweiCloudEndpointRouting(c, ip, info.InterfaceNumber)
++	})
++}
++
++func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudReusesCompleteRouteTable(c *C) {
++	firstIP, info := getFakes(c)
++	info.IpamMode = ipamOption.IPAMHuaweiCloud
++	info.Masquerade = false
++	info.InterfaceNumber = 101
++	secondIP := net.ParseIP("192.168.2.101")
++	masterMAC := info.MasterIfMAC
++
++	runFuncInNetNS(c, func() {
++		ifaceCleanup := createDummyDevice(c, masterMAC)
++		defer ifaceCleanup()
++		c.Assert(info.Configure(firstIP, 1500, false, false), IsNil)
++
++		originalRouteReplace := routingRouteReplace
++		defer func() { routingRouteReplace = originalRouteReplace }()
++		calls := 0
++		routingRouteReplace = func(*netlink.Route) error {
++			calls++
++			return errors.New("complete shared routes must not be replaced")
++		}
++
++		c.Assert(info.Configure(secondIP, 1500, false, false), IsNil)
++		c.Assert(calls, Equals, 0)
++		c.Assert(Delete(firstIP, false), IsNil)
++		c.Assert(Delete(secondIP, false), IsNil)
++	})
++}
++
++func (e *LinuxRoutingSuite) testConfigureHuaweiCloudRouteFailureRollback(c *C, failAt int) {
++	ip, info := getFakes(c)
++	info.IpamMode = ipamOption.IPAMHuaweiCloud
++	info.Masquerade = false
++	info.InterfaceNumber = 101
++	masterMAC := info.MasterIfMAC
++
++	runFuncInNetNS(c, func() {
++		ifaceCleanup := createDummyDevice(c, masterMAC)
++		defer ifaceCleanup()
++
++		originalRouteReplace := routingRouteReplace
++		defer func() { routingRouteReplace = originalRouteReplace }()
++		calls := 0
++		routingRouteReplace = func(spec *netlink.Route) error {
++			calls++
++			if calls == failAt {
++				return errors.New("injected route replacement failure")
++			}
++			return originalRouteReplace(spec)
++		}
++
++		c.Assert(info.Configure(ip, 1500, false, false), ErrorMatches, ".*injected route replacement failure.*")
++		c.Assert(calls >= failAt, Equals, true)
++		assertNoHuaweiCloudEndpointRouting(c, ip, info.InterfaceNumber)
++	})
++}
++
++func assertNoHuaweiCloudEndpointRouting(c *C, ip net.IP, vlan int) {
++	ipWithMask := &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
++	table := linux_defaults.RouteTableHuaweiCloudInterfacesOffset + vlan
++
++	ingress, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
++		Priority: linux_defaults.RulePriorityIngress,
++		To:       ipWithMask,
++		Table:    route.MainTable,
++	})
++	c.Assert(err, IsNil)
++	c.Assert(ingress, HasLen, 0)
++
++	egress, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
++		Priority: linux_defaults.RulePriorityEgressv2,
++		From:     ipWithMask,
++		Table:    table,
++	})
++	c.Assert(err, IsNil)
++	c.Assert(egress, HasLen, 0)
++
++	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
++	c.Assert(err, IsNil)
++	c.Assert(routes, HasLen, 0)
 +}
 +
 +func (e *LinuxRoutingSuite) TestConfigureHuaweiCloudHostKeepsVPCTrafficInMain(c *C) {
@@ -2880,7 +3265,7 @@ index a60a02a64..fe30ba647 100644
  
  func (m *InstancesManager) FindSecurityGroupByTags(vpcID string, required ipamTypes.Tags) []*hwTypes.SecurityGroup {
 diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
-index c27c81bb0..1ffce9dba 100644
+index c27c81bb0..3662cbeea 100644
 --- a/pkg/huaweicloud/eni/instances_test.go
 +++ b/pkg/huaweicloud/eni/instances_test.go
 @@ -5,14 +5,103 @@ package eni
@@ -2987,10 +3372,47 @@ index c27c81bb0..1ffce9dba 100644
  func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
  	api := mock.NewAPI(
  		[]*ipamTypes.Subnet{
-@@ -46,6 +135,30 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
+@@ -46,6 +135,67 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
  	}
  }
  
++func TestFindOneSubnetTagConjunctionNoMatchAndMultipleCandidates(t *testing.T) {
++	api := mock.NewAPI(
++		[]*ipamTypes.Subnet{
++			{ID: "match-low", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 5, Tags: ipamTypes.Tags{"network-role": "pod", "environment": "prod"}},
++			{ID: "match-high", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 9, Tags: ipamTypes.Tags{"network-role": "pod", "environment": "prod"}},
++			{ID: "partial-role", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 100, Tags: ipamTypes.Tags{"network-role": "pod", "environment": "dev"}},
++			{ID: "partial-environment", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 100, Tags: ipamTypes.Tags{"network-role": "node", "environment": "prod"}},
++			{ID: "wrong-az", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-2", AvailableAddresses: 100, Tags: ipamTypes.Tags{"network-role": "pod", "environment": "prod"}},
++		},
++		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
++	)
++	manager := NewInstancesManager(api, "vpc-1", nil)
++	if manager.Resync(context.Background()).IsZero() {
++		t.Fatal("resync failed")
++	}
++
++	spec := eniTypes.Spec{
++		VPCID:            "vpc-1",
++		AvailabilityZone: "az-1",
++		SubnetTags: map[string]string{
++			"network-role": "pod",
++			"environment":  "prod",
++		},
++	}
++	for i := 0; i < 100; i++ {
++		got := manager.FindOneSubnet(spec, 1)
++		if got == nil || got.ID != "match-high" {
++			t.Fatalf("AND tag selection did not choose the highest-capacity eligible subnet: %#v", got)
++		}
++	}
++
++	spec.SubnetTags["environment"] = "missing"
++	if got := manager.FindOneSubnet(spec, 1); got != nil {
++		t.Fatalf("tag set with no complete match selected subnet %#v", got)
++	}
++}
++
 +func TestFindOneSubnetTreatsNilAndEmptyTagsIdentically(t *testing.T) {
 +	api := mock.NewAPI(
 +		[]*ipamTypes.Subnet{
@@ -3018,7 +3440,7 @@ index c27c81bb0..1ffce9dba 100644
  func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *testing.T) {
  	api := mock.NewAPI(
  		[]*ipamTypes.Subnet{
-@@ -77,6 +190,89 @@ func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *test
+@@ -77,6 +227,89 @@ func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *test
  	}
  }
  
@@ -3108,7 +3530,7 @@ index c27c81bb0..1ffce9dba 100644
  func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
  	api := mock.NewAPI(nil, nil, nil)
  	api.SetPortSecurityGroups("trunk-1", []string{"sg-1", "sg-2"})
-@@ -91,9 +287,117 @@ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
+@@ -91,9 +324,117 @@ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
  	}
  }
  
@@ -3227,7 +3649,7 @@ index c27c81bb0..1ffce9dba 100644
  		subENIs: map[string]eniTypes.SubENI{
  			"eni-c": {ID: "eni-c", PrivateIPAddress: "172.31.1.30"},
  			"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.10"},
-@@ -108,3 +412,624 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
+@@ -108,3 +449,624 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
  		}
  	}
  }
@@ -4635,26 +5057,100 @@ index 000000000..fc49efd9c
 +	}
 +}
 diff --git a/pkg/huaweicloud/subenimap/manager.go b/pkg/huaweicloud/subenimap/manager.go
-index ec52513bc..b06987b13 100644
+index ec52513bc..b6d9aa6d2 100644
 --- a/pkg/huaweicloud/subenimap/manager.go
 +++ b/pkg/huaweicloud/subenimap/manager.go
-@@ -7,6 +7,7 @@ import (
+@@ -7,6 +7,8 @@ import (
  	"errors"
  	"fmt"
  	"net"
 +	"reflect"
++	"unsafe"
  
  	"github.com/sirupsen/logrus"
  	"golang.org/x/sys/unix"
-@@ -71,6 +72,7 @@ type SubENIMapManager struct {
+@@ -71,17 +73,87 @@ type SubENIMapManager struct {
  	srcIPMap   mapBackend
  	vlanMACMap mapBackend
  	mutex      lock.RWMutex
 +	closed     bool
  }
  
- // NewSubENIMapManager creates a SubENIMapManager that attaches to the pinned
-@@ -82,6 +84,9 @@ func NewSubENIMapManager(logger *logrus.Entry) (*SubENIMapManager, error) {
+-// NewSubENIMapManager creates a SubENIMapManager that attaches to the pinned
+-// HuaweiCloud datapath maps on first use.
++func newSrcIPMap() *bpf.Map {
++	return bpf.NewMap(
++		srcIPMapName,
++		bpf.MapTypeHash,
++		&SrcIPKey4{}, int(unsafe.Sizeof(SrcIPKey4{})),
++		&SubENIInfo{}, int(unsafe.Sizeof(SubENIInfo{})),
++		maxEntries,
++		0, 0,
++		bpf.ConvertKeyValue,
++	)
++}
++
++func newVLANMACMap() *bpf.Map {
++	return bpf.NewMap(
++		vlanMACMapName,
++		bpf.MapTypeHash,
++		&VLANMACKey{}, int(unsafe.Sizeof(VLANMACKey{})),
++		&EPInfo{}, int(unsafe.Sizeof(EPInfo{})),
++		maxEntries,
++		0, 0,
++		bpf.ConvertKeyValue,
++	)
++}
++
++func openOrCreateDatapathMap(name string, spec *bpf.Map) (*bpf.Map, error) {
++	// The BTF map declarations in bpf/lib/huaweicloud.h have flags=0. Do not
++	// use Map.OpenOrCreate here: with preallocate-bpf-maps=false it adds
++	// BPF_F_NO_PREALLOC, so libbpf later replaces the map during endpoint
++	// compilation and discards entries inserted during startup.
++	fd, _, err := bpf.OpenOrCreateMap(
++		bpf.MapPath(name),
++		bpf.GetMapType(spec.MapType),
++		spec.KeySize,
++		spec.ValueSize,
++		spec.MaxEntries,
++		0,
++		0,
++		true,
++	)
++	if err != nil {
++		return nil, err
++	}
++	if err := unix.Close(fd); err != nil {
++		return nil, fmt.Errorf("close newly opened %s fd: %w", name, err)
++	}
++	if err := spec.Open(); err != nil {
++		return nil, err
++	}
++	return spec, nil
++}
++
++// NewSubENIMapManager opens or creates the pinned HuaweiCloud datapath maps
++// before endpoint events are subscribed. Waiting for the first endpoint BPF
++// program to create these maps leaves a startup race: restored Pods can become
++// Ready while both maps are still absent, and no later event repairs them.
+ func NewSubENIMapManager(logger *logrus.Entry) (*SubENIMapManager, error) {
++	srcIP, err := openOrCreateDatapathMap(srcIPMapName, newSrcIPMap())
++	if err != nil {
++		return nil, fmt.Errorf("open or create pinned %s: %w", srcIPMapName, err)
++	}
++
++	vlanMAC, err := openOrCreateDatapathMap(vlanMACMapName, newVLANMACMap())
++	if err != nil {
++		_ = srcIP.Close()
++		return nil, fmt.Errorf("open or create pinned %s: %w", vlanMACMapName, err)
++	}
++
+ 	return &SubENIMapManager{
+-		logger: logger,
++		logger:     logger,
++		srcIPMap:   &bpfMapAdapter{m: srcIP},
++		vlanMACMap: &bpfMapAdapter{m: vlanMAC},
+ 	}, nil
  }
  
  func (m *SubENIMapManager) ensureMapsOpenLocked() error {
@@ -4664,7 +5160,7 @@ index ec52513bc..b06987b13 100644
  	if m.srcIPMap != nil && m.vlanMACMap != nil {
  		return nil
  	}
-@@ -127,9 +132,42 @@ func parseIPv4(addr string) ([4]byte, error) {
+@@ -127,9 +199,42 @@ func parseIPv4(addr string) ([4]byte, error) {
  	return out, nil
  }
  
@@ -4707,7 +5203,7 @@ index ec52513bc..b06987b13 100644
  	addrBytes, err := parseIPv4(ep.GetIPv4Address())
  	if err != nil {
  		return fmt.Errorf("OnEndpointReady: %w", err)
-@@ -159,9 +197,27 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+@@ -159,9 +264,27 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
  	if err != nil && !errors.Is(err, unix.ENOENT) {
  		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", srcIPMapName, srcKey, err)
  	}
@@ -4735,7 +5231,7 @@ index ec52513bc..b06987b13 100644
  
  	// --- Map 2: (vlan-id, dst-mac) → endpoint (ingress) ---
  	vlanKey := &VLANMACKey{
-@@ -172,19 +228,47 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+@@ -172,19 +295,47 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
  		IfIndex: ep.GetIfIndex(),
  		LxcID:   uint16(ep.GetID()), //nolint:gosec // LXC IDs fit in uint16
  	}
@@ -4749,7 +5245,7 @@ index ec52513bc..b06987b13 100644
 +	if err != nil && !errors.Is(err, unix.ENOENT) {
 +		if rollbackErr := rollbackSrc(); rollbackErr != nil {
 +			return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w; rollback %s: %v", vlanMACMapName, vlanKey, err, srcIPMapName, rollbackErr)
-+		}
+ 		}
 +		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", vlanMACMapName, vlanKey, err)
 +	}
 +	if oldEPVal != nil {
@@ -4759,7 +5255,7 @@ index ec52513bc..b06987b13 100644
 +				return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by another endpoint; rollback %s: %v", vlanMACMapName, vlanKey, srcIPMapName, rollbackErr)
 +			}
 +			return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by another endpoint", vlanMACMapName, vlanKey)
- 		}
++		}
 +	}
 +	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
 +		rollbackErr := rollbackSrc()
@@ -4789,7 +5285,7 @@ index ec52513bc..b06987b13 100644
  	return nil
  }
  
-@@ -192,6 +276,9 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+@@ -192,6 +343,9 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
  // maps on a best-effort basis (individual delete errors are logged but not
  // returned).
  func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
@@ -4799,7 +5295,7 @@ index ec52513bc..b06987b13 100644
  	addrBytes, err := parseIPv4(ep.GetIPv4Address())
  	if err != nil {
  		return fmt.Errorf("OnEndpointDelete: %w", err)
-@@ -210,19 +297,52 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
+@@ -210,19 +364,52 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
  		return fmt.Errorf("OnEndpointDelete: %w", err)
  	}
  
@@ -4859,7 +5355,7 @@ index ec52513bc..b06987b13 100644
  	}
  
  	return nil
-@@ -231,6 +351,12 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
+@@ -231,6 +418,12 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
  // Close releases any resources held by the manager.
  // After Close the manager must not be used.
  func (m *SubENIMapManager) Close() {
@@ -4872,11 +5368,77 @@ index ec52513bc..b06987b13 100644
  	// If the underlying backends are real bpf.Map adapters, close the maps.
  	if a, ok := m.srcIPMap.(*bpfMapAdapter); ok {
  		_ = a.m.Close()
+diff --git a/pkg/huaweicloud/subenimap/manager_privileged_test.go b/pkg/huaweicloud/subenimap/manager_privileged_test.go
+new file mode 100644
+index 000000000..1b67d2abe
+--- /dev/null
++++ b/pkg/huaweicloud/subenimap/manager_privileged_test.go
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++//go:build privileged_tests
++
++package subenimap
++
++import (
++	"os"
++	"testing"
++
++	"github.com/cilium/ebpf/rlimit"
++
++	"github.com/cilium/cilium/pkg/bpf"
++	"github.com/cilium/cilium/pkg/logging"
++)
++
++func TestNewSubENIMapManagerCreatesPinnedMapsBeforeEndpointEvents(t *testing.T) {
++	if err := rlimit.RemoveMemlock(); err != nil {
++		t.Fatalf("remove memlock limit: %v", err)
++	}
++
++	paths := []string{bpf.MapPath(srcIPMapName), bpf.MapPath(vlanMACMapName)}
++	for _, path := range paths {
++		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
++			t.Fatalf("remove stale test map %s: %v", path, err)
++		}
++	}
++	defer func() {
++		for _, path := range paths {
++			_ = os.Remove(path)
++		}
++	}()
++
++	manager, err := NewSubENIMapManager(logging.DefaultLogger.WithField("test", t.Name()))
++	if err != nil {
++		t.Fatalf("create manager before endpoint programs: %v", err)
++	}
++	defer manager.Close()
++
++	for _, path := range paths {
++		if _, err := os.Stat(path); err != nil {
++			t.Fatalf("expected pinned map %s: %v", path, err)
++		}
++	}
++
++	ep := validEndpoint()
++	if err := manager.OnEndpointReady(ep); err != nil {
++		t.Fatalf("populate newly created maps: %v", err)
++	}
++	srcKey := &SrcIPKey4{Addr: [4]byte{10, 0, 0, 2}}
++	got, err := manager.srcIPMap.Lookup(srcKey)
++	if err != nil {
++		t.Fatalf("lookup source entry: %v", err)
++	}
++	want := &SubENIInfo{VlanID: uint16(ep.vlan), MAC: ep.mac, LxcID: ep.id}
++	if value, ok := got.(*SubENIInfo); !ok || *value != *want {
++		t.Fatalf("unexpected source entry: got=%v want=%v", got, want)
++	}
++}
 diff --git a/pkg/huaweicloud/subenimap/manager_test.go b/pkg/huaweicloud/subenimap/manager_test.go
-index 91af43c8d..4f8820b2a 100644
+index 91af43c8d..e8570c118 100644
 --- a/pkg/huaweicloud/subenimap/manager_test.go
 +++ b/pkg/huaweicloud/subenimap/manager_test.go
-@@ -5,22 +5,40 @@ package subenimap
+@@ -5,22 +5,62 @@ package subenimap
  
  import (
  	"errors"
@@ -4890,6 +5452,28 @@ index 91af43c8d..4f8820b2a 100644
 +	"golang.org/x/sys/unix"
  )
  
++func TestHuaweiCloudMapDefinitionsMatchDatapathABI(t *testing.T) {
++	tests := []struct {
++		name       string
++		m          *bpf.Map
++		keySize    uint32
++		valueSize  uint32
++		maxEntries uint32
++	}{
++		{srcIPMapName, newSrcIPMap(), 4, 16, maxEntries},
++		{vlanMACMapName, newVLANMACMap(), 8, 8, maxEntries},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if tt.m.MapType != bpf.MapTypeHash || tt.m.KeySize != tt.keySize ||
++				tt.m.ValueSize != tt.valueSize || tt.m.MaxEntries != tt.maxEntries {
++				t.Fatalf("unexpected map ABI: type=%v key=%d value=%d max=%d",
++					tt.m.MapType, tt.m.KeySize, tt.m.ValueSize, tt.m.MaxEntries)
++			}
++		})
++	}
++}
++
  type testMap struct {
  	entries   map[string]bpf.MapValue
 +	lookupErr error
@@ -4918,7 +5502,7 @@ index 91af43c8d..4f8820b2a 100644
  	if m.updateErr != nil {
  		return m.updateErr
  	}
-@@ -29,11 +47,202 @@ func (m *testMap) Update(key bpf.MapKey, value bpf.MapValue) error {
+@@ -29,11 +69,202 @@ func (m *testMap) Update(key bpf.MapKey, value bpf.MapValue) error {
  }
  
  func (m *testMap) Delete(key bpf.MapKey) (bool, error) {
@@ -5121,7 +5705,7 @@ index 91af43c8d..4f8820b2a 100644
  type testEndpoint struct{}
  
  func (testEndpoint) GetIPv4Address() string { return "10.0.0.2" }
-@@ -42,6 +251,82 @@ func (testEndpoint) GetIfIndex() uint32     { return 34 }
+@@ -42,6 +273,82 @@ func (testEndpoint) GetIfIndex() uint32     { return 34 }
  func (testEndpoint) GetMACAddress() [6]byte { return [6]byte{0, 1, 2, 3, 4, 5} }
  func (testEndpoint) GetVLANID() int32       { return 100 }
  

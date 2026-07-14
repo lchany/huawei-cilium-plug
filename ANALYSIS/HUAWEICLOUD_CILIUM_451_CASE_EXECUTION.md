@@ -4,10 +4,10 @@
 
 | ID | P/类型 | 场景 | 状态 | 证据/结论 |
 | --- | --- | --- | --- | --- |
-| BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14：从 upstream `a1d7fbd43` 新建干净 worktree，`apply.sh` 顺序应用 22/22 成功，最终提交 `6e5d96a71`，工作树干净 |
+| BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit55：从 upstream `a1d7fbd43` 新建干净 worktree，顺序应用 15/15 成功，最终提交 `0048e0115`、tree `9faadd2aa`，工作树干净 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | `series` 22 条、22 个 patch 文件，干净重放后提交链一致；见 20260714 evidence |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，0015 SHA256 `9b5ed0e9...`，干净重放 tree 与最终源码 `9faadd2aa` 完全一致 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | 2026-07-14：HuaweiCloud 全量定向 Go suite 及最终变更包测试通过；见五节点结果“本轮发现并修复的问题” |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | pinned builder 中 `make -C bpf clean all` 通过，含 HuaweiCloud host compile option |
@@ -28,13 +28,13 @@
 | PRE-07 | P0/R | 多网卡 trunk 识别 | Pending | 待执行 |
 | PRE-08 | P1/C | 默认路由网卡不是 trunk | Pending | 待执行 |
 | PRE-09 | P0/R | metadata 中实例/VPC/AZ/port 信息 | Pass | 五节点 metadata UUID/AZ/network 非空，CiliumNode instance/trunk 信息完成调谐 |
-| PRE-10 | P1/C | metadata 短时不可达 | Pending | 待执行 |
-| PRE-11 | P1/C | metadata 返回空、 malformed 或 MAC 不匹配 | Pending | 待执行 |
+| PRE-10 | P1/C | metadata 短时不可达 | Pass | `TestMetadataHTTPTimeout/CancelledContext/HTTPStatuses` 在干净 15-patch replay 连续 10 轮通过，覆盖超时、取消、204/3xx/404/5xx |
+| PRE-11 | P1/C | metadata 返回空、 malformed 或 MAC 不匹配 | Pass | `TestOpenStackMetadataRequiredFields` 与 `TestGetTrunkInterfaceIDValidation` 连续 10 轮通过，覆盖空/null/malformed/空 links/空 port ID/MAC 无匹配 |
 | PRE-12 | P1/C | trunk link flap | Pending | 待执行 |
 | PRE-13 | P0/R | VPC、AZ、子网和 SG 归属 | Pass | 五节点真实 SubENI 均在目标 VPC/AZ/子网且客户 25 条互通 |
 | PRE-14 | P0/R | 子网可用 IP 和 SubENI 配额 | Skip | 用户批准：当前 flavor IPv4 上限 8，无法物理达到 min-allocate=10；传播与上限错误已验证 |
-| PRE-15 | P1/R | ECS flavor 限额识别 | Pending | 待执行 |
-| PRE-16 | P1/C | 未知/不支持 flavor | Pending | 待执行 |
+| PRE-15 | P1/R | ECS flavor 限额识别 | Pass | `TestSubENILimitMatchesFlavorIDOrName` 按 flavor ID/name 均识别上限 8，连续 10 轮通过 |
+| PRE-16 | P1/C | 未知/不支持 flavor | Pass | `TestSubENILimitMustBePositive/MatchesFlavorIDOrName` 覆盖未知 flavor 及空白、0、负数、非数字、溢出 limit，连续 10 轮通过 |
 | PRE-17 | P0/R | 安全组基础矩阵 | Pending | 待执行 |
 | PRE-18 | P1/R | iproute2、tcpdump、ethtool、conntrack 工具 | Pass | 五节点四项工具均存在 |
 | SEC-01 | P0/S | `existingSecret` 正常渲染 | Pass | 自定义 Secret 名渲染为两处 secretKeyRef，无内联值 |
@@ -53,7 +53,7 @@
 | SEC-14 | P0/R | Helm uninstall | Pending | 待执行 |
 | SEC-15 | P1/O | 自定义 Secret 名称 | Pending | 待执行 |
 | SEC-16 | P1/C | Secret 位于错误 namespace | Pending | 待执行 |
-| SEC-17 | P1/R | 特殊字符凭据 | Pending | 待执行 |
+| SEC-17 | P1/R | 特殊字符凭据 | Pass | `TestNewClientAcceptsOpaqueCredentialCharacters` 验证非空凭据中的标点按 opaque string 接受；API 边界批次连续 10 轮通过 |
 | SEC-18 | P1/O | External Secrets/CSI 控制器轮换 | Pending | 待执行 |
 | SEC-19 | P0/R | 最小云权限 | Pending | 待执行 |
 | SEC-20 | P1/C | 缺查询/创建/删除/打标签权限分别验证 | Pending | 待执行 |
@@ -76,59 +76,59 @@
 | API-02 | P0/R | BatchCreate SubENI | Pending | 待执行 |
 | API-03 | P0/R | Get/Show SubENI | Pending | 待执行 |
 | API-04 | P0/R | List SubENI | Pending | 待执行 |
-| API-05 | P1/S | List 分页 marker | Pending | 待执行 |
+| API-05 | P1/S | List 分页 marker | Pass | `TestListSubNetworkInterfacesRejectsRepeatedMarker/NextMarkerTerminalForms/ListAllowsNilItemsWhenPaginationAdvances` 连续 10 轮通过 |
 | API-06 | P0/R | SubENI 标签写入 | Pending | 待执行 |
 | API-07 | P0/R | Delete SubENI | Pending | 待执行 |
 | API-08 | P1/C | Delete 已不存在资源/404 | Pending | 待执行 |
 | API-09 | P1/C | Create 超时 | Pending | 待执行 |
-| API-10 | P1/C | Wait Active 超过 60 秒 | Pending | 待执行 |
-| API-11 | P1/C | HTTP 429 | Pending | 待执行 |
-| API-12 | P1/C | 5xx/网络断开 | Pending | 待执行 |
-| API-13 | P1/C | 401/403 | Pending | 待执行 |
-| API-14 | P1/S | batch 部分成功 | Pending | 待执行 |
-| API-15 | P1/C | 打标签失败 | Pending | 待执行 |
-| API-16 | P1/C | 回滚删除失败 | Pending | 待执行 |
+| API-10 | P1/C | Wait Active 超过 60 秒 | Pass | `TestWaitSubENIActiveStopsOnTimeoutAndContext` 以缩短测试时钟验证完整 timeout/cancel 分支，连续 10 轮通过 |
+| API-11 | P1/C | HTTP 429 | Pass | `TestAPIHTTPErrorNormalization` 将 429 标准化为 `ErrRateLimited`，连续 10 轮通过 |
+| API-12 | P1/C | 5xx/网络断开 | Pass | `TestAPIHTTPErrorNormalization` 覆盖 500 原错返回，`TestAPINetworkDisconnectIsReturned` 覆盖断连；连续 10 轮通过 |
+| API-13 | P1/C | 401/403 | Pass | `TestAPIHTTPErrorNormalization` 验证 401/403 均可由 `errors.Is(ErrUnauthorized)` 识别；连续 10 轮通过 |
+| API-14 | P1/S | batch 部分成功 | Pass | `TestValidateCreatedSubENIs/CreateResponsesAreValidatedBeforeFinalize` 覆盖短数组、nil、空 ID、重复 ID、过多结果并 fail closed；连续 10 轮通过 |
+| API-15 | P1/C | 打标签失败 | Pass | `TestFinalizeRollsBackAllCreatedSubENIsOnLastTagFailure` 验证末项标签失败后两个已创建 SubENI 均回滚；连续 10 轮通过 |
+| API-16 | P1/C | 回滚删除失败 | Pass | `TestRollbackReportsEveryDeleteFailure` 验证所有删除均尝试且两个资源 ID/失败均保留；连续 10 轮通过 |
 | API-17 | P1/R | API 最终一致性延迟 | Pending | 待执行 |
 | API-18 | P1/C | endpoint/region/project 配错 | Pending | 待执行 |
-| API-19 | P1/R | API QPS/突发限制 | Pending | 待执行 |
-| API-20 | P2/S | 错误码标准化矩阵 | Pending | 待执行 |
+| API-19 | P1/R | API QPS/突发限制 | Pass | `TestHuaweiCloudAPIRateLimitBoundaries` 验证 burst 40 无等待、第 41 次按 20 QPS 限流并上报 delay；连续 10 轮通过 |
+| API-20 | P2/S | 错误码标准化矩阵 | Pass | `TestAPIHTTPErrorNormalization` 覆盖 400/401/403/404/429/500，`TestAPINetworkDisconnectIsReturned` 覆盖 transport error；连续 10 轮通过 |
 | IPAM-01 | P0/R | 每个 worker 首次分配 | Pass | 四 worker 均分配真实 SubENI Pod IP，8/8 Running |
 | IPAM-02 | P0/R | 同节点多个 Pod | Pass | 每个 worker 同时运行 2 个 matrix Pod，IP 唯一 |
 | IPAM-03 | P0/R | 四 worker 并发分配 | Pass | 两个 DaemonSet 并发形成 8 Pod/4 worker，全部 Ready |
-| IPAM-04 | P0/R | 按标签选择同 AZ 子网 | Pending | 待执行 |
+| IPAM-04 | P0/R | 按标签选择同 AZ 子网 | Pass | `TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs` 验证 VPC/AZ 过滤后按标签选择；连续 10 轮通过 |
 | IPAM-05 | P0/R | 多标签 AND | Pending | 待执行 |
 | IPAM-06 | P1/R | 空标签值、特殊字符标签 | Pending | 待执行 |
 | IPAM-07 | P0/R | 标签无匹配 | Pending | 待执行 |
-| IPAM-08 | P0/R | 显式 subnet ID | Pending | 待执行 |
-| IPAM-09 | P0/R | ID 与标签同时配置 | Pending | 待执行 |
-| IPAM-10 | P1/C | 显式 ID 属于其他 AZ | Pending | 待执行 |
-| IPAM-11 | P1/C | 显式 ID 属于其他 VPC | Pending | 待执行 |
+| IPAM-08 | P0/R | 显式 subnet ID | Pass | `TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs` 验证显式 ID 精确命中；连续 10 轮通过 |
+| IPAM-09 | P0/R | ID 与标签同时配置 | Pass | 同一测试配置冲突的 ID/标签并证明显式 ID 优先；连续 10 轮通过 |
+| IPAM-10 | P1/C | 显式 ID 属于其他 AZ | Pass | `TestFindOneSubnetExplicitOrderValidationAndFallback` 注入 wrong-AZ 显式项并拒绝后按序选择合法项；连续 10 轮通过 |
+| IPAM-11 | P1/C | 显式 ID 属于其他 VPC | Pass | 同一测试注入 wrong-VPC 显式项并拒绝后按序选择合法项；连续 10 轮通过 |
 | IPAM-12 | P1/R | 多个合格标签子网 | Pending | 待执行 |
-| IPAM-13 | P1/C | 首选子网容量耗尽 | Pending | 待执行 |
-| IPAM-14 | P1/C | 所有子网容量为 0 | Pending | 待执行 |
-| IPAM-15 | P1/R | 容量未知 | Pending | 待执行 |
-| IPAM-16 | P0/R | 显式安全组 ID | Pending | 待执行 |
-| IPAM-17 | P1/R | 安全组标签选择 | Pending | 待执行 |
-| IPAM-18 | P0/R | 未配置 SG 时继承 trunk | Pending | 待执行 |
+| IPAM-13 | P1/C | 首选子网容量耗尽 | Pass | `TestFindOneSubnetExplicitOrderValidationAndFallback` 证明首项仅余 1、申请 3 时 fallback 到第二项；连续 10 轮通过 |
+| IPAM-14 | P1/C | 所有子网容量为 0 | Pass | `TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable` 覆盖所有显式候选 0/不足时返回 nil；连续 10 轮通过 |
+| IPAM-15 | P1/R | 容量未知 | Pass | `TestFindOneSubnetAllocationAndTieBoundaries` 将 `AvailableAddresses=-1` 视为未知/不可选，且合法容量不足时 fail closed；连续 10 轮通过 |
+| IPAM-16 | P0/R | 显式安全组 ID | Pass | `TestSecurityGroupPrecedenceValidationAndNormalization` 验证显式 SG 优先、去空/去重/稳定排序；连续 10 轮通过 |
+| IPAM-17 | P1/R | 安全组标签选择 | Pass | 同一测试验证标签选择优先于 trunk，`TestSecurityGroupTagSelectionIsScopedToVPC` 验证 VPC 约束；连续 10 轮通过 |
+| IPAM-18 | P0/R | 未配置 SG 时继承 trunk | Pass | `TestSecurityGroupsInheritedFromTrunkPort` 及 precedence 测试验证从 trunk 继承并规范化；连续 10 轮通过 |
 | IPAM-19 | P1/C | SG ID 无效/跨 VPC | Pending | 待执行 |
-| IPAM-20 | P1/R | 多安全组 | Pending | 待执行 |
+| IPAM-20 | P1/R | 多安全组 | Pass | 显式、标签、trunk 三条路径均验证多 SG、去重和稳定排序，且 101 个超过云上限会 fail closed；连续 10 轮通过 |
 | IPAM-21 | P1/R | SubENI 资源标签 | Pending | 待执行 |
-| IPAM-22 | P1/R | Agent-only 配置 | Pending | 待执行 |
-| IPAM-23 | P1/R | CNI-only 配置 | Pending | 待执行 |
-| IPAM-24 | P1/R | Agent+CNI 字段级合并 | Pending | 待执行 |
-| IPAM-25 | P1/C | CNI JSON 错误/字段类型错误 | Pending | 待执行 |
+| IPAM-22 | P1/R | Agent-only 配置 | Pass | `TestApplyHuaweiCloudIPAMNetConf/NetConf` 验证空 CNI 字段不覆盖 Agent 已有水位、子网和 SG；连续 10 轮通过 |
+| IPAM-23 | P1/R | CNI-only 配置 | Pass | CNI standalone/conflist HuaweiCloud 解析及 apply 测试验证 CNI-only 字段进入节点配置；连续 10 轮通过 |
+| IPAM-24 | P1/R | Agent+CNI 字段级合并 | Pass | apply 测试验证 CNI 非空字段逐字段覆盖、空字段保留 Agent 值且深拷贝隔离；连续 10 轮通过 |
+| IPAM-25 | P1/C | CNI JSON 错误/字段类型错误 | Pass | CNI 边界套件覆盖重复 key、负水位、错误字段类型、非法 prevResult、oversize、缺失/重复 plugin；全套连续 10 轮通过 |
 | IPAM-26 | P0/R | `releaseExcessIPs=false` | Pending | 待执行 |
 | IPAM-27 | P0/C | `releaseExcessIPs=true` | Pending | 待执行 |
 | IPAM-28 | P0/C | 在用 IP 保护 | Pending | 待执行 |
-| IPAM-29 | P1/C | 回收 Delete 失败 | Pending | 待执行 |
-| IPAM-30 | P1/R | 连续扩缩容 10 轮 | Pending | 待执行 |
+| IPAM-29 | P1/C | 回收 Delete 失败 | Pass | `TestReleaseIPsStopsAtDeleteFailure` 验证第 2 次删除失败后停止，保留未删资源且提交此前成功删除；连续 10 轮通过 |
+| IPAM-30 | P1/R | 连续扩缩容 10 轮 | Pass | 8 个 matrix Pod 连续删除/重建 10 轮；每轮两组 DaemonSet 8/8 Ready 且全向 mesh 56/56 |
 | IPAM-31 | P1/R | 达到 flavor SubENI 上限 | Pass | 实机达到 8 上限后返回受控 `No more IPs available`，无崩溃 |
 | IPAM-32 | P1/R | 达到子网 IP 上限 | Pending | 待执行 |
 | IPAM-33 | P1/R | 达到项目配额 | Pending | 待执行 |
 | IPAM-34 | P1/C | 手工删除一个测试 SubENI | Pending | 待执行 |
 | IPAM-35 | P1/C | 手工修改测试 SubENI SG/标签 | Pending | 待执行 |
 | IPAM-36 | P1/C | 删除测试节点/CiliumNode | Pending | 待执行 |
-| IPAM-37 | P1/R | Pod IP 快速复用 | Pending | 待执行 |
+| IPAM-37 | P1/R | Pod IP 快速复用 | Pass | 10 轮快速重建期间 `.230/.75/.12/.129` 等 IP 被重新分配，最终 endpoint Ready、mesh 56/56、客户矩阵全通过 |
 | ROUTE-01 | P0/R | 单 SubENI 路由基线 | Pass | 8/8 Pod source rule、独立表、default+gateway route 完整 |
 | ROUTE-02 | P0/R | 同节点同网关多 SubENI | Pass | 四 worker 各 2 Pod，使用不同 10001–14094 表且同网关正常 |
 | ROUTE-03 | P0/R | 同节点不同网关双子网 | Pending | 待执行 |
@@ -136,7 +136,7 @@
 | ROUTE-05 | P0/R | B 后 A 创建 | Pending | 待执行 |
 | ROUTE-06 | P0/R | 删除/重建其中一个 Pod | Pass | 删除整组 4 Pod 后旧 endpoint/map 清理，重建 4/4 Ready |
 | ROUTE-07 | P0/R | Agent 重启 | Pass | 单 Agent 与全 DS rollout 后 endpoint 恢复且 mesh 56/56 |
-| ROUTE-08 | P0/R | worker 重启 | Pending | 待执行 |
+| ROUTE-08 | P0/R | worker 重启 | Pass | node0002 实机重启暴露并修复启动期 BPF pin-map 竞态；audit53 无人工干预恢复，客户 HTTP 21/21、TCP 4/4、源 IP 19/19 全通过 |
 | ROUTE-09 | P0/C | 从旧共享 ifindex 表升级 | Pending | 待执行 |
 | ROUTE-10 | P0/R | 显式 compat=false | Pass | 当前 compat=false 客户配置下 8 Pod 路由表及 56/56 mesh 通过 |
 | ROUTE-11 | P1/R | 显式 compat=true | Pending | 待执行 |
@@ -150,7 +150,7 @@
 | BPF-01 | P0/R | endpoint Ready | Pass | 8 个 matrix endpoint 均 ready 且存在于 endpoint BPF map |
 | BPF-02 | P0/R | endpoint 删除 | Pass | 4 Pod 整组删除后旧 endpoint/map 4/4 消失，重建后 4/4 恢复 |
 | BPF-03 | P0/R | Agent 重启/endpoint restore | Pass | 单 Agent 和全量 rollout 后恢复，最终 mesh 56/56 |
-| BPF-04 | P1/R | Pod 快速创建删除 | Pending | 待执行 |
+| BPF-04 | P1/R | Pod 快速创建删除 | Pass | 10 轮共快速删除/重建 80 个 Pod；每轮新 Pod 8/8 Ready 且 BPF 数据面全向 56/56，无 Agent/BPF 错误日志 |
 | BPF-05 | P1/S | 第二张 map 写失败 | Pass | patch0029 注入 ingress map 更新失败，验证 source map 恢复旧值或删除新值；rollback 再失败时返回组合错误 |
 | BPF-06 | P1/S | 重复 Ready/Delete 事件 | Pass | patch0034 连续 Ready 10 次仅保留各一条 map entry，连续 Delete 10 次保持两图为空；普通与 `-race` 测试通过 |
 | BPF-07 | P1/S | 非法 IP/MAC/VLAN/ifindex | Pass | patch0028 在 map 写入前覆盖非法/IPv6 IP、零/组播 MAC、VLAN 越界和零 ifindex，全部 fail closed |
@@ -220,9 +220,9 @@
 | REC-03 | P0/C | 删除 Operator Pod | Pass | 新 Operator Ready，CiliumNode 5/5 稳定，数据面正常 |
 | REC-04 | P1/C | Operator 在创建过程中退出 | Pending | 待执行 |
 | REC-05 | P1/C | Operator 在打标签过程中退出 | Pending | 待执行 |
-| REC-06 | P1/C | kubelet 重启 | Pending | 待执行 |
-| REC-07 | P1/C | containerd/Docker 重启 | Pending | 待执行 |
-| REC-08 | P1/C | worker-b2 重启 | Pending | 待执行 |
+| REC-06 | P1/C | kubelet 重启 | Pass | node0002 重启 kubelet 后 Agent/endpoint/客户数据面恢复并完成全量客户矩阵复测 |
+| REC-07 | P1/C | containerd/Docker 重启 | Pass | node0002 重启 containerd 后 Agent/endpoint/客户数据面恢复并完成全量客户矩阵复测 |
+| REC-08 | P1/C | worker-b2 重启 | Pass | node0002 整机重启后 audit53 自动创建并 pin HuaweiCloud BPF map，5/5 Agent/Node Ready，客户矩阵全通过 |
 | REC-09 | P1/C | worker cordon/drain/uncordon | Pending | 待执行 |
 | REC-10 | P1/C | 控制面 API Server 短时不可达 | Pass | 2026-07-14：控制面因压力失联并完成软重启；发现 Worker Agent 通过 Service IP 启动形成循环依赖，设置 `k8s-api-server=https://192.168.1.65:6443` 后 Agent 5/5、Operator 1/1 恢复，客户25项及 mesh 56/56 复测通过 |
 | REC-11 | P1/C | Operator→云 API 网络断开 | Pending | 待执行 |
@@ -298,7 +298,7 @@
 | BMETA-05 | P1/S | AZ 不以单字符后缀表示 region | Pass | 修复为仅接受小写单字母 AZ 后缀，单测通过 |
 | BMETA-06 | P0/S | `network_data.links` 为空 | Pass | 新增单测验证明确报错 |
 | BMETA-07 | P0/S | `links[0].vif_id` 为空但后续 link 有值 | Pass | 修复为跳过空占位 link，单测通过 |
-| BMETA-08 | P0/R | 多网卡且真正 trunk 不是 `links[0]` | Pending | 待执行 |
+| BMETA-08 | P0/R | 多网卡且真正 trunk 不是 `links[0]` | Pass | `TestSelectTrunkInterfaceIDOrderIndependent` 将真实 trunk 放在第 2 项并反转顺序，始终按 MAC 命中 `trunk-port`；连续 10 轮通过 |
 | BMETA-09 | P0/S | metadata links 顺序重排 | Pass | 按配置网卡 MAC 选择，正反顺序单测均命中同一 port ID |
 | BMETA-10 | P1/S | metadata HTTP 204/301/404/500 | Pass | httptest 四种状态均被拒绝 |
 | BMETA-11 | P1/S | metadata 响应恰好/超过 1 MiB | Pass | 恰好上限接受，超 1 字节明确拒绝 |
@@ -393,8 +393,8 @@
 | BIPAM-18 | P0/S | prefix delegation 被误启用 | Pass | `IsPrefixDelegated()` 始终 false，单测锁定能力边界 |
 | BIPAM-19 | P1/S | SubENI 同时带 IPv4/IPv6 | Pass | patch0039：双栈 SubENI resync 仅将 IPv4 发布到当前 IPv4 allocation map，IPv6 不泄漏，同时 IPv6 metadata 在 SubENI status 缓存中保留；普通/race 测试通过 |
 | BIPAM-20 | P1/S | VPC primary/extended CIDR 为空、非法、重复、重叠 | Pass | patch0033 强制 IPv4 primary；primary 无效时不派生 secondary；过滤空/非法/IPv6/重复及任意方向重叠 extended CIDR，保留稳定输入顺序 |
-| BIPAM-21 | P1/C | CiliumNode 被删除后立即重建 | Pending | 待执行 |
-| BIPAM-22 | P1/C | 节点名相同但 provider/instance ID 已变化 | Pending | 待执行 |
+| BIPAM-21 | P1/C | CiliumNode 被删除后立即重建 | Pass | audit25b 实机先证实删除后 120s 不重建；修复为 Agent 每10s只读核验本地对象并仅在 NotFound 时重建。audit49 canary 在 Agent Pod 不重启下删除对象，1s 产生新 UID，随后 pool/status 恢复8/8，5/5 Node Ready |
+| BIPAM-22 | P1/C | 节点名相同但 provider/instance ID 已变化 | Pass | `TestUpdatedNodeTracksInstanceIDChangesAndRejectsEmpty` 在同一 Node 对象从 old→new instance ID 后只发布新实例资源，空 ID fail closed；连续 10 轮通过 |
 | BMAP-01 | P0/S | endpoint 为 nil、ID=0、ifindex=0、IPv4 为空 | Pass | patch0028 `TestEndpointValidationBoundaries` 覆盖 nil/typed nil、零 ID/ifindex 与空 IPv4，均 fail closed |
 | BMAP-02 | P0/S | endpoint IPv4 非法或为 IPv6 | Pass | patch0028 覆盖非法字符串与 IPv6，Ready/Delete 均拒绝 |
 | BMAP-03 | P0/S | SubENI MAC 为空、短、长、multicast、非法字符 | Pass | patch0028 扩展 API 响应校验并覆盖 map 边界：仅接受 6 字节非零单播 MAC |
@@ -428,9 +428,9 @@
 | BROUTE-05 | P0/S | MTU 为 0、负数、与 trunk 当前 MTU 不同 | Pass | patch0031 拒绝非正 MTU；privileged netns 测试验证当前 1500 与请求 1400 不同时正确调谐至 1400 |
 | BROUTE-06 | P0/S | 同机已有表 10001～14094 的非 Cilium 路由 | Pass | patch0032 在任何 rule/route 变更前审计专用表；privileged netns 注入外部路由后 Configure fail closed 且原路由保持唯一、未被覆盖 |
 | BROUTE-07 | P0/S | VLAN ID 在不同 trunk 上重复 | Pass | patch0032 以现有 gateway/ifindex 校验表所有权；两个 trunk 复用 VLAN 时第二次配置被拒绝，第一条默认路由保持 |
-| BROUTE-08 | P0/S | 新 rule 成功、nexthop route 失败 | Pending | 待执行 |
-| BROUTE-09 | P0/S | nexthop 成功、default route 失败 | Pending | 待执行 |
-| BROUTE-10 | P0/S | 新表完整但 stale rule 删除失败 | Pending | 待执行 |
+| BROUTE-08 | P0/S | 新 rule 成功、nexthop route 失败 | Pass | 注入首个 nexthop `RouteReplace` 失败，验证 ingress/egress rule 与专用表 route 全部回滚为空；privileged 100 轮及 race 10 轮通过 |
+| BROUTE-09 | P0/S | nexthop 成功、default route 失败 | Pass | 注入第二个 default `RouteReplace` 失败，验证已装 nexthop 与两类 rule 逆序清理；privileged 100 轮及 race 10 轮通过 |
+| BROUTE-10 | P0/S | 新表完整但 stale rule 删除失败 | Pass | 注入第二条 stale rule 删除失败，验证已删 stale rule 恢复且新 rule/route 全部回滚；privileged 100 轮及 race 10 轮通过 |
 | BROUTE-11 | P1/S | stale rule 有 mark/mask/to 字段 | Pending | 待执行 |
 | BROUTE-12 | P1/S | 同源同优先级存在多个规则 | Pending | 待执行 |
 | BROUTE-13 | P1/R | Pod 删除后 route table 保留、VLAN 后续复用新 gateway | Pending | 待执行 |

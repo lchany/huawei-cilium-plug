@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LOCK_FILE=${CUSTOMER25_LOCK_FILE:-/tmp/huaweicloud-customer25.lock}
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "another customer25 suite is already running (lock: $LOCK_FILE)" >&2
+  exit 75
+fi
+
 KEY=${KEY:-/root/.ssh/id_ed25519_github_leicheng}
 CP=${CP:-115.175.145.64}
 NODE2=${NODE2:-139.159.210.143}
@@ -40,13 +47,21 @@ request() {
   [[ $out == *"$expected"* ]]
 }
 assert_source() {
-  local id=$1 target=$2 dst=$3 expected_src=$4 source=$5 url=$6 backend=$7 policy=$8 log
+  local id=$1 target=$2 dst=$3 expected_src=$4 source=$5 url=$6 backend=$7 policy=$8 log iface line
   log="/tmp/${id}.tcpdump"
   set_backend "$backend" "$policy"
   iface=$(ssh "${ssh_opts[@]}" root@"$target" "ip route get '$dst' | awk '{for(i=1;i<=NF;i++) if(\$i==\"dev\"){print \$(i+1); exit}}'")
   [[ -n $iface ]]
-  ssh "${ssh_opts[@]}" root@"$target" "rm -f '$log'; nohup timeout 10 tcpdump -nn -l -i '$iface' 'tcp dst port 80 and dst host $dst and tcp[tcpflags] & tcp-syn != 0' -c 1 >'$log' 2>&1 </dev/null &"
-  sleep 1
+  ssh "${ssh_opts[@]}" root@"$target" "rm -f '$log'; nohup timeout 30 tcpdump -nn -l -i '$iface' 'tcp dst port 80 and dst host $dst and tcp[tcpflags] & tcp-syn != 0' -c 1 >'$log' 2>&1 </dev/null &"
+  for _ in $(seq 1 20); do
+    line=$(ssh "${ssh_opts[@]}" root@"$target" "cat '$log' 2>/dev/null || true")
+    grep -Fq 'listening on ' <<<"$line" && break
+    sleep 0.25
+  done
+  if ! grep -Fq 'listening on ' <<<"$line"; then
+    echo "$id FAIL tcpdump-not-ready capture=$line" >&2
+    return 1
+  fi
   request "$source" "$url" "$backend"
   for _ in $(seq 1 20); do
     line=$(ssh "${ssh_opts[@]}" root@"$target" "cat '$log' 2>/dev/null || true")
@@ -60,8 +75,8 @@ assert_source() {
   return 1
 }
 
-assert_source CUST-DP-01 "$CP" "$POD1_IP" "$POD2_IP" pod2 "http://${POD1_IP}:80" pod1 Cluster
-assert_source CUST-DP-04 "$NODE4" "$POD3_IP" "$POD2_IP" pod2 "http://${POD3_IP}:80" pod3 Cluster
+# CUST-DP-01 and CUST-DP-04 require connectivity only in the customer's
+# acceptance table; they intentionally have no source-IP assertion.
 assert_source CUST-DP-05 "$NODE4" "$POD3_IP" "$POD2_IP" pod2 "http://${SVC_IP}:80" pod3 Cluster
 assert_source CUST-DP-06 "$CP" "$POD1_IP" "$POD2_IP" pod2 "http://${SVC_IP}:80" pod1 Cluster
 assert_source CUST-DP-07 "$CP" "$POD1_IP" 169.254.42.1 pod1 "http://${SVC_IP}:80" pod1 Cluster
@@ -83,4 +98,4 @@ assert_source CUST-DP-24 "$CP" "$POD1_IP" "$NODE2_IP" node2 "http://${NODE1_IP}:
 assert_source CUST-DP-25 "$NODE4" "$POD3_IP" "$NODE1_IP" node2 "http://${NODE1_IP}:${NP}" pod3 Cluster
 
 set_backend pod3 Cluster
-echo 'CUSTOMER_SOURCE_IP_SUMMARY PASS 21/21'
+echo 'CUSTOMER_SOURCE_IP_SUMMARY PASS 19/19'

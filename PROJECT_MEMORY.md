@@ -6,6 +6,12 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
 
 ## Confirmed Project Facts
 
+- [2026-07-14] Build artifact cleanup rule
+  Rule: Before each compilation, remove obsolete build outputs that the new build will overwrite. After compilation or packaging, delete superseded temporary builds/images when they are no longer needed; retain an older artifact only when it is still required for rollback, comparison, or evidence.
+  Scope: HuaweiCloud Cilium build, image packaging, and deployment workflow.
+  Source: user instruction.
+  Status: active
+
 - [2026-07-13] Incremental validation workflow
   Rule: During live validation, test continuously; whenever a problem is found, modify the code immediately, compile the affected components, and rerun the failed case plus relevant regression cases before proceeding. Do not defer fixes, builds, or retests until the end.
   Scope: HuaweiCloud Cilium live-test and repair workflow.
@@ -23,8 +29,8 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
   Status: active
 
 - [2026-07-14] Patch archive and baseline
-  Value: `/home/l30002999/huawei-cilium-v1.19.1` delivers exactly one consolidated patch for upstream Cilium v1.12.19 commit `a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`: `0001-huaweicloud-add-production-SubENI-IPAM-and-datapath-.patch`. `series` contains only that filename. After the CiliumNode self-heal and nested-CIDR fixes, the refreshed squash tree is `9d59fa44afd168d254d14a88548b1c3edc9b2186`; clean single-patch replay `5bdcce5c8b31dd30843468903f4d28dd8c99b03b` is tree-equivalent and passed affected ordinary/race/privileged suites. Previous scoped and Helm suites passed.
-  Source: repository README/series and consolidated replay verification.
+  Value: `/home/l30002999/huawei-cilium-v1.19.1` targets upstream Cilium v1.12.19 commit `a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`. Per the corrected delivery requirement, the earliest 14 functional patches remain separate and later validation bug fixes are consolidated in `0015-fix-huaweicloud-consolidate-validation-bug-fixes.patch`; `series` and the directory both contain exactly 15 patches. Audit53 clean replay commit `350e3d88e29f77b8cb3cbc566a13eb05d65cc71a` and authoritative source `c9acfd98d389efdea3bb71908b76bf94604dd903` share tree `bb47f9e5ce91512b0b329f5fe91ee98004938d43`. Local and remote package branch HEAD remain `a607ab671a7a4287c09e815d21a28f79b0e0712f`; the latest local patch/evidence changes are not yet committed or pushed.
+  Source: user correction plus current Git/series inspection.
   Status: active
 
 - [2026-07-13] Test-plan scope
@@ -44,6 +50,20 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
 
 ## User Corrections
 
+- [2026-07-14] Normal-resource builds are allowed
+  Previous wrong assumption: Future builds on the current build machine should default to `GOMAXPROCS=1`, `GOFLAGS=-p=1`, `nice`, and `ionice` because an earlier high-load attempt temporarily affected node readiness.
+  Correct value: The user confirmed the current machine has sufficient resources, so subsequent compilations may use normal build parallelism and do not need low-resource throttling by default.
+  Future rule: Keep removing overwritten outputs before compilation, but do not impose low-resource build flags unless current measurements show real contention or the user asks for them.
+  Source: user correction.
+  Status: active
+
+- [2026-07-14] Preserve functional patch history
+  Previous wrong assumption: The user wanted all functional and bug-fix work squashed into one delivery patch.
+  Correct value: Preserve the original 14 functional patches and consolidate only later test-discovered bug fixes into patch 0015.
+  Future rule: Do not replace the 14+1 Git-managed patch layout with a single all-in-one patch.
+  Source: user correction.
+  Status: active
+
 - [2026-07-13] Resource-dependent boundary cases may be skipped
   Previous wrong assumption: Cross-AZ validation and physically reaching `min-allocate=10` had to be completed before accepting the current five-machine run.
   Correct value: The user approved skipping both because all five purchased machines are in one AZ and the current ECS flavor supports at most 8 SubENI IPv4 addresses.
@@ -52,6 +72,11 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
   Status: active
 
 ## Invalidated Assumptions
+
+- [2026-07-14] Do not describe the delivery as one all-in-one patch.
+  Reason: That layout incorrectly erased the original feature-patch structure.
+  Superseded by: Exactly 14 original functional patches plus one consolidated bug-fix patch.
+  Status: active
 
 - [2026-07-13] Do not treat cross-AZ and physical `min-allocate=10` attainment as mandatory for this run.
   Reason: The user explicitly approved skipping cases that require a different AZ or a larger ECS flavor.
@@ -66,14 +91,14 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
 ## Current Task State
 
 - Current goal: Execute and independently audit all 451 catalogued cases, fixing, rebuilding, deploying, and retesting until no executable case remains Pending or Fail.
-- Last verified: Kubernetes v1.24.17 has five Ready nodes; audit25b Agent (`24ebfb5c7`) is 5/5 healthy and audit20 HuaweiCloud Operator is 1/1. Service and network-policy variants through established-connection invalidation pass. Policy enforcement was restored to customer `policy-audit-mode=true`; temporary resources were removed; latest post-restore customer HTTP passed 21x100 and Agents are 5/5. The consolidated single-patch replay and scoped/privileged/race/Helm suites pass. BSEC-08 and BCFG-17 pass. BRACE-01 through BRACE-06 plus BRACE-09/10 are repaired/verified with deterministic ordinary/race tests and clean replay. The ledger has 241 Pass, 206 Pending, 4 approved Skip, and 0 Fail rows; Pending rows remain mandatory.
-- Next likely step: Continue executing the 451-case ledger in P0/P1 batches, add missing boundary tests, repair failures incrementally, and update only evidence-backed rows.
-- Immediate live step: finish audit49 distribution, canary the corrected nested-CIDR startup, roll out all five Agents, then repeat BIPAM-21 deletion and verify automatic CiliumNode recreation without Agent restart. BIPAM-21 remains Pending until that evidence exists.
+- Last verified: The ledger contains 286 Pass, 161 Pending, 4 approved Skip, and 0 recorded Fail. Ten-round rapid matrix recreation/reuse passed. Transactional rollback for partial nexthop/default/stale-rule installation passed privileged 100x and race 10x. The corrected 14+1 replay tree is `9faadd2aa8b2aa517e9d9163b2937764755b5ead`; audit55 is deployed on all five nodes with binary SHA256 `9452d3a3568e9e997b571a2fdcd2f0abf5df2a5a7eef72c17f9be2fc01fde4da`. Final post-rollout mesh 56/56, HTTP 21/21 at 100/100, TCP 4/4 at 5/5, and source IP 19/19 all passed; five Nodes/Agents and Operator remain healthy with a clean Agent error scan. The source-IP runner now waits for confirmed tcpdump readiness and allows a 30-second capture window so remote SSH latency cannot create a false missing-SYN result.
+- Next likely step: continue executing the remaining P0/P1 recovery, failure-injection, upgrade, capacity, observability, and stability rows, repairing and repeating the complete regression/audit cycle after any defect.
+- Immediate live step: preserve the healthy audit55 baseline and execute the next isolated destructive case with rollback and serialized customer-suite protection.
 - Blockers: Only the two user-approved environment Skips remain allowed: cross-AZ and physical `min-allocate=10` attainment. Full L7 Envoy coverage requires an image containing the Envoy layer and remains Pending, not implicitly passed.
 
 ## Evidence Pointers
 
-- Relevant files: `README.md`, `INSTALL-DEPLOY.md`, `TROUBLESHOOTING.md`, `build-local.sh`, `0001` through `0034` patches, `ANALYSIS/HUAWEICLOUD_CILIUM_TEST_PLAN.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_BOUNDARY_COVERAGE_REVIEW.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_TEST_SCENARIOS.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_LIVE_TEST_CASES.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_CUSTOMER_ACCEPTANCE_CASES.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_LIVE_RESULTS.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_451_CASE_EXECUTION.md`, and the three `run_customer25_audit17_*.sh` evidence runners.
+- Relevant files: `README.md`, `INSTALL-DEPLOY.md`, `TROUBLESHOOTING.md`, `build-local.sh`, functional patches 0001-0014 plus consolidated bug-fix patch 0015, `ANALYSIS/HUAWEICLOUD_CILIUM_TEST_PLAN.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_BOUNDARY_COVERAGE_REVIEW.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_TEST_SCENARIOS.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_LIVE_TEST_CASES.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_CUSTOMER_ACCEPTANCE_CASES.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_5_NODE_LIVE_RESULTS.md`, `ANALYSIS/HUAWEICLOUD_CILIUM_451_CASE_EXECUTION.md`, and the three `run_customer25_audit17_*.sh` evidence runners.
 - Relevant commands: patch numstat inspection; extraction of added test functions; review of build-local test commands.
 - Saved outputs or logs: none; durable conclusions are summarized above.
 
