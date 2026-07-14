@@ -43,7 +43,7 @@
 | SEC-04 | P0/R | Secret 缺 AK 键 | Pass | 稳定进入 CreateContainerConfigError: AK key not found |
 | SEC-05 | P0/R | Secret 缺 SK 键 | Pass | 稳定进入 CreateContainerConfigError: SK key not found |
 | SEC-06 | P0/R | AK/SK 正确 | Pass | Operator 1/1 Ready 且五个 CiliumNode 正常云端调谐 |
-| SEC-07 | P1/C | AK/SK 错误或过期 | Pending | 待执行 |
+| SEC-07 | P1/C | AK/SK 错误或过期 | Pass | audit79 远端0600备份原 Secret 后注入无效 AK/SK 并重启；云鉴权错误可诊断且未输出原值，mesh 56/56、pool 恒等；恢复 Secret/重启后鉴权错误归零并删除备份 |
 | SEC-08 | P1/C | Secret 轮换 | Pending | 待执行 |
 | SEC-09 | P0/S | Helm 渲染对象集合 | Pass | Helm lint/template 通过，对象 kind 集合已统计；见 20260714 evidence |
 | SEC-10 | P0/S | Helm values 和命令行扫描 | Pass | 渲染物无 AK/SK 值，只有 Secret key 引用 |
@@ -227,7 +227,7 @@
 | REC-10 | P1/C | 控制面 API Server 短时不可达 | Pass | 2026-07-14：控制面因压力失联并完成软重启；发现 Worker Agent 通过 Service IP 启动形成循环依赖，设置 `k8s-api-server=https://192.168.1.65:6443` 后 Agent 5/5、Operator 1/1 恢复，客户25项及 mesh 56/56 复测通过 |
 | REC-11 | P1/C | Operator→云 API 网络断开 | Pending | 待执行 |
 | REC-12 | P1/C | 节点 DNS 故障 | Pending | 待执行 |
-| REC-13 | P1/C | 错误云凭据 | Pending | 待执行 |
+| REC-13 | P1/C | 错误云凭据 | Pass | audit79 无效凭据窗口只造成新云操作鉴权失败，现有 Pod 网络 mesh 56/56、40 个 pool 资源映射不变；恢复原 Secret 后 Operator Ready/restart0、各 CiliumNode error 为空 |
 | REC-14 | P1/C | 测试子网耗尽 | Pending | 待执行 |
 | REC-15 | P1/C | 测试 SG 临时阻断 | Pending | 待执行 |
 | REC-16 | P1/C | trunk 接口 down/up | Pass | audit64 真实 trunk 连续3轮 down 5秒/up；每轮125/150后20/20，Node/Agent Ready且restart=0，五个当前策略表均为完整两路由，permanent neighbor与map owner均正确；末尾mesh 56/56 |
