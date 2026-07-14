@@ -2,7 +2,7 @@
 
 ## 1. 文档定位
 
-本文基于分支 `patch-archive/huaweicloud-v1.12.19` 的 14 个 patch，作为五台新购
+本文基于分支 `patch-archive/huaweicloud-v1.12.19` 的 15 个 patch，作为五台新购
 HuaweiCloud ECS 的实机测试场景目录。基线如下：
 
 - patch 归档提交：`ea34077`；
@@ -50,7 +50,7 @@ HuaweiCloud ECS 的实机测试场景目录。基线如下：
 ```text
 用例 ID：
 执行时间/执行人：
-基线 commit、14 个 patch 校验和、Agent/Operator image digest：
+基线 commit、15 个 patch 校验和、Agent/Operator image digest：
 节点、AZ、Pod 子网、场景类型：
 前置状态证据：
 执行步骤：
@@ -84,10 +84,10 @@ HuaweiCloud ECS 的实机测试场景目录。基线如下：
 
 | ID | P/类型 | 场景 | 预期与证据 |
 | --- | --- | --- | --- |
-| BASE-01 | P0/S | 固定 upstream commit 应用 14 个 patch | `apply.sh` 成功，14 个提交顺序与 `series` 一致，工作树干净 |
+| BASE-01 | P0/S | 固定 upstream commit 应用 15 个 patch | `apply.sh` 成功，15 个提交顺序与 `series` 一致，工作树干净 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | `apply.sh` 在修改源码前失败，不产生半应用结果 |
 | BASE-03 | P1/S | patch 中断后恢复 | `git am --abort` 后可从固定基线重新完整重放 |
-| BASE-04 | P0/S | 14 个 patch 完整性 | 文件名、顺序、SHA256、提交 ID 记录到报告 |
+| BASE-04 | P0/S | 15 个 patch 完整性 | 文件名、顺序、SHA256、提交 ID 记录到报告 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | HuaweiCloud API、IPAM、CNI、node discovery、routing、daemon 测试通过 |
 | BASE-06 | P0/S | privileged routing 测试 | 独立 netns 中验证双 VLAN 表和遗留规则清理 |
 | BASE-07 | P0/S | BPF 全排列编译 | HuaweiCloud VLAN 相关宏组合编译通过，无 verifier 错误 |

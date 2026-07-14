@@ -10,7 +10,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 - upstream tag：`v1.12.19`
 - upstream commit：`a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`
-- 当前 patch 数量：10
+- 当前 patch 数量：1（已将原 43 个开发/修复 patch 合并）
 
 `apply.sh` 默认检查完整基线 commit，避免把 patch 应用到其他 Cilium 版本。
 
@@ -18,16 +18,7 @@ patch 应用后会修改 Cilium 源码，这是预期行为。这里所说的解
 
 ```text
 .
-├── 0001-huaweicloud-control-plane.patch
-├── 0002-huaweicloud-datapath-runtime.patch
-├── 0003-huaweicloud-generated-tests-dependencies.patch
-├── 0004-images-fix-operator-runtime-command-expansion.patch
-├── 0005-images-retain-variant-operator-binary-for-Helm-comma.patch
-├── 0006-huaweicloud-support-subnet-selection-by-tags.patch
-├── 0007-huaweicloud-isolate-SubENI-policy-routing-tables.patch
-├── 0008-huaweicloud-handle-inline-VLAN-ingress-frames.patch
-├── 0009-huaweicloud-require-external-operator-credentials.patch
-├── 0010-huaweicloud-populate-subnet-available-addresses.patch
+├── 0001-huaweicloud-add-production-SubENI-IPAM-and-datapath-.patch
 ├── series
 ├── apply.sh
 ├── build-local.sh
@@ -97,14 +88,15 @@ Helm 的 HuaweiCloud Operator Deployment 会显式执行
 
 通过华为云 V1/V2 子网接口读取 `available_ip_address_count`，再与 V3 Virsubnet 的标签、
 VPC 和可用区信息合并，填充 `ipamTypes.Subnet.AvailableAddresses`。容量为 0 或小于本次
-申请量的子网不再参与选择；多个候选子网选择真实剩余地址最多的一个。
+申请量的子网不再参与选择；自动候选选择真实剩余地址最多的一个，同容量时按 ID
+稳定选择；显式列表严格按配置顺序选择首个合法且容量充足的子网。
 
 ## 管理流程
 
 ```mermaid
 flowchart LR
     base["upstream Cilium v1.12.19"]
-    patches["按 series 应用 14 个 patch"]
+    patches["按 series 应用 1 个合并 patch"]
     source["HuaweiCloud 定制源码树"]
     build["构建 Agent / CNI / Operator"]
     deploy["部署并验证 SubENI"]
