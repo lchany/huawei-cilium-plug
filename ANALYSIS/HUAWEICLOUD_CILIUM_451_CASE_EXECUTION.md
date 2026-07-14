@@ -44,7 +44,7 @@
 | SEC-05 | P0/R | Secret 缺 SK 键 | Pass | 稳定进入 CreateContainerConfigError: SK key not found |
 | SEC-06 | P0/R | AK/SK 正确 | Pass | Operator 1/1 Ready 且五个 CiliumNode 正常云端调谐 |
 | SEC-07 | P1/C | AK/SK 错误或过期 | Pass | audit79 远端0600备份原 Secret 后注入无效 AK/SK 并重启；云鉴权错误可诊断且未输出原值，mesh 56/56、pool 恒等；恢复 Secret/重启后鉴权错误归零并删除备份 |
-| SEC-08 | P1/C | Secret 轮换 | Pending | 待执行 |
+| SEC-08 | P1/C | Secret 轮换 | Pass | audit82 不暴露凭据值地在集群内复制为新 Secret，同时切换 AK/SK 引用；新 audit81 Operator Ready/restart0、无鉴权错误、mesh 56/56、pool 恒等，随后恢复原引用并确认临时 Secret 清零 |
 | SEC-09 | P0/S | Helm 渲染对象集合 | Pass | Helm lint/template 通过，对象 kind 集合已统计；见 20260714 evidence |
 | SEC-10 | P0/S | Helm values 和命令行扫描 | Pass | 渲染物无 AK/SK 值，只有 Secret key 引用 |
 | SEC-11 | P0/R | Helm release Secret 扫描 | Pass | 运行资源与 Helm 配置扫描未发现内联云凭据 |
@@ -284,11 +284,11 @@
 | CLEAN-01 | P0/C | 删除测试 namespace | Pass | audit74删除含10个跨五节点Pod的隔离namespace，42.506秒完成且namespace无残留；五个CiliumNode used状态逐项回到创建前基线，末尾mesh 56/56 |
 | CLEAN-02 | P0/C | `releaseExcessIPs=false` 下清理 | Pass | audit74在false配置下删除隔离namespace后等待210秒，五节点各8个、合计40个池条目的IP/resource清单与删除前完全一致；节点/Agent/Operator健康且无重启 |
 | CLEAN-03 | P0/C | `releaseExcessIPs=true` 下清理 | Pass | audit75在隔离单节点缩容窗口真实删除2个空闲SubENI，保护全部在用IP；随后恢复false、min8和池8，DaemonSet 4/4+4/4、路由表4组各2条、永久邻居及mesh 56/56 |
-| CLEAN-04 | P0/R | 云端孤儿检查 | Pending | 待执行 |
+| CLEAN-04 | P0/R | 云端孤儿检查 | Pass | audit81 恢复后通过生产 Client 精确 List 父端口全集，与五个 CiliumNode 的 40 个 pool 资源 ID 集合一致，所有测试创建/删除 ID 均无残留 |
 | CLEAN-05 | P0/R | 节点 route/map/neighbor 残留检查 | Pass | audit57 对 5 节点 CiliumNode/SubENI、endpoint、双 pinned map、priority 20/110/111 rule、VLAN 路由表和 permanent neighbor 做交叉审计；活跃表全部精确匹配，未引用表均为允许的完整 default+nexthop 保留对，stale=0、malformed=0 |
 | CLEAN-06 | P0/R | 节点标签/污点恢复 | Pass | audit57 五节点终态审计：4 worker 污点均为0，control-plane 仅保留 kubeadm 的 master/control-plane NoSchedule 污点；无 customer/matrix/audit/test/canary 临时标签或污点，Agent 5/5 Running |
-| CLEAN-07 | P0/R | 外部 Secret 处理 | Pending | 待执行 |
-| CLEAN-08 | P0/R | 证据脱敏和归档 | Pending | 待执行 |
+| CLEAN-07 | P0/R | 外部 Secret 处理 | Pass | audit80/audit82 验证自定义 Secret 引用、错 namespace 失败边界及 EXIT 恢复；最终仅原 `cilium-huaweicloud` 引用存在，两个临时 Secret 在相应 namespace 均不存在 |
+| CLEAN-08 | P0/R | 证据脱敏和归档 | Pass | 执行工作树与全 Git 历史高置信凭据扫描：私钥 PEM、AKIA 样式、内联云 SK 均 0 命中；`ANALYSIS` 无 `.out/.log/.tar/.key` 敏感原始件，仅归档脱敏结论和 `/tmp` 证据路径 |
 | CLEAN-09 | P1/R | 五节点最终健康检查 | Pass | audit60 全量回归后 5 Node Ready、5 Agent Ready/OK、Operator 1/1；Agent/BPF/测试源码三哈希一致，map stale=0、相关错误=0、DiskPressure=0，mesh/HTTP/TCP/源IP 全通过 |
 | CLEAN-10 | P1/R | 清理后 30 分钟复核 | Pending | 待执行 |
 | BMETA-01 | P0/S | OpenStack metadata `uuid` 为空 | Pass | 新增单测验证明确报错 |
