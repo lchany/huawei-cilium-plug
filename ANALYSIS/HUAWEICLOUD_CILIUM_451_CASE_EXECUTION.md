@@ -30,7 +30,7 @@
 | PRE-09 | P0/R | metadata 中实例/VPC/AZ/port 信息 | Pass | 五节点 metadata UUID/AZ/network 非空，CiliumNode instance/trunk 信息完成调谐 |
 | PRE-10 | P1/C | metadata 短时不可达 | Pass | `TestMetadataHTTPTimeout/CancelledContext/HTTPStatuses` 在干净 15-patch replay 连续 10 轮通过，覆盖超时、取消、204/3xx/404/5xx |
 | PRE-11 | P1/C | metadata 返回空、 malformed 或 MAC 不匹配 | Pass | `TestOpenStackMetadataRequiredFields` 与 `TestGetTrunkInterfaceIDValidation` 连续 10 轮通过，覆盖空/null/malformed/空 links/空 port ID/MAC 无匹配 |
-| PRE-12 | P1/C | trunk link flap | Pass | audit62 在 node0002 对真实 trunk `eth0` 连续3轮 down 5秒/up；每轮故障前5/5、故障中稳定出现25/150丢包、恢复后20/20，systemd 单元成功且接口回到 UP/LOWER_UP |
+| PRE-12 | P1/C | trunk link flap | Pass | audit64 修复并复测真实 trunk `eth0` 连续3轮 down 5秒/up；每轮故障前5/5、故障中恰有25/150丢包、恢复后20/20；所有当前 priority-111 表均恢复精确两条路由，permanent neighbor 恢复，Agent不重启且不会提前拉起故障中的接口 |
 | PRE-13 | P0/R | VPC、AZ、子网和 SG 归属 | Pass | 五节点真实 SubENI 均在目标 VPC/AZ/子网且客户 25 条互通 |
 | PRE-14 | P0/R | 子网可用 IP 和 SubENI 配额 | Skip | 用户批准：当前 flavor IPv4 上限 8，无法物理达到 min-allocate=10；传播与上限错误已验证 |
 | PRE-15 | P1/R | ECS flavor 限额识别 | Pass | `TestSubENILimitMatchesFlavorIDOrName` 按 flavor ID/name 均识别上限 8，连续 10 轮通过 |
@@ -143,7 +143,7 @@
 | ROUTE-12 | P1/C | 遗留重复 rule | Pending | 待执行 |
 | ROUTE-13 | P1/R | VLAN 边界和表范围 | Pending | 待执行 |
 | ROUTE-14 | P1/C | VLAN 0、>4094 或解析错误 | Pending | 待执行 |
-| ROUTE-15 | P1/C | 手工删除测试 route/rule | Pending | 待执行 |
+| ROUTE-15 | P1/C | 手工删除测试 route/rule | Pass | audit64 在 node0002 同时删除 pod3 与 `cilium_host` 的 priority-111 rule、两组完整路由以及 permanent gateway neighbor；3秒内全部恢复，Agent未重启，两张 HuaweiCloud map 哈希不变，随后 mesh 56/56 |
 | ROUTE-16 | P1/R | 宿主已有其他策略规则 | Pending | 待执行 |
 | ROUTE-17 | P1/R | VPC 内网与公网双目标 | Pending | 待执行 |
 | ROUTE-18 | P1/R | 长连接期间新增第二网关 Pod | Pending | 待执行 |
@@ -230,8 +230,8 @@
 | REC-13 | P1/C | 错误云凭据 | Pending | 待执行 |
 | REC-14 | P1/C | 测试子网耗尽 | Pending | 待执行 |
 | REC-15 | P1/C | 测试 SG 临时阻断 | Pending | 待执行 |
-| REC-16 | P1/C | trunk 接口 down/up | Pass | audit62 真实 trunk 连续3轮 down/up 后 Node/Agent Ready、Agent restart保持0、VLAN662+pod3 MAC map owner仍在、`cilium status --brief=OK`；末尾全量mesh 56/56且无相关错误日志 |
-| REC-17 | P1/C | 删除一条测试策略路由 | Pending | 待执行 |
+| REC-16 | P1/C | trunk 接口 down/up | Pass | audit64 真实 trunk 连续3轮 down 5秒/up；每轮125/150后20/20，Node/Agent Ready且restart=0，五个当前策略表均为完整两路由，permanent neighbor与map owner均正确；末尾mesh 56/56 |
+| REC-17 | P1/C | 删除一条测试策略路由 | Pass | audit64 实机删除 ordinary endpoint 与 router 策略路由并确认故障状态非no-op；周期reconcile在3秒内恢复两者规则/路由和neighbor，不重写BPF map，完整客户回归通过 |
 | REC-18 | P1/C | 删除一个测试 BPF map 条目 | Pass | audit57 实机删除 matrix Pod `192.168.1.246` 的 source-map entry 后跨机 ping 按预期失败；重启该节点 Agent 后 entry 自动恢复、Agent OK、定向 ping 和 mesh 56/56 恢复 |
 | REC-19 | P1/C | 云端手工删除空闲 SubENI | Pending | 待执行 |
 | REC-20 | P1/C | 云端手工删除在用 SubENI | Pending | 待执行 |
