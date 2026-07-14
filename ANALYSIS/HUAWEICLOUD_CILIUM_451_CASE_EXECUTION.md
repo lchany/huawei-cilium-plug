@@ -244,7 +244,7 @@
 | SCALE-03 | P1/R | 五节点并发扩容 | Pending | 待执行 |
 | SCALE-04 | P1/R | 40→4→40 循环 10 次 | Pending | 待执行 |
 | SCALE-05 | P2/R | 接近最大 Pod 数 | Pending | 待执行 |
-| PERF-01 | P1/R | 同节点吞吐/RTT | Pending | 待执行 |
+| PERF-01 | P1/R | 同节点吞吐/RTT | Pass | audit71 对保留旧候选audit60与当前audit64分别完成同节点3轮各300秒TCP及TCP/UDP各3轮10000次请求应答；audit64吞吐中位1120.03 Mbps，较audit60的1120.02 Mbps持平（+0.001%），TCP P99中位改善15.08%，UDP P99中位增加1.82%，两者均0丢失且在无客户数值门槛时采用的10%保守技术护栏内 |
 | PERF-02 | P1/R | 同 AZ 跨节点吞吐/RTT | Pass | audit70 同 AZ 跨节点完成3轮各300秒持续TCP：中位1405.31 Mbps、最大偏差3.238%；TCP/UDP各3轮10000次请求应答均0丢失，P99分别87.382–94.302/80.502–88.403 us；另有3轮100包ICMP均0丢失 |
 | PERF-03 | P1/R | 跨 AZ 吞吐/RTT | Skip | 用户批准跨 AZ 环境限制 Skip；五台购买机器均位于同一 AZ，audit70已完成同 AZ 跨节点基线 |
 | PERF-04 | P1/R | TCP/UDP PPS | Pending | 待执行 |
