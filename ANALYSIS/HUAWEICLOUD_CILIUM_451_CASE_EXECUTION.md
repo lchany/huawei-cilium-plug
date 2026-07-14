@@ -68,9 +68,9 @@
 | INS-09 | P1/C | 缺 CRD 安装 | Pending | 待执行 |
 | INS-10 | P1/C | Agent 镜像不可拉取 | Pass | audit67 仅移除 node0003 的运行别名后删除 Agent；新 Pod 明确进入 ErrImagePull/ImagePullBackOff，事件记录 localhost registry connection refused；恢复本地别名后新 Agent Ready/OK、哈希正确且mesh 56/56 |
 | INS-11 | P1/C | Operator 镜像错误或双后缀 | Pending | 待执行 |
-| INS-12 | P1/R | 节点污点和 toleration | Pending | 待执行 |
+| INS-12 | P1/R | 节点污点和 toleration | Pass | audit68 node0004 加临时NoSchedule污点后删除Agent；DaemonSet的全量Exists toleration使新Agent仍在该节点Ready/OK且哈希正确；移除污点后无残留，mesh 56/56 |
 | INS-13 | P1/R | Operator 单副本重启 | Pass | 删除后新 Pod Ready，五个 CiliumNode 稳定，数据面通过 |
-| INS-14 | P1/O | Operator 多副本/选主 | Pending | 待执行 |
+| INS-14 | P1/O | Operator 多副本/选主 | Pass | audit69 Operator扩至2副本均Ready，仅Lease holder执行leader；删除当前leader后standby取得不同holderIdentity且Deployment补齐2/2，客户链路20/20；最终恢复1/1 |
 | INS-15 | P1/R | CNI 文件落盘 | Pass | 五节点 JSON 校验通过且 SHA256 一致，cilium-cni 可执行 |
 | API-01 | P0/R | 单个 Create SubENI | Pending | 待执行 |
 | API-02 | P0/R | BatchCreate SubENI | Pending | 待执行 |
@@ -223,7 +223,7 @@
 | REC-06 | P1/C | kubelet 重启 | Pass | node0002 重启 kubelet 后 Agent/endpoint/客户数据面恢复并完成全量客户矩阵复测 |
 | REC-07 | P1/C | containerd/Docker 重启 | Pass | node0002 重启 containerd 后 Agent/endpoint/客户数据面恢复并完成全量客户矩阵复测 |
 | REC-08 | P1/C | worker-b2 重启 | Pass | node0002 整机重启后 audit53 自动创建并 pin HuaweiCloud BPF map，5/5 Agent/Node Ready，客户矩阵全通过 |
-| REC-09 | P1/C | worker cordon/drain/uncordon | Pending | 待执行 |
+| REC-09 | P1/C | worker cordon/drain/uncordon | Pass | audit68 对node0004执行真实cordon/drain，节点保持Ready+SchedulingDisabled，Cilium/kube-proxy/matrix DaemonSet保持，客户pod2→pod3 20/20；uncordon后unschedulable与临时taint均为空，mesh 56/56 |
 | REC-10 | P1/C | 控制面 API Server 短时不可达 | Pass | 2026-07-14：控制面因压力失联并完成软重启；发现 Worker Agent 通过 Service IP 启动形成循环依赖，设置 `k8s-api-server=https://192.168.1.65:6443` 后 Agent 5/5、Operator 1/1 恢复，客户25项及 mesh 56/56 复测通过 |
 | REC-11 | P1/C | Operator→云 API 网络断开 | Pending | 待执行 |
 | REC-12 | P1/C | 节点 DNS 故障 | Pending | 待执行 |
@@ -236,7 +236,7 @@
 | REC-19 | P1/C | 云端手工删除空闲 SubENI | Pending | 待执行 |
 | REC-20 | P1/C | 云端手工删除在用 SubENI | Pending | 待执行 |
 | REC-21 | P1/C | 节点 NotReady 超过回收窗口 | Pending | 待执行 |
-| REC-22 | P1/O | Operator 多副本 leader 切换 | Pending | 待执行 |
+| REC-22 | P1/O | Operator 多副本 leader 切换 | Pass | audit69 删除Lease holder所在Operator，holder从node0003身份切到node0004 standby，2副本重新Ready；缩回1副本又安全切至node0002身份，Operator错误扫描0、Nodes 5/5、mesh 56/56 |
 | REC-23 | P2/C | 节点时间跳变 | Pending | 待执行 |
 | REC-24 | P2/C | 大量 Kubernetes 事件积压 | Pending | 待执行 |
 | SCALE-01 | P1/R | 40 Pod burst 均匀分布 | Pending | 待执行 |

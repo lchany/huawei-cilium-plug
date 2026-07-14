@@ -627,3 +627,17 @@ here. A failed or methodologically invalid probe is never counted as Pass.
 - While node0003's Agent was unavailable, exactly the other four Agents remained Ready and the customer pod2-to-pod3 path passed 20/20 with zero loss. Reinstating the local alias and recreating only the failed Pod restored the exact audit64 Agent hash and `cilium status --brief=OK`; the full mesh then passed `56/56`, and node0003 finished with all five current route tables complete plus the permanent neighbor.
 - The first orchestration attempt reached the expected `ErrImagePull`, but an unescaped shell `$p` in evidence formatting aborted the wrapper. Its trap restored the image alias and kubelet recovered automatically. That attempt is excluded; only the corrected retry with complete fault, unaffected-path, recovery, and post-mesh evidence is counted. Evidence: `/tmp/audit67-ins10-upg11-image-missing-recovery-retry.out`, `/tmp/audit67-ins10-upg11-recovery-mesh.out`, and `/tmp/audit67-node0003-final-route-image.out`.
 - This closes INS-10 and UPG-11. The ledger is now 327 Pass, 120 Pending, 4 approved environment Skips, and 0 Fail.
+
+# Worker maintenance and Agent toleration audit68
+
+- Node0004 was cordoned and drained with DaemonSets explicitly preserved. Kubernetes reported `Ready` plus `SchedulingDisabled`; the existing Agent stayed Ready with restart count zero, and customer pod2-to-pod3 traffic passed 20/20. Uncordon restored `spec.unschedulable` to empty.
+- A temporary `huaweicloud.cilium.io/audit68=temporary:NoSchedule` taint was then applied. Deleting only node0004's Agent proved the DaemonSet's `operator: Exists` toleration operationally: a different Agent Pod scheduled on the tainted node, became Ready with the exact audit64 hash, and returned status `OK`. The taint was removed, no unschedulable or taint residue remained, Nodes/Agents were 5/5, and mesh passed `56/56`.
+- Evidence: `/tmp/audit68-rec09-cordon-drain.out`, `/tmp/audit68-ins12-taint-toleration.out`, `/tmp/audit68-post-maintenance-mesh.out`, and `/tmp/audit68-residue-health.out`.
+- This closes INS-12 and REC-09. The ledger is now 329 Pass, 118 Pending, 4 approved environment Skips, and 0 Fail.
+
+# Operator replica and leader failover audit69
+
+- The Operator Deployment was scaled from one to two replicas; both became Ready while `cilium-operator-resource-lock` retained one holder. Mapping the holder's node-prefixed identity selected the actual leader. Deleting that leader changed the Lease from the node0003 identity to the existing node0004 standby identity, while the Deployment returned to 2/2 Ready.
+- During the failover, customer pod2-to-pod3 traffic passed 20/20. Scaling back to one replica safely caused a second Lease transition to the surviving node0002 identity. Final state is exactly one Ready Operator, a nonempty holder, zero matching panic/fatal/leader-election errors, five Ready Nodes, and mesh `56/56`.
+- The first identification attempt scaled to two Ready replicas but used `grep -q` on a long SSH log stream; pipe closure prevented reliable leader selection. Its cleanup trap restored one replica, and it is excluded. The corrected retry uses the holder identity's node prefix and supplies complete failure/recovery evidence. Evidence: `/tmp/audit69-operator-leader-failover-retry.out`, `/tmp/audit69-post-failover-mesh.out`, and `/tmp/audit69-final-operator-health.out`.
+- This closes INS-14 and REC-22. The ledger is now 331 Pass, 116 Pending, 4 approved environment Skips, and 0 Fail.
