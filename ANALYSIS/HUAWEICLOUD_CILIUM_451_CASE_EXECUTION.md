@@ -241,7 +241,7 @@
 | REC-24 | P2/C | 大量 Kubernetes 事件积压 | Pending | 待执行 |
 | SCALE-01 | P1/R | 40 Pod burst 均匀分布 | Pending | 待执行 |
 | SCALE-02 | P1/R | 单节点 burst | Pending | 待执行 |
-| SCALE-03 | P1/R | 五节点并发扩容 | Pending | 待执行 |
+| SCALE-03 | P1/R | 五节点并发扩容 | Pass | audit73 单次并发创建10个Pod，通过强制hostname拓扑约束在五节点精确均分为每节点2个，2540 ms全部Ready；删除后五个CiliumNode的IPAM used计数均回到逐节点基线，未发生泄漏 |
 | SCALE-04 | P1/R | 40→4→40 循环 10 次 | Pending | 待执行 |
 | SCALE-05 | P2/R | 接近最大 Pod 数 | Pending | 待执行 |
 | PERF-01 | P1/R | 同节点吞吐/RTT | Pass | audit71 对保留旧候选audit60与当前audit64分别完成同节点3轮各300秒TCP及TCP/UDP各3轮10000次请求应答；audit64吞吐中位1120.03 Mbps，较audit60的1120.02 Mbps持平（+0.001%），TCP P99中位改善15.08%，UDP P99中位增加1.82%，两者均0丢失且在无客户数值门槛时采用的10%保守技术护栏内 |
