@@ -140,11 +140,11 @@
 | ROUTE-09 | P0/C | 从旧共享 ifindex 表升级 | Pending | 待执行 |
 | ROUTE-10 | P0/R | 显式 compat=false | Pass | 当前 compat=false 客户配置下 8 Pod 路由表及 56/56 mesh 通过 |
 | ROUTE-11 | P1/R | 显式 compat=true | Pending | 待执行 |
-| ROUTE-12 | P1/C | 遗留重复 rule | Pending | 待执行 |
+| ROUTE-12 | P1/C | 遗留重复 rule | Pass | audit65 在 node0002 为 pod3 注入 priority-110 legacy rule 与独立 blackhole 表；周期reconcile在4秒内只删除旧rule，保留正确priority-111 rule/两条当前路由且不修改外部表，清理后mesh 56/56 |
 | ROUTE-13 | P1/R | VLAN 边界和表范围 | Pending | 待执行 |
 | ROUTE-14 | P1/C | VLAN 0、>4094 或解析错误 | Pending | 待执行 |
 | ROUTE-15 | P1/C | 手工删除测试 route/rule | Pass | audit64 在 node0002 同时删除 pod3 与 `cilium_host` 的 priority-111 rule、两组完整路由以及 permanent gateway neighbor；3秒内全部恢复，Agent未重启，两张 HuaweiCloud map 哈希不变，随后 mesh 56/56 |
-| ROUTE-16 | P1/R | 宿主已有其他策略规则 | Pending | 待执行 |
+| ROUTE-16 | P1/R | 宿主已有其他策略规则 | Pass | audit65 注入 priority-112、源198.51.100.1、table50000及blackhole default；跨4个五秒reconcile周期rule/route逐字不变，全部当前HuaweiCloud策略表仍完整，清理后mesh 56/56 |
 | ROUTE-17 | P1/R | VPC 内网与公网双目标 | Pending | 待执行 |
 | ROUTE-18 | P1/R | 长连接期间新增第二网关 Pod | Pending | 待执行 |
 | BPF-01 | P0/R | endpoint Ready | Pass | 8 个 matrix endpoint 均 ready 且存在于 endpoint BPF map |
