@@ -25,8 +25,8 @@
 | PRE-04 | P0/R | 内核、cgroup、容器运行时 | Pass | HCE2 5.10、cgroup v1、containerd 1.6.36，五节点一致 |
 | PRE-05 | P0/R | 时钟、DNS、NTP | Pass | 五节点 NTP synchronized；集群/公网 DNS 最终均通过 |
 | PRE-06 | P0/R | 单网卡 trunk 识别 | Pass | 五节点 eth0 单物理网卡，SubENI/VLAN 路由和数据面均通过 |
-| PRE-07 | P0/R | 多网卡 trunk 识别 | Pending | 待执行 |
-| PRE-08 | P1/C | 默认路由网卡不是 trunk | Pending | 待执行 |
+| PRE-07 | P0/R | 多网卡 trunk 识别 | Pass | audit61 将真实系统默认网卡与 privileged dummy trunk 并存，显式 trunk 名连续20轮命中其 MAC/port；另将真正 trunk 放在 metadata links 第2项并正反重排100轮，均不依赖第一张网卡 |
+| PRE-08 | P1/C | 默认路由网卡不是 trunk | Pass | audit61 现场默认设备为 `vpneth0`，privileged trunk 为独立 dummy；正确显式名连续20轮成功，旧/错误名 fail-fast，测试前后默认路由字节级一致且未误操作默认端口 |
 | PRE-09 | P0/R | metadata 中实例/VPC/AZ/port 信息 | Pass | 五节点 metadata UUID/AZ/network 非空，CiliumNode instance/trunk 信息完成调谐 |
 | PRE-10 | P1/C | metadata 短时不可达 | Pass | `TestMetadataHTTPTimeout/CancelledContext/HTTPStatuses` 在干净 15-patch replay 连续 10 轮通过，覆盖超时、取消、204/3xx/404/5xx |
 | PRE-11 | P1/C | metadata 返回空、 malformed 或 MAC 不匹配 | Pass | `TestOpenStackMetadataRequiredFields` 与 `TestGetTrunkInterfaceIDValidation` 连续 10 轮通过，覆盖空/null/malformed/空 links/空 port ID/MAC 无匹配 |
