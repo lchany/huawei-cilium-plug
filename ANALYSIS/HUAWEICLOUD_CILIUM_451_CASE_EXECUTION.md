@@ -118,8 +118,8 @@
 | IPAM-24 | P1/R | Agent+CNI 字段级合并 | Pass | apply 测试验证 CNI 非空字段逐字段覆盖、空字段保留 Agent 值且深拷贝隔离；连续 10 轮通过 |
 | IPAM-25 | P1/C | CNI JSON 错误/字段类型错误 | Pass | CNI 边界套件覆盖重复 key、负水位、错误字段类型、非法 prevResult、oversize、缺失/重复 plugin；全套连续 10 轮通过 |
 | IPAM-26 | P0/R | `releaseExcessIPs=false` | Pass | audit74确认运行配置为false；五节点各并发新增2个Pod并删除后，等待210秒超过默认180秒释放延迟，40个SubENI/IP池条目的IP与resource映射逐项不变，未触发主动回收 |
-| IPAM-27 | P0/C | `releaseExcessIPs=true` | Pending | 待执行 |
-| IPAM-28 | P0/C | 在用 IP 保护 | Pending | 待执行 |
+| IPAM-27 | P0/C | `releaseExcessIPs=true` | Pass | audit75在node0003临时将min-allocate 8→4并移走2个测试Pod，重启Operator加载true后80秒内池8→6；确认池内容实际变化，然后恢复false/min8/池8及全部测试Pod |
+| IPAM-28 | P0/C | 在用 IP 保护 | Pass | audit75释放前锁定node0003仍在用的router/health IP 192.168.1.167、192.168.1.45；池8→6后两者仍在池内且used集合未损失，恢复后仍存在，未删除在用SubENI |
 | IPAM-29 | P1/C | 回收 Delete 失败 | Pass | `TestReleaseIPsStopsAtDeleteFailure` 验证第 2 次删除失败后停止，保留未删资源且提交此前成功删除；连续 10 轮通过 |
 | IPAM-30 | P1/R | 连续扩缩容 10 轮 | Pass | 8 个 matrix Pod 连续删除/重建 10 轮；每轮两组 DaemonSet 8/8 Ready 且全向 mesh 56/56 |
 | IPAM-31 | P1/R | 达到 flavor SubENI 上限 | Pass | 实机达到 8 上限后返回受控 `No more IPs available`，无崩溃 |
@@ -283,7 +283,7 @@
 | OBS-12 | P1/R | 指标长期趋势 | Pending | 待执行 |
 | CLEAN-01 | P0/C | 删除测试 namespace | Pass | audit74删除含10个跨五节点Pod的隔离namespace，42.506秒完成且namespace无残留；五个CiliumNode used状态逐项回到创建前基线，末尾mesh 56/56 |
 | CLEAN-02 | P0/C | `releaseExcessIPs=false` 下清理 | Pass | audit74在false配置下删除隔离namespace后等待210秒，五节点各8个、合计40个池条目的IP/resource清单与删除前完全一致；节点/Agent/Operator健康且无重启 |
-| CLEAN-03 | P0/C | `releaseExcessIPs=true` 下清理 | Pending | 待执行 |
+| CLEAN-03 | P0/C | `releaseExcessIPs=true` 下清理 | Pass | audit75在隔离单节点缩容窗口真实删除2个空闲SubENI，保护全部在用IP；随后恢复false、min8和池8，DaemonSet 4/4+4/4、路由表4组各2条、永久邻居及mesh 56/56 |
 | CLEAN-04 | P0/R | 云端孤儿检查 | Pending | 待执行 |
 | CLEAN-05 | P0/R | 节点 route/map/neighbor 残留检查 | Pass | audit57 对 5 节点 CiliumNode/SubENI、endpoint、双 pinned map、priority 20/110/111 rule、VLAN 路由表和 permanent neighbor 做交叉审计；活跃表全部精确匹配，未引用表均为允许的完整 default+nexthop 保留对，stale=0、malformed=0 |
 | CLEAN-06 | P0/R | 节点标签/污点恢复 | Pass | audit57 五节点终态审计：4 worker 污点均为0，control-plane 仅保留 kubeadm 的 master/control-plane NoSchedule 污点；无 customer/matrix/audit/test/canary 临时标签或污点，Agent 5/5 Running |
@@ -388,7 +388,7 @@
 | BIPAM-13 | P0/S | 批量 release 第 N 个 Delete 失败 | Pass | patch 0024：第 2 个删除注入失败，确认第 1 个已提交、第 2/3 个保留且立即停止；ENI 定向测试通过 |
 | BIPAM-14 | P1/S | release 期间上下文取消 | Pass | patch 0024：第 2 个删除前取消 context，返回 context.Canceled，第 1 个已提交且第 2 个保留；ENI 定向测试通过 |
 | BIPAM-15 | P1/S | 空闲候选 IP 为 `.2`、`.10` 等 | Pass | 明确按字符串排序并在重复调谐中保持稳定；单测验证 `.10`、`.2` 固定顺序 |
-| BIPAM-16 | P0/S | `releaseExcessIPs` 运行中 false→true→false | Pending | 待执行 |
+| BIPAM-16 | P0/S | `releaseExcessIPs` 运行中 false→true→false | Pass | audit75从已验证false基线重启Operator加载true并只在该窗口完成池8→6释放握手，再重启恢复false；最终池补回8、工作负载/路由/健康全恢复，无关闭后继续删除 |
 | BIPAM-17 | P0/S | `AllocateStaticIP` 被调用 | Pass | 明确返回 unsupported 和空 IP，不创建随机资源 |
 | BIPAM-18 | P0/S | prefix delegation 被误启用 | Pass | `IsPrefixDelegated()` 始终 false，单测锁定能力边界 |
 | BIPAM-19 | P1/S | SubENI 同时带 IPv4/IPv6 | Pass | patch0039：双栈 SubENI resync 仅将 IPv4 发布到当前 IPv4 allocation map，IPv6 不泄漏，同时 IPv6 metadata 在 SubENI status 缓存中保留；普通/race 测试通过 |
