@@ -156,13 +156,13 @@
 | BPF-07 | P1/S | 非法 IP/MAC/VLAN/ifindex | Pass | patch0028 在 map 写入前覆盖非法/IPv6 IP、零/组播 MAC、VLAN 越界和零 ifindex，全部 fail closed |
 | BPF-08 | P1/R | map 容量接近上限 | Pending | 待执行 |
 | VLAN-01 | P0/R | skb VLAN metadata 入方向 | Pending | 待执行 |
-| VLAN-02 | P0/R | 线内 802.1Q 入方向 | Pending | 待执行 |
+| VLAN-02 | P0/R | 线内 802.1Q 入方向 | Pass | audit61 两端 `eth0` 的 RX VLAN offload 均为 fixed-off；物理入口抓到 VLAN 1443/662 单层 802.1Q，20/20 ICMP 与20/20 HTTP 到达目标 Pod，内核抓包0丢包 |
 | VLAN-03 | P0/R | 线内 802.1ad 入方向 | Pending | 待执行 |
 | VLAN-04 | P0/R | 线内 VLAN 与 metadata 同时存在 | Pending | 待执行 |
-| VLAN-05 | P0/R | 只有一种 VLAN 表示 | Pending | 待执行 |
+| VLAN-05 | P0/R | 只有一种 VLAN 表示 | Pass | audit61 现场 RX VLAN offload=fixed-off，入口 skb 仅有线内 802.1Q；目标 Pod 正常接收 ICMP/HTTP，结合 audit59 packet-level 最终 ethertype/长度断言证明单次 pop 不破坏内层报文 |
 | VLAN-06 | P0/R | 处理后 `vlan_present` 仍为旧值 | Pending | 待执行 |
-| VLAN-07 | P0/R | 出方向 VLAN 添加 | Pending | 待执行 |
-| VLAN-08 | P0/R | 入方向目标 MAC+VLAN 命中 | Pending | 待执行 |
+| VLAN-07 | P0/R | 出方向 VLAN 添加 | Pass | audit61 两端 TX VLAN offload=fixed-off；`-Q out` 各抓10帧，pod2 帧为源 MAC `fa:16:3e:ba:13:19`/VLAN1443，pod3 帧为 `fa:16:3e:ba:13:d9`/VLAN662，均发往 trunk 网关 MAC 且10/10往返成功 |
+| VLAN-08 | P0/R | 入方向目标 MAC+VLAN 命中 | Pass | audit61 物理入口分别抓到目标 MAC+VLAN `fa:16:3e:ba:13:19+1443`、`fa:16:3e:ba:13:d9+662`；实时 pinned map 精确存在相同 key 并映射到 pod2/pod3 endpoint，流量成功投递 |
 | VLAN-09 | P1/C | VLAN 正确但 MAC 不匹配 | Pending | 待执行 |
 | VLAN-10 | P1/C | MAC 正确但 VLAN 不匹配 | Pending | 待执行 |
 | VLAN-11 | P1/C | 截断/非法 VLAN header | Pending | 待执行 |
@@ -170,7 +170,7 @@
 | VLAN-13 | P1/O | 双层 QinQ | Pending | 待执行 |
 | VLAN-14 | P1/R | 非 trunk 接口 VLAN 流量 | Pending | 待执行 |
 | VLAN-15 | P1/R | GSO/GRO/checksum offload 开关矩阵 | Pending | 待执行 |
-| VLAN-16 | P1/R | ICMP/TCP/UDP、分片与大包 | Pending | 待执行 |
+| VLAN-16 | P1/R | ICMP/TCP/UDP、分片与大包 | Pass | audit61 跨节点双向 ICMP、双向1MiB TCP及双向100行 UDP 哈希一致；4KB ICMP 双向5/5，物理两端均抓到 VLAN 分片且0丢包；另覆盖56/1400/1472/2000字节与HTTP 20/20 |
 | NET-01 | P0/R | 同节点 Pod↔Pod | Pass | 客户场景 1，HTTP 100/100；见五节点实机结果 |
 | NET-02 | P0/R | 同 AZ 跨节点 Pod↔Pod | Pass | 客户场景 4，HTTP 100/100；见五节点实机结果 |
 | NET-03 | P0/R | 跨 AZ Pod↔Pod | Skip | 用户批准：五台均在同一 AZ；同 AZ 跨节点 56/56 已通过 |
@@ -273,7 +273,7 @@
 | OBS-02 | P0/R | CiliumNode 与云端快照 | Pass | 五节点 instance/watermark 快照在 Operator 重启前后稳定 |
 | OBS-03 | P0/R | `ip rule/route/neigh` 快照 | Pass | 8 个 source rule/table/default/gateway 已逐项审计 |
 | OBS-04 | P0/R | BPF map 快照 | Pass | audit57 逐节点解析两张 HuaweiCloud pinned map 原始 value，所有 LxcID 均存在于实时 endpoint 集，5/5 节点 stale=0 |
-| OBS-05 | P0/R | trunk 双端抓包 | Pending | 待执行 |
+| OBS-05 | P0/R | trunk 双端抓包 | Pass | audit61 在 node0005/node0002 的 trunk 物理口双端并发抓包，仅过滤测试 Pod IP 与 ICMP/TCP/UDP；分别记录185/208帧、VLAN1443/662、双向分片和校验信息，内核丢包均为0 |
 | OBS-06 | P0/R | Cilium monitor/drop counters | Pass | 五节点 `cilium status --brief` 全 OK 并读取 forward/drop 指标；在 pod2 连续 30 次 ClusterIP 请求期间抓取其本节点 monitor：385 events、357 含 pod2 IP、0 drop，双向 Service NAT trace 完整 |
 | OBS-07 | P1/R | Kubernetes Event | Pass | 2026-07-14 全 namespace 按 lastTimestamp 审计：5/5 Node Ready、Agent 5/5 Running/0 restart；仅见 rollout 启动窗口的瞬时 startup-probe connection-refused，随后全部健康，无持续 Warning |
 | OBS-08 | P1/R | 云 API request ID | Pending | 待执行 |
