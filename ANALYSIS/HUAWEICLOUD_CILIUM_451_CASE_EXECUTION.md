@@ -4,18 +4,18 @@
 
 | ID | P/类型 | 场景 | 状态 | 证据/结论 |
 | --- | --- | --- | --- | --- |
-| BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit59：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `670450b70`、tree `7f745f042`，与权威源码树完全一致 |
+| BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit60：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `6fab161f8`、tree `e1d395fc4`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，0015 SHA256 `b99505de...`，干净重放 tree 与最终源码 `7f745f042` 完全一致 |
-| BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit59 干净回放：16 个最终变更相关包普通测试通过，受影响包 race 测试通过，privileged routing 与 subenimap 测试通过 |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，audit60 0015 SHA256 `ecc925d9...`，干净重放 tree 与最终源码 `e1d395fc4` 完全一致 |
+| BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit60 干净回放：受影响 endpointmanager/metadata 普通、race、privileged 定向测试通过；endpointmanager 全包普通/race 单轮通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
-| BASE-08 | P0/S | Agent/CNI/Operator 构建 | Pass | Agent、CNI、generic Operator、HuaweiCloud Operator 均从最终功能源码构建通过；audit59 从干净回放重建 Agent 并封装 165 文件 BPF install tree |
-| BASE-09 | P0/R | 镜像 CPU 架构匹配 | Pass | 五节点 x86_64，audit59 为 linux/amd64 静态二进制；5/5 Agent SHA256 `54cd5a23...`、运行时 `huaweicloud.h` SHA256 `8dae79a6...` |
+| BASE-08 | P0/S | Agent/CNI/Operator 构建 | Pass | Agent、CNI、generic Operator、HuaweiCloud Operator 均从最终功能源码构建通过；audit60 从干净回放重建 Agent 并封装 165 文件 BPF install tree |
+| BASE-09 | P0/R | 镜像 CPU 架构匹配 | Pass | 五节点 x86_64，audit60 为 linux/amd64 静态二进制；5/5 Agent SHA256 `06c7efa7...`、运行时 `huaweicloud.h` SHA256 `8dae79a6...` |
 | BASE-10 | P0/R | Operator 镜像默认命令 | Pass | 运行命令为 `cilium-operator-huaweicloud` |
 | BASE-11 | P0/R | Operator 双二进制 | Pass | 两个 `/usr/bin/cilium-operator*` 均可执行并报告 1.12.19 |
-| BASE-12 | P1/S | 重复构建一致性 | Pass | audit59 使用同一干净源码和项目 Makefile 清理旧产物后重新构建，两次 amd64 静态 Agent SHA256 均为 `54cd5a23...` |
+| BASE-12 | P1/S | 重复构建一致性 | Pass | audit60 使用同一干净源码和项目 Makefile 清理旧产物后重新构建，两次 amd64 静态 Agent SHA256 均为 `06c7efa7...` |
 | BASE-13 | P1/S | 离线镜像分发 | Pass | audit17 两份 tar 校验 SHA256 后导入五节点 containerd；Agent 5/5、Operator 1/1 运行并完成客户 25 项及 56/56 回归 |
 | BASE-14 | P1/R | 私有仓库分发 | Pending | 待执行 |
 | BASE-15 | P2/S | SBOM/漏洞/许可证检查 | Pending | 待执行 |
@@ -289,7 +289,7 @@
 | CLEAN-06 | P0/R | 节点标签/污点恢复 | Pass | audit57 五节点终态审计：4 worker 污点均为0，control-plane 仅保留 kubeadm 的 master/control-plane NoSchedule 污点；无 customer/matrix/audit/test/canary 临时标签或污点，Agent 5/5 Running |
 | CLEAN-07 | P0/R | 外部 Secret 处理 | Pending | 待执行 |
 | CLEAN-08 | P0/R | 证据脱敏和归档 | Pending | 待执行 |
-| CLEAN-09 | P1/R | 五节点最终健康检查 | Pass | audit58 全量回归后 5 Node Ready、5 Agent Ready/OK、Operator 1/1；Agent/BPF 双哈希一致，map stale=0、相关错误=0、DiskPressure=0，mesh/HTTP/TCP/源IP 全通过 |
+| CLEAN-09 | P1/R | 五节点最终健康检查 | Pass | audit60 全量回归后 5 Node Ready、5 Agent Ready/OK、Operator 1/1；Agent/BPF/测试源码三哈希一致，map stale=0、相关错误=0、DiskPressure=0，mesh/HTTP/TCP/源IP 全通过 |
 | CLEAN-10 | P1/R | 清理后 30 分钟复核 | Pending | 待执行 |
 | BMETA-01 | P0/S | OpenStack metadata `uuid` 为空 | Pass | 新增单测验证明确报错 |
 | BMETA-02 | P0/S | `vpc_id` 为空 | Pass | 新增单测验证明确报错 |
@@ -304,7 +304,7 @@
 | BMETA-11 | P1/S | metadata 响应恰好/超过 1 MiB | Pass | 恰好上限接受，超 1 字节明确拒绝 |
 | BMETA-12 | P1/S | metadata JSON `null`、空对象、未知字段 | Pass | null/空对象拒绝，未知字段兼容，单测通过 |
 | BMETA-13 | P1/S | metadata 上下文已取消/10 秒超时边界 | Pass | 已取消 context 与同一 10 秒 client timeout 机制的缩短边界测试均通过 |
-| BMETA-14 | P1/R | OS 网卡重命名但 port ID 不变 | Pending | 待执行 |
+| BMETA-14 | P1/R | OS 网卡重命名但 port ID 不变 | Pass | audit60 privileged netlink 测试将真实 dummy trunk down 后显式重命名再 up；旧名立即拒绝，新名按同一 MAC 恢复相同 port ID，普通100轮、privileged100轮及 race20轮通过 |
 | BAPI-01 | P0/S | BatchCreate `count=-1`、`0` | Pass | `TestBatchCreateCountValidation` 明确拒绝 -1、0（及 11），1/10 边界成功；audit25b clean suite 通过 |
 | BAPI-02 | P0/S | BatchCreate `count=1`、`10` | Pass | httptest 完整创建/子网/网关链路均返回精确数量 |
 | BAPI-03 | P0/S | BatchCreate `count=11` | Pass | 请求前明确拒绝，单测通过 |
@@ -409,8 +409,8 @@
 | BMAP-12 | P1/S | CiliumNode status 中 0/2 个 SubENI 匹配同一 IP | Pass | patch0030 `TestSubENIInfoRequiresExactlyOneIPMatch`：0 匹配不写 map，2 匹配确定性报错，不再受 map 遍历顺序影响 |
 | BMAP-13 | P0/S | gateway IP 有值但 MAC 空，或反之 | Pass | patch0030 `TestSubENIInfoRejectsNarrowingAndGatewayBoundaries` 验证 gateway IP/MAC 必须成对，且存在时 trunk 必填 |
 | BMAP-14 | P1/S | trunkInterface 为空/不存在 | Pass | patch0030 已验证 gateway metadata 下空 trunk fail closed；patch0040 验证不存在的 link 在 neighbor 安装前明确返回 `resolve trunk interface`，普通/race 测试通过 |
-| BMAP-15 | P1/C | 已有同 gateway IP、不同 MAC 的 permanent neighbor | Pending | 待执行 |
-| BMAP-16 | P1/R | 两个子网 gateway IP 相同但 VLAN/MAC 不同 | Pending | 待执行 |
+| BMAP-15 | P1/C | 已有同 gateway IP、不同 MAC 的 permanent neighbor | Pass | audit60 在 dummy trunk 预置同 gateway、不同 MAC 的 permanent neighbor；Agent fail closed、原 neighbor 未变，且 neighbor 失败时不写 BPF map/缓存；privileged100轮及 race20轮通过 |
+| BMAP-16 | P1/R | 两个子网 gateway IP 相同但 VLAN/MAC 不同 | Pass | audit60 验证同一 trunk 上同 gateway/不同 MAC 明确拒绝且不污染首项；不同 trunk 上同 gateway/不同 MAC 分别安装并保持正确，满足“不支持时阻断配置”；privileged100轮及 race20轮通过 |
 | BVLAN-01 | P0/S | Ethernet header 不完整 | Pass | audit58 BPF `truncated_headers_are_rejected` 覆盖 ETH_HLEN-1/ETH_HLEN 边界，源码审核确认读 ethhdr 前 fail closed；对象严格编译并内核加载执行20次 |
 | BVLAN-02 | P0/S | 802.1Q/802.1ad header 只有部分字节 | Pass | audit58 BPF 覆盖 ETH_HLEN+VLAN_HLEN-1/完整边界，802.1Q/802.1ad 共用同一严格长度分支，内核 verifier/执行20次通过 |
 | BVLAN-03 | P0/S | VLAN TCI 含 PCP/DEI 位 | Pass | `pcp_dei_do_not_pollute_vlan_id` 验证 `0xb123` 仅生成 VLAN ID `0x123`；map key 使用掉码后 ID，BPF 内核执行20次通过 |
