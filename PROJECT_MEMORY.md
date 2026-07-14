@@ -6,6 +6,17 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
 
 ## Confirmed Project Facts
 
+- [2026-07-14] Agent images must include the matching BPF install tree
+  Value: Replacing only `/usr/bin/cilium-agent` leaves the base image's `/var/lib/cilium/bpf` data plane behind. The audited OCI builder now requires both the Agent binary and a Makefile `install-bpf` source directory; runtime acceptance must verify both hashes on every node.
+  Source: audit57 image-content mismatch and verified audit58 remediation.
+  Status: active
+
+- [2026-07-14] Plugin-focused validation scope
+  Rule: Test every scenario that exercises the HuaweiCloud Cilium plugin or its direct dependency chain, including SubENI/IPAM, HuaweiCloud VLAN/BPF datapath, policy routing, CNI configuration, Agent/Operator lifecycle, customer dataplane, upgrade, rollback, recovery, capacity, and plugin observability. Do not spend validation time on unrelated generic Kubernetes or generic Cilium functionality unless it is required as a control or regression oracle for a plugin scenario.
+  Scope: HuaweiCloud Cilium five-node validation and the 451-case ledger.
+  Source: user instruction.
+  Status: active
+
 - [2026-07-14] Build artifact cleanup rule
   Rule: Before each compilation, remove obsolete build outputs that the new build will overwrite. After compilation or packaging, delete superseded temporary builds/images when they are no longer needed; retain an older artifact only when it is still required for rollback, comparison, or evidence.
   Scope: HuaweiCloud Cilium build, image packaging, and deployment workflow.
@@ -91,9 +102,9 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
 ## Current Task State
 
 - Current goal: Execute and independently audit all 451 catalogued cases, fixing, rebuilding, deploying, and retesting until no executable case remains Pending or Fail.
-- Last verified: The ledger contains 286 Pass, 161 Pending, 4 approved Skip, and 0 recorded Fail. Ten-round rapid matrix recreation/reuse passed. Transactional rollback for partial nexthop/default/stale-rule installation passed privileged 100x and race 10x. The corrected 14+1 replay tree is `9faadd2aa8b2aa517e9d9163b2937764755b5ead`; audit55 is deployed on all five nodes with binary SHA256 `9452d3a3568e9e997b571a2fdcd2f0abf5df2a5a7eef72c17f9be2fc01fde4da`. Final post-rollout mesh 56/56, HTTP 21/21 at 100/100, TCP 4/4 at 5/5, and source IP 19/19 all passed; five Nodes/Agents and Operator remain healthy with a clean Agent error scan. The source-IP runner now waits for confirmed tcpdump readiness and allows a 30-second capture window so remote SSH latency cannot create a false missing-SYN result.
+- Last verified: The ledger contains 305 Pass, 142 Pending, 4 approved Skip, and 0 recorded Fail. The 14+1 clean replay commit `670450b70f1085db387d17a58269344b9c3bd1aa` and authoritative source share tree `7f745f042434057c2786291f35b2d47bdecf6a7e`; patch 0015 SHA256 is `b99505de69876a80d947d8e37287f4c76c75c17f5cd2557bda351bfed8f7a6a6`. Audit59 Agent SHA256 `54cd5a23932c4f4cb1973b2f9c0b20fddbd362c55b4ff639b4469e36e0da3632` and runtime BPF `huaweicloud.h` SHA256 `8dae79a6000869b26469accbd48c7ef84b669b7a10d313d2e3a1e08ed0cbab83` run on all five nodes. Clean replay Go/race/privileged tests, deterministic rebuild, all eight BPF objects, HuaweiCloud BPF 20x, sequential rollout, final ten-round mesh 56/56, HTTP 21/21 at 100/100, and TCP 4/4 at 5/5 passed. BVLAN-05/09/10 are closed with direct packet evidence. The audit59 source-IP suite and final five-node health audit were still running at the latest push checkpoint and are intentionally not claimed complete.
 - Next likely step: continue executing the remaining P0/P1 recovery, failure-injection, upgrade, capacity, observability, and stability rows, repairing and repeating the complete regression/audit cycle after any defect.
-- Immediate live step: preserve the healthy audit55 baseline and execute the next isolated destructive case with rollback and serialized customer-suite protection.
+- Immediate live step: finish audit59 source-IP and final five-node health/map/log audit, then continue the next isolated Pending P0/P1 recovery or fault-injection row; serialize all destructive/customer suites with the shared lock.
 - Blockers: Only the two user-approved environment Skips remain allowed: cross-AZ and physical `min-allocate=10` attainment. Full L7 Envoy coverage requires an image containing the Envoy layer and remains Pending, not implicitly passed.
 
 ## Evidence Pointers

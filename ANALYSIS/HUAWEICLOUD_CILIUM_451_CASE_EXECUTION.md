@@ -4,18 +4,18 @@
 
 | ID | P/类型 | 场景 | 状态 | 证据/结论 |
 | --- | --- | --- | --- | --- |
-| BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit55：从 upstream `a1d7fbd43` 新建干净 worktree，顺序应用 15/15 成功，最终提交 `0048e0115`、tree `9faadd2aa`，工作树干净 |
+| BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit59：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `670450b70`、tree `7f745f042`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，0015 SHA256 `9b5ed0e9...`，干净重放 tree 与最终源码 `9faadd2aa` 完全一致 |
-| BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | 2026-07-14：HuaweiCloud 全量定向 Go suite 及最终变更包测试通过；见五节点结果“本轮发现并修复的问题” |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，0015 SHA256 `b99505de...`，干净重放 tree 与最终源码 `7f745f042` 完全一致 |
+| BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit59 干净回放：16 个最终变更相关包普通测试通过，受影响包 race 测试通过，privileged routing 与 subenimap 测试通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
-| BASE-07 | P0/S | BPF 全排列编译 | Pass | pinned builder 中 `make -C bpf clean all` 通过，含 HuaweiCloud host compile option |
-| BASE-08 | P0/S | Agent/CNI/Operator 构建 | Pass | Agent、CNI、generic Operator、HuaweiCloud Operator 均从最终源码构建通过 |
-| BASE-09 | P0/R | 镜像 CPU 架构匹配 | Pass | 五节点 x86_64，五份运行 Agent 镜像均为 linux/amd64 |
+| BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
+| BASE-08 | P0/S | Agent/CNI/Operator 构建 | Pass | Agent、CNI、generic Operator、HuaweiCloud Operator 均从最终功能源码构建通过；audit59 从干净回放重建 Agent 并封装 165 文件 BPF install tree |
+| BASE-09 | P0/R | 镜像 CPU 架构匹配 | Pass | 五节点 x86_64，audit59 为 linux/amd64 静态二进制；5/5 Agent SHA256 `54cd5a23...`、运行时 `huaweicloud.h` SHA256 `8dae79a6...` |
 | BASE-10 | P0/R | Operator 镜像默认命令 | Pass | 运行命令为 `cilium-operator-huaweicloud` |
 | BASE-11 | P0/R | Operator 双二进制 | Pass | 两个 `/usr/bin/cilium-operator*` 均可执行并报告 1.12.19 |
-| BASE-12 | P1/S | 重复构建一致性 | Pending | 待执行 |
+| BASE-12 | P1/S | 重复构建一致性 | Pass | audit59 使用同一干净源码和项目 Makefile 清理旧产物后重新构建，两次 amd64 静态 Agent SHA256 均为 `54cd5a23...` |
 | BASE-13 | P1/S | 离线镜像分发 | Pass | audit17 两份 tar 校验 SHA256 后导入五节点 containerd；Agent 5/5、Operator 1/1 运行并完成客户 25 项及 56/56 回归 |
 | BASE-14 | P1/R | 私有仓库分发 | Pending | 待执行 |
 | BASE-15 | P2/S | SBOM/漏洞/许可证检查 | Pending | 待执行 |
@@ -135,7 +135,7 @@
 | ROUTE-04 | P0/R | A 后 B 创建 | Pending | 待执行 |
 | ROUTE-05 | P0/R | B 后 A 创建 | Pending | 待执行 |
 | ROUTE-06 | P0/R | 删除/重建其中一个 Pod | Pass | 删除整组 4 Pod 后旧 endpoint/map 清理，重建 4/4 Ready |
-| ROUTE-07 | P0/R | Agent 重启 | Pass | 单 Agent 与全 DS rollout 后 endpoint 恢复且 mesh 56/56 |
+| ROUTE-07 | P0/R | Agent 重启 | Pass | audit57 金丝雀启动将已删 endpoint 1847 的 pinned-map 残留从1条清为0；五节点顺序 rollout 后每步 mesh 56/56，最终10轮重建均 56/56 |
 | ROUTE-08 | P0/R | worker 重启 | Pass | node0002 实机重启暴露并修复启动期 BPF pin-map 竞态；audit53 无人工干预恢复，客户 HTTP 21/21、TCP 4/4、源 IP 19/19 全通过 |
 | ROUTE-09 | P0/C | 从旧共享 ifindex 表升级 | Pending | 待执行 |
 | ROUTE-10 | P0/R | 显式 compat=false | Pass | 当前 compat=false 客户配置下 8 Pod 路由表及 56/56 mesh 通过 |
@@ -149,7 +149,7 @@
 | ROUTE-18 | P1/R | 长连接期间新增第二网关 Pod | Pending | 待执行 |
 | BPF-01 | P0/R | endpoint Ready | Pass | 8 个 matrix endpoint 均 ready 且存在于 endpoint BPF map |
 | BPF-02 | P0/R | endpoint 删除 | Pass | 4 Pod 整组删除后旧 endpoint/map 4/4 消失，重建后 4/4 恢复 |
-| BPF-03 | P0/R | Agent 重启/endpoint restore | Pass | 单 Agent 和全量 rollout 后恢复，最终 mesh 56/56 |
+| BPF-03 | P0/R | Agent 重启/endpoint restore | Pass | audit57 现场证明启动调谐清理 endpoint 1847 的双图残留；全量 rollout 后所有 map LxcID 均属于当前 endpoint，stale=0，mesh 56/56 |
 | BPF-04 | P1/R | Pod 快速创建删除 | Pass | 10 轮共快速删除/重建 80 个 Pod；每轮新 Pod 8/8 Ready 且 BPF 数据面全向 56/56，无 Agent/BPF 错误日志 |
 | BPF-05 | P1/S | 第二张 map 写失败 | Pass | patch0029 注入 ingress map 更新失败，验证 source map 恢复旧值或删除新值；rollback 再失败时返回组合错误 |
 | BPF-06 | P1/S | 重复 Ready/Delete 事件 | Pass | patch0034 连续 Ready 10 次仅保留各一条 map entry，连续 Delete 10 次保持两图为空；普通与 `-race` 测试通过 |
@@ -215,8 +215,8 @@
 | NP-10 | P1/R | 策略动态增删 | Pass | 同一 endpoint 在线经历 CIDR deny→CIDR allow→namespace allow→策略删除；每阶段等待收敛并验证，删除后 np-a/np-c 均恢复访问 |
 | NP-11 | P1/R | 已建立连接遇到策略变化 | Pass | enforcement 实机：BusyBox TCP echo 长连接先返回 `before`，应用有效 CIDR deny 后新连接 DENIED，原连接未返回延迟发送的 `after` 并结束；证明策略变更切断既有连接。空 ingress 列表不启用方向的语义也单独识别，未误判为 deny |
 | NP-12 | P1/R | 其他 namespace 隔离 | Pass | CNP 仅允许 `k8s:io.kubernetes.pod.namespace=np-a`：np-a direct/Service 均允许，np-c direct/Service 均拒绝；临时三 namespace 已全部删除 |
-| REC-01 | P0/C | 删除单个 Cilium Agent Pod | Pass | 新 Agent Ready/OK，2 个本地 endpoint 恢复，连通 2/2 |
-| REC-02 | P0/C | 滚动重启 DaemonSet | Pass | 5/5 Agent OK，重启后 mesh 56/56 |
+| REC-01 | P0/C | 删除单个 Cilium Agent Pod | Pass | audit57 金丝雀 Pod 删除重建后 Agent Ready/OK，清理真实 stale map owner，10轮 mesh 56/56 |
+| REC-02 | P0/C | 滚动重启 DaemonSet | Pass | audit57 五节点顺序重启每步 Agent OK/mesh 56/56；全量后 HTTP 21/21、TCP 4/4、源IP 19/19 |
 | REC-03 | P0/C | 删除 Operator Pod | Pass | 新 Operator Ready，CiliumNode 5/5 稳定，数据面正常 |
 | REC-04 | P1/C | Operator 在创建过程中退出 | Pending | 待执行 |
 | REC-05 | P1/C | Operator 在打标签过程中退出 | Pending | 待执行 |
@@ -232,7 +232,7 @@
 | REC-15 | P1/C | 测试 SG 临时阻断 | Pending | 待执行 |
 | REC-16 | P1/C | trunk 接口 down/up | Pending | 待执行 |
 | REC-17 | P1/C | 删除一条测试策略路由 | Pending | 待执行 |
-| REC-18 | P1/C | 删除一个测试 BPF map 条目 | Pending | 待执行 |
+| REC-18 | P1/C | 删除一个测试 BPF map 条目 | Pass | audit57 实机删除 matrix Pod `192.168.1.246` 的 source-map entry 后跨机 ping 按预期失败；重启该节点 Agent 后 entry 自动恢复、Agent OK、定向 ping 和 mesh 56/56 恢复 |
 | REC-19 | P1/C | 云端手工删除空闲 SubENI | Pending | 待执行 |
 | REC-20 | P1/C | 云端手工删除在用 SubENI | Pending | 待执行 |
 | REC-21 | P1/C | 节点 NotReady 超过回收窗口 | Pending | 待执行 |
@@ -272,7 +272,7 @@
 | OBS-01 | P0/R | Cilium status/health | Pass | 多轮 5/5 `cilium status --brief=OK` |
 | OBS-02 | P0/R | CiliumNode 与云端快照 | Pass | 五节点 instance/watermark 快照在 Operator 重启前后稳定 |
 | OBS-03 | P0/R | `ip rule/route/neigh` 快照 | Pass | 8 个 source rule/table/default/gateway 已逐项审计 |
-| OBS-04 | P0/R | BPF map 快照 | Pass | endpoint map 删除前后均逐节点核验 |
+| OBS-04 | P0/R | BPF map 快照 | Pass | audit57 逐节点解析两张 HuaweiCloud pinned map 原始 value，所有 LxcID 均存在于实时 endpoint 集，5/5 节点 stale=0 |
 | OBS-05 | P0/R | trunk 双端抓包 | Pending | 待执行 |
 | OBS-06 | P0/R | Cilium monitor/drop counters | Pass | 五节点 `cilium status --brief` 全 OK 并读取 forward/drop 指标；在 pod2 连续 30 次 ClusterIP 请求期间抓取其本节点 monitor：385 events、357 含 pod2 IP、0 drop，双向 Service NAT trace 完整 |
 | OBS-07 | P1/R | Kubernetes Event | Pass | 2026-07-14 全 namespace 按 lastTimestamp 审计：5/5 Node Ready、Agent 5/5 Running/0 restart；仅见 rollout 启动窗口的瞬时 startup-probe connection-refused，随后全部健康，无持续 Warning |
@@ -285,11 +285,11 @@
 | CLEAN-02 | P0/C | `releaseExcessIPs=false` 下清理 | Pending | 待执行 |
 | CLEAN-03 | P0/C | `releaseExcessIPs=true` 下清理 | Pending | 待执行 |
 | CLEAN-04 | P0/R | 云端孤儿检查 | Pending | 待执行 |
-| CLEAN-05 | P0/R | 节点 route/map/neighbor 残留检查 | Pending | 待执行 |
-| CLEAN-06 | P0/R | 节点标签/污点恢复 | Pending | 待执行 |
+| CLEAN-05 | P0/R | 节点 route/map/neighbor 残留检查 | Pass | audit57 对 5 节点 CiliumNode/SubENI、endpoint、双 pinned map、priority 20/110/111 rule、VLAN 路由表和 permanent neighbor 做交叉审计；活跃表全部精确匹配，未引用表均为允许的完整 default+nexthop 保留对，stale=0、malformed=0 |
+| CLEAN-06 | P0/R | 节点标签/污点恢复 | Pass | audit57 五节点终态审计：4 worker 污点均为0，control-plane 仅保留 kubeadm 的 master/control-plane NoSchedule 污点；无 customer/matrix/audit/test/canary 临时标签或污点，Agent 5/5 Running |
 | CLEAN-07 | P0/R | 外部 Secret 处理 | Pending | 待执行 |
 | CLEAN-08 | P0/R | 证据脱敏和归档 | Pending | 待执行 |
-| CLEAN-09 | P1/R | 五节点最终健康检查 | Pending | 待执行 |
+| CLEAN-09 | P1/R | 五节点最终健康检查 | Pass | audit58 全量回归后 5 Node Ready、5 Agent Ready/OK、Operator 1/1；Agent/BPF 双哈希一致，map stale=0、相关错误=0、DiskPressure=0，mesh/HTTP/TCP/源IP 全通过 |
 | CLEAN-10 | P1/R | 清理后 30 分钟复核 | Pending | 待执行 |
 | BMETA-01 | P0/S | OpenStack metadata `uuid` 为空 | Pass | 新增单测验证明确报错 |
 | BMETA-02 | P0/S | `vpc_id` 为空 | Pass | 新增单测验证明确报错 |
@@ -411,16 +411,16 @@
 | BMAP-14 | P1/S | trunkInterface 为空/不存在 | Pass | patch0030 已验证 gateway metadata 下空 trunk fail closed；patch0040 验证不存在的 link 在 neighbor 安装前明确返回 `resolve trunk interface`，普通/race 测试通过 |
 | BMAP-15 | P1/C | 已有同 gateway IP、不同 MAC 的 permanent neighbor | Pending | 待执行 |
 | BMAP-16 | P1/R | 两个子网 gateway IP 相同但 VLAN/MAC 不同 | Pending | 待执行 |
-| BVLAN-01 | P0/S | Ethernet header 不完整 | Pending | 待执行 |
-| BVLAN-02 | P0/S | 802.1Q/802.1ad header 只有部分字节 | Pending | 待执行 |
-| BVLAN-03 | P0/S | VLAN TCI 含 PCP/DEI 位 | Pending | 待执行 |
-| BVLAN-04 | P0/S | 线内 VLAN ID=0/4095 | Pending | 待执行 |
-| BVLAN-05 | P0/S | 线内 VLAN 与 metadata VLAN ID 相同 | Pending | 待执行 |
-| BVLAN-06 | P0/S | 线内 VLAN 与 metadata VLAN ID 不同 | Pending | 待执行 |
-| BVLAN-07 | P0/S | 线内未知 VLAN+MAC 且无 metadata | Pending | 待执行 |
-| BVLAN-08 | P0/S | map miss 后 metadata VLAN | Pending | 待执行 |
-| BVLAN-09 | P1/S | 内层非 IPv4（ARP/IPv6/LLDP） | Pending | 待执行 |
-| BVLAN-10 | P1/S | 三层或更多 VLAN/QinQ | Pending | 待执行 |
+| BVLAN-01 | P0/S | Ethernet header 不完整 | Pass | audit58 BPF `truncated_headers_are_rejected` 覆盖 ETH_HLEN-1/ETH_HLEN 边界，源码审核确认读 ethhdr 前 fail closed；对象严格编译并内核加载执行20次 |
+| BVLAN-02 | P0/S | 802.1Q/802.1ad header 只有部分字节 | Pass | audit58 BPF 覆盖 ETH_HLEN+VLAN_HLEN-1/完整边界，802.1Q/802.1ad 共用同一严格长度分支，内核 verifier/执行20次通过 |
+| BVLAN-03 | P0/S | VLAN TCI 含 PCP/DEI 位 | Pass | `pcp_dei_do_not_pollute_vlan_id` 验证 `0xb123` 仅生成 VLAN ID `0x123`；map key 使用掉码后 ID，BPF 内核执行20次通过 |
+| BVLAN-04 | P0/S | 线内 VLAN ID=0/4095 | Pass | `vlan_id_boundaries` 验证仅1..4094有效，0/4095 在 map lookup 前 `DROP_INVALID`；BPF 严格编译/内核执行20次通过 |
+| BVLAN-05 | P0/S | 线内 VLAN 与 metadata VLAN ID 相同 | Pass | audit59 `SETUP/CHECK` 构造由内核预解析的线内 802.1Q 帧，再叠加相同 ID metadata；命中 map 后断言 handled、metadata 清除、双 pop 后长度为 ETH+IPv4 且 ethertype=IPv4，内核执行20次通过 |
+| BVLAN-06 | P0/S | 线内 VLAN 与 metadata VLAN ID 不同 | Pass | `inline_and_metadata_must_match` 覆盖 PCP/DEI 不影响相同 ID 及 0x123/0x124 不一致；不一致在 map lookup 前 `DROP_INVALID`，内核执行20次通过 |
+| BVLAN-07 | P0/S | 线内未知 VLAN+MAC 且无 metadata | Pass | packet-level `huaweicloud_unknown_inline_vlan` 构造 802.1ad+IPv4 未知键，直接调用 `hwc_from_netdev` 断言 `DROP_INVALID` 且 handled=false；内核执行20次通过 |
+| BVLAN-08 | P0/S | map miss 后 metadata VLAN | Pass | `inline_map_miss_is_fail_closed` 明确验证 metadata-only miss 返回 `CTX_ACT_OK` 交给通用 VLAN 逻辑，而 inline miss 为 `DROP_INVALID`；内核执行20次通过 |
+| BVLAN-09 | P1/S | 内层非 IPv4（ARP/IPv6/LLDP） | Pass | audit59 直接 packet tests 覆盖 ARP/IPv6/LLDP：线内 VLAN fail closed，metadata-only 返回通用 VLAN 路径且可清除 metadata；内核执行20次通过 |
+| BVLAN-10 | P1/S | 三层或更多 VLAN/QinQ | Pass | audit59 直接构造 QinQ 与三层 VLAN packet，均在 map lookup 前 `DROP_INVALID` 且 handled=false；内核执行20次通过 |
 | BROUTE-01 | P0/S | gateway 为 IPv6、空、非法字符串 | Pass | patch0031 `TestHuaweiCloudRoutingInfoBoundaries` 强制 IPv4 gateway，覆盖空、IPv6 与既有非法字符串路径 |
 | BROUTE-02 | P0/S | CIDR nil/空，masquerade true/false 矩阵 | Pass | patch0031 验证 masquerade=true 拒绝 nil/空，false 接受 nil；既有表驱动测试覆盖空 slice |
 | BROUTE-03 | P0/S | CIDR IPv6、非法、重复、重叠 | Pass | patch0031 强制 IPv4 CIDR，并对 HuaweiCloud 重复/任意方向包含的重叠网段 fail closed |
@@ -431,10 +431,10 @@
 | BROUTE-08 | P0/S | 新 rule 成功、nexthop route 失败 | Pass | 注入首个 nexthop `RouteReplace` 失败，验证 ingress/egress rule 与专用表 route 全部回滚为空；privileged 100 轮及 race 10 轮通过 |
 | BROUTE-09 | P0/S | nexthop 成功、default route 失败 | Pass | 注入第二个 default `RouteReplace` 失败，验证已装 nexthop 与两类 rule 逆序清理；privileged 100 轮及 race 10 轮通过 |
 | BROUTE-10 | P0/S | 新表完整但 stale rule 删除失败 | Pass | 注入第二条 stale rule 删除失败，验证已删 stale rule 恢复且新 rule/route 全部回滚；privileged 100 轮及 race 10 轮通过 |
-| BROUTE-11 | P1/S | stale rule 有 mark/mask/to 字段 | Pending | 待执行 |
-| BROUTE-12 | P1/S | 同源同优先级存在多个规则 | Pending | 待执行 |
-| BROUTE-13 | P1/R | Pod 删除后 route table 保留、VLAN 后续复用新 gateway | Pending | 待执行 |
-| BROUTE-14 | P1/R | host=true 与普通 endpoint | Pending | 待执行 |
+| BROUTE-11 | P1/S | stale rule 有 mark/mask/to 字段 | Pass | privileged netns 创建带 mark=0x123/mask=0xfff/to CIDR 的 stale rule，Configure 精确删除且保留正确新路由；100 轮及 race 10 轮通过 |
+| BROUTE-12 | P1/S | 同源同优先级存在多个规则 | Pass | 同源同旧优先级注入 table 401/402 两条 rule，成功配置后两条均清理且新 rule 可删除；100 轮及 race 10 轮通过 |
+| BROUTE-13 | P1/R | Pod 删除后 route table 保留、VLAN 后续复用新 gateway | Pass | 修复无活跃 rule 时对完整旧 default+/32 nexthop 对的事务化回收；新 gateway 替换成功且旧 nexthop 消失，活跃/外部表仍 fail closed |
+| BROUTE-14 | P1/R | host=true 与普通 endpoint | Pass | 同一 netns 同表配置 host 与普通 endpoint；host 不生成 `to host/32 lookup main`，普通 endpoint 精确生成一条；100 轮及 race 10 轮通过 |
 | BSEC-01 | P0/S | `existingSecret=""` 与仅空格 | Pass | patch0041：值先 trim，再执行非空校验；远端 Helm 3.14.4 验证空串/3 个空格均 template 失败，合法值双 secretKeyRef 一致渲染 |
 | BSEC-02 | P0/R | Secret 键存在但值为空 | Pass | 实机隔离 Pod 确认 Kubernetes 会把存在但空的 AK/SK 注入为空字符串；patch0042 使 Operator API client 对 AK/SK/project 空串或纯空白立即 fail closed；普通/race 测试通过，隔离 namespace 已清理 |
 | BSEC-03 | P1/R | Secret 类型 Opaque/非 Opaque | Pass | 五节点集群隔离 namespace：Opaque 与 `example.com/hwc-test` 自定义类型 Secret 均通过 secretKeyRef 注入 dummy AK/SK，两个校验 Pod 均 Succeeded |

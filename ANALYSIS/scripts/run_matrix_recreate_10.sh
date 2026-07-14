@@ -21,7 +21,7 @@ k() {
 }
 
 pod_rows() {
-  k get pods -l app=cilium-matrix \
+  k get pods -l app=cilium-matrix --field-selector=status.phase=Running \
     -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.podIP}{" "}{.spec.nodeName}{"\n"}{end}' \
     | sort
 }
@@ -65,7 +65,9 @@ REMOTE
   "${SSH[@]}" "bash -s -- $(printf '%q' "$NS")" <<<"$remote"
 }
 
+wait_matrix
 previous=$(pod_rows)
+[[ "$(wc -l <<<"$previous")" -eq 8 ]]
 if [[ "$ROUNDS" -eq 0 ]]; then
   printf 'round=baseline '
   mesh
