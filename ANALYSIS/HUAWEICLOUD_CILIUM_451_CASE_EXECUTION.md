@@ -137,7 +137,7 @@
 | ROUTE-06 | P0/R | 删除/重建其中一个 Pod | Pass | 删除整组 4 Pod 后旧 endpoint/map 清理，重建 4/4 Ready |
 | ROUTE-07 | P0/R | Agent 重启 | Pass | audit57 金丝雀启动将已删 endpoint 1847 的 pinned-map 残留从1条清为0；五节点顺序 rollout 后每步 mesh 56/56，最终10轮重建均 56/56 |
 | ROUTE-08 | P0/R | worker 重启 | Pass | node0002 实机重启暴露并修复启动期 BPF pin-map 竞态；audit53 无人工干预恢复，客户 HTTP 21/21、TCP 4/4、源 IP 19/19 全通过 |
-| ROUTE-09 | P0/C | 从旧共享 ifindex 表升级 | Pending | 待执行 |
+| ROUTE-09 | P0/C | 从旧共享 ifindex 表升级 | Pass | audit83 在 node0003 停止 Agent 进程后为存量 Pod 注入 priority-111/from-IP/table=eth0-ifindex(2) 旧规则；Agent 重启自动删除旧规则，保留独立 VLAN 表 13109 及两条完整路由，pool 不变、mesh 56/56 |
 | ROUTE-10 | P0/R | 显式 compat=false | Pass | 当前 compat=false 客户配置下 8 Pod 路由表及 56/56 mesh 通过 |
 | ROUTE-11 | P1/R | 显式 compat=true | Pending | 待执行 |
 | ROUTE-12 | P1/C | 遗留重复 rule | Pass | audit65 在 node0002 为 pod3 注入 priority-110 legacy rule 与独立 blackhole 表；周期reconcile在4秒内只删除旧rule，保留正确priority-111 rule/两条当前路由且不修改外部表，清理后mesh 56/56 |
@@ -256,7 +256,7 @@
 | STAB-03 | P2/R | 72 小时发布候选 | Pending | 待执行 |
 | STAB-04 | P2/R | 长时间无变更空闲 | Pending | 待执行 |
 | UPG-01 | P0/C | 旧候选→当前 15 patch 候选滚动升级 | Pass | audit81 真实执行 audit76→audit81 Operator 滚动恢复；新候选 1/1 Ready、restart0、severe0，pool 映射不变，matrix 56/56；并额外执行 audit81→audit76→audit81 完整回滚闭环 |
-| UPG-02 | P0/C | `0007` 前共享表→独立表 | Pending | 待执行 |
+| UPG-02 | P0/C | `0007` 前共享表→独立表 | Pass | audit83 真实模拟旧 Agent 留存的 trunk-ifindex 共享表规则；新 Agent 启动后收敛到 per-VLAN 独立表，清除 stale 规则且数据面/pool 无回归，最终更换为 restart0 新 Pod |
 | UPG-03 | P0/C | `0008` 前→支持线内 VLAN | Pending | 待执行 |
 | UPG-04 | P0/C | values 凭据→`existingSecret` | Pending | 待执行 |
 | UPG-05 | P1/C | 新旧 Agent 短时混部 | Pass | audit64 五节点逐台升级每步mesh 56/56；audit66 进一步形成4台audit64+1台audit60真实混部，旧节点Agent Ready/OK且全向mesh 56/56，随后恢复audit64 |
