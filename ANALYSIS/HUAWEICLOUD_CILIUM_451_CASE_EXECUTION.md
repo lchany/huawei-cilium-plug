@@ -247,7 +247,7 @@
 | PERF-01 | P1/R | 同节点吞吐/RTT | Pass | audit71 对保留旧候选audit60与当前audit64分别完成同节点3轮各300秒TCP及TCP/UDP各3轮10000次请求应答；audit64吞吐中位1120.03 Mbps，较audit60的1120.02 Mbps持平（+0.001%），TCP P99中位改善15.08%，UDP P99中位增加1.82%，两者均0丢失且在无客户数值门槛时采用的10%保守技术护栏内 |
 | PERF-02 | P1/R | 同 AZ 跨节点吞吐/RTT | Pass | audit70 同 AZ 跨节点完成3轮各300秒持续TCP：中位1405.31 Mbps、最大偏差3.238%；TCP/UDP各3轮10000次请求应答均0丢失，P99分别87.382–94.302/80.502–88.403 us；另有3轮100包ICMP均0丢失 |
 | PERF-03 | P1/R | 跨 AZ 吞吐/RTT | Skip | 用户批准跨 AZ 环境限制 Skip；五台购买机器均位于同一 AZ，audit70已完成同 AZ 跨节点基线 |
-| PERF-04 | P1/R | TCP/UDP PPS | Pending | 待执行 |
+| PERF-04 | P1/R | TCP/UDP PPS | Pass | audit72 每种拓扑/协议完成3轮各100000次64字节请求应答且0丢失；同节点TCP/UDP请求中位49427.20/53527.51 PPS（双向消息98854.40/107055.02 PPS），跨节点14536.28/15416.17 PPS（双向消息29072.56/30832.34 PPS）；相关宿主机与Pod接口、softnet均无新增drop/error/time-squeeze，Agent平均CPU 2.195–2.220 mcore，末尾mesh 56/56 |
 | PERF-05 | P1/R | Pod 创建到 Ready 时延 | Pass | audit70 在node0004连续删除/重建20个DaemonSet Pod：P50/P95/P99=3998/4039/4084 ms；Scheduled到Cilium Create endpoint请求P50/P95=344/354 ms，20次镜像均为本机缓存命中；末尾mesh 56/56 |
 | PERF-06 | P1/R | Agent/Operator CPU、内存 | Pass | audit70以crictl累计CPU时钟和working set记录空闲、两轮mesh burst、60秒settled三阶段各6个Agent/Operator样本；CPU 1.707–2.799 mcore，working set 35.08–239.98 MiB，阶段内最大绝对内存变化2.04 MiB，无重启/严重日志且mesh 56/56 |
 | PERF-07 | P1/R | 云 API 调用率 | Pending | 待执行 |

@@ -109,6 +109,7 @@ func runClient() error {
 	sent := make([]byte, *payloadLen)
 	received := make([]byte, *payloadLen)
 	latencies := make([]time.Duration, 0, *count)
+	started := time.Now()
 	for i := 0; i < *count; i++ {
 		for j := range sent {
 			sent[j] = byte(i + j)
@@ -126,7 +127,7 @@ func runClient() error {
 			return fmt.Errorf("exchange %d payload mismatch", i)
 		}
 	}
-	printStats(latencies)
+	printStats(latencies, time.Since(started))
 	return nil
 }
 
@@ -144,7 +145,7 @@ func writeFull(writer io.Writer, payload []byte) error {
 	return nil
 }
 
-func printStats(values []time.Duration) {
+func printStats(values []time.Duration, elapsed time.Duration) {
 	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 	var total time.Duration
 	for _, value := range values {
@@ -157,8 +158,10 @@ func printStats(values []time.Duration) {
 		}
 		return values[index-1]
 	}
-	fmt.Printf("CLIENT_PASS network=%s exchanges=%d loss=0 min_us=%.3f avg_us=%.3f p50_us=%.3f p95_us=%.3f p99_us=%.3f max_us=%.3f\n",
-		*network, len(values), float64(values[0])/float64(time.Microsecond),
+	fmt.Printf("CLIENT_PASS network=%s exchanges=%d loss=0 elapsed_ms=%.3f exchanges_per_sec=%.2f messages_per_sec=%.2f min_us=%.3f avg_us=%.3f p50_us=%.3f p95_us=%.3f p99_us=%.3f max_us=%.3f\n",
+		*network, len(values), float64(elapsed)/float64(time.Millisecond),
+		float64(len(values))/elapsed.Seconds(), float64(2*len(values))/elapsed.Seconds(),
+		float64(values[0])/float64(time.Microsecond),
 		float64(total)/float64(len(values))/float64(time.Microsecond),
 		float64(percentile(50))/float64(time.Microsecond),
 		float64(percentile(95))/float64(time.Microsecond),
