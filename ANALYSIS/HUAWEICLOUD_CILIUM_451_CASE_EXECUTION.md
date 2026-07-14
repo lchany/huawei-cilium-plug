@@ -7,7 +7,7 @@
 | BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit60：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `6fab161f8`、tree `e1d395fc4`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，audit60 0015 SHA256 `ecc925d9...`，干净重放 tree 与最终源码 `e1d395fc4` 完全一致 |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix 统一为 0015；`series` 与目录均为 15 项，audit76 0015 SHA256 `f8d2f08c...`，干净重放 tree 与最终源码 `f0a68079a` 完全一致 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit60 干净回放：受影响 endpointmanager/metadata 普通、race、privileged 定向测试通过；endpointmanager 全包普通/race 单轮通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
@@ -79,7 +79,7 @@
 | API-05 | P1/S | List 分页 marker | Pass | `TestListSubNetworkInterfacesRejectsRepeatedMarker/NextMarkerTerminalForms/ListAllowsNilItemsWhenPaginationAdvances` 连续 10 轮通过 |
 | API-06 | P0/R | SubENI 标签写入 | Pending | 待执行 |
 | API-07 | P0/R | Delete SubENI | Pending | 待执行 |
-| API-08 | P1/C | Delete 已不存在资源/404 | Pending | 待执行 |
+| API-08 | P1/C | Delete 已不存在资源/404 | Pass | audit76 修复 404 提前返回导致本地状态残留；HTTP 404→`ErrNotFound` 归一化及 `TestReleaseIPsTreatsNotFoundAsConvergedAndContinues` 连续/竞态复测通过，证明清理本地状态并继续后续删除；新 Operator 实机回归全通过 |
 | API-09 | P1/C | Create 超时 | Pending | 待执行 |
 | API-10 | P1/C | Wait Active 超过 60 秒 | Pass | `TestWaitSubENIActiveStopsOnTimeoutAndContext` 以缩短测试时钟验证完整 timeout/cancel 分支，连续 10 轮通过 |
 | API-11 | P1/C | HTTP 429 | Pass | `TestAPIHTTPErrorNormalization` 将 429 标准化为 `ErrRateLimited`，连续 10 轮通过 |

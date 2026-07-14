@@ -1,50 +1,50 @@
-From 1be2d151cf311615e8b1c4cc0281651afd37fd7a Mon Sep 17 00:00:00 2001
+From 79239e4ee475ec7538be9c9c27d23b325535ed81 Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
-Date: Tue, 14 Jul 2026 19:29:31 +0800
+Date: Wed, 15 Jul 2026 01:52:49 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
- bpf/lib/huaweicloud.h                         |  69 +-
- bpf/tests/huaweicloud_test.c                  | 322 ++++++
- daemon/cmd/kube_proxy_replacement.go          |  19 +
- daemon/cmd/kube_proxy_replacement_test.go     |  35 +
- .../templates/cilium-operator/_helpers.tpl    |  15 +
- .../templates/cilium-operator/deployment.yaml |   4 +-
- pkg/api/helpers/rate_limit.go                 |  29 +-
- pkg/api/helpers/rate_limit_test.go            |  15 +-
- pkg/datapath/iptables/custom_chain.go         |   6 +
- pkg/datapath/iptables/iptables.go             | 152 ++-
- pkg/datapath/iptables/iptables_test.go        |  31 +
- pkg/datapath/linux/routing/info.go            |  15 +-
- pkg/datapath/linux/routing/info_test.go       |  71 ++
- pkg/datapath/linux/routing/routing.go         | 349 ++++++-
- pkg/datapath/linux/routing/routing_test.go    | 354 +++++++
- pkg/endpointmanager/huaweicloud_subeni.go     | 349 ++++++-
- .../huaweicloud_subeni_privileged_test.go     | 292 ++++++
- .../huaweicloud_subeni_test.go                | 221 ++++
- pkg/huaweicloud/api/api.go                    | 406 +++++++-
- pkg/huaweicloud/api/api_boundary_test.go      | 695 +++++++++++++
- pkg/huaweicloud/api/error_test.go             |  58 ++
- pkg/huaweicloud/api/subnet_capacity.go        |  42 +-
- pkg/huaweicloud/api/subnet_capacity_test.go   | 203 +++-
- pkg/huaweicloud/eni/instances.go              |  36 +-
- pkg/huaweicloud/eni/instances_test.go         | 964 +++++++++++++++++-
- pkg/huaweicloud/eni/node.go                   | 164 ++-
- pkg/huaweicloud/metadata/metadata.go          |  83 +-
- .../metadata/metadata_privileged_test.go      |  64 ++
- pkg/huaweicloud/metadata/metadata_test.go     | 216 ++++
- pkg/huaweicloud/subenimap/manager.go          | 371 ++++++-
- .../subenimap/manager_privileged_test.go      |  95 ++
- pkg/huaweicloud/subenimap/manager_test.go     | 435 +++++++-
- pkg/ipam/crd.go                               |  20 +-
- pkg/ipam/huaweicloud_test.go                  |  47 +
- pkg/ipam/node_test.go                         |   1 +
- pkg/ipam/types/types.go                       |  13 +
- pkg/nodediscovery/huaweicloud_test.go         |  24 +-
- pkg/nodediscovery/nodediscovery.go            |  63 +-
- plugins/cilium-cni/types/types.go             | 118 ++-
- plugins/cilium-cni/types/types_test.go        |  49 +
- 40 files changed, 6262 insertions(+), 253 deletions(-)
+ bpf/lib/huaweicloud.h                         |   69 +-
+ bpf/tests/huaweicloud_test.c                  |  322 ++++++
+ daemon/cmd/kube_proxy_replacement.go          |   19 +
+ daemon/cmd/kube_proxy_replacement_test.go     |   35 +
+ .../templates/cilium-operator/_helpers.tpl    |   15 +
+ .../templates/cilium-operator/deployment.yaml |    4 +-
+ pkg/api/helpers/rate_limit.go                 |   29 +-
+ pkg/api/helpers/rate_limit_test.go            |   15 +-
+ pkg/datapath/iptables/custom_chain.go         |    6 +
+ pkg/datapath/iptables/iptables.go             |  152 ++-
+ pkg/datapath/iptables/iptables_test.go        |   31 +
+ pkg/datapath/linux/routing/info.go            |   15 +-
+ pkg/datapath/linux/routing/info_test.go       |   71 ++
+ pkg/datapath/linux/routing/routing.go         |  349 +++++-
+ pkg/datapath/linux/routing/routing_test.go    |  354 ++++++
+ pkg/endpointmanager/huaweicloud_subeni.go     |  349 +++++-
+ .../huaweicloud_subeni_privileged_test.go     |  292 +++++
+ .../huaweicloud_subeni_test.go                |  221 ++++
+ pkg/huaweicloud/api/api.go                    |  406 ++++++-
+ pkg/huaweicloud/api/api_boundary_test.go      |  695 ++++++++++++
+ pkg/huaweicloud/api/error_test.go             |   58 +
+ pkg/huaweicloud/api/subnet_capacity.go        |   42 +-
+ pkg/huaweicloud/api/subnet_capacity_test.go   |  203 +++-
+ pkg/huaweicloud/eni/instances.go              |   36 +-
+ pkg/huaweicloud/eni/instances_test.go         | 1009 ++++++++++++++++-
+ pkg/huaweicloud/eni/node.go                   |  166 ++-
+ pkg/huaweicloud/metadata/metadata.go          |   83 +-
+ .../metadata/metadata_privileged_test.go      |   64 ++
+ pkg/huaweicloud/metadata/metadata_test.go     |  216 ++++
+ pkg/huaweicloud/subenimap/manager.go          |  371 +++++-
+ .../subenimap/manager_privileged_test.go      |   95 ++
+ pkg/huaweicloud/subenimap/manager_test.go     |  435 ++++++-
+ pkg/ipam/crd.go                               |   20 +-
+ pkg/ipam/huaweicloud_test.go                  |   47 +
+ pkg/ipam/node_test.go                         |    1 +
+ pkg/ipam/types/types.go                       |   13 +
+ pkg/nodediscovery/huaweicloud_test.go         |   24 +-
+ pkg/nodediscovery/nodediscovery.go            |   63 +-
+ plugins/cilium-cni/types/types.go             |  118 +-
+ plugins/cilium-cni/types/types_test.go        |   49 +
+ 40 files changed, 6308 insertions(+), 254 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -4848,10 +4848,10 @@ index a60a02a64..fe30ba647 100644
  
  func (m *InstancesManager) FindSecurityGroupByTags(vpcID string, required ipamTypes.Tags) []*hwTypes.SecurityGroup {
 diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
-index c27c81bb0..3662cbeea 100644
+index c27c81bb0..d3afebf9d 100644
 --- a/pkg/huaweicloud/eni/instances_test.go
 +++ b/pkg/huaweicloud/eni/instances_test.go
-@@ -5,14 +5,103 @@ package eni
+@@ -5,14 +5,108 @@ package eni
  
  import (
  	"context"
@@ -4904,6 +4904,7 @@ index c27c81bb0..3662cbeea 100644
 +	*mock.API
 +	deleteCount int
 +	failAt      int
++	notFoundAt  int
 +	cancelAt    int
 +	cancel      context.CancelFunc
 +}
@@ -4931,6 +4932,10 @@ index c27c81bb0..3662cbeea 100644
 +	if a.failAt == a.deleteCount {
 +		return errInjectedDelete
 +	}
++	if a.notFoundAt == a.deleteCount {
++		_ = a.API.DeleteSubNetworkInterface(ctx, subENIID)
++		return fmt.Errorf("%w: injected already absent SubENI", hwAPI.ErrNotFound)
++	}
 +	return a.API.DeleteSubNetworkInterface(ctx, subENIID)
 +}
 +
@@ -4955,7 +4960,7 @@ index c27c81bb0..3662cbeea 100644
  func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
  	api := mock.NewAPI(
  		[]*ipamTypes.Subnet{
-@@ -46,6 +135,67 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
+@@ -46,6 +140,67 @@ func TestFindOneSubnetFiltersByTagsAndPrefersExplicitIDs(t *testing.T) {
  	}
  }
  
@@ -5023,7 +5028,7 @@ index c27c81bb0..3662cbeea 100644
  func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *testing.T) {
  	api := mock.NewAPI(
  		[]*ipamTypes.Subnet{
-@@ -77,6 +227,89 @@ func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *test
+@@ -77,6 +232,89 @@ func TestFindOneSubnetRejectsInsufficientCapacityAndSelectsMostAvailable(t *test
  	}
  }
  
@@ -5113,7 +5118,7 @@ index c27c81bb0..3662cbeea 100644
  func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
  	api := mock.NewAPI(nil, nil, nil)
  	api.SetPortSecurityGroups("trunk-1", []string{"sg-1", "sg-2"})
-@@ -91,9 +324,117 @@ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
+@@ -91,9 +329,117 @@ func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
  	}
  }
  
@@ -5232,7 +5237,7 @@ index c27c81bb0..3662cbeea 100644
  		subENIs: map[string]eniTypes.SubENI{
  			"eni-c": {ID: "eni-c", PrivateIPAddress: "172.31.1.30"},
  			"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.10"},
-@@ -108,3 +449,624 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
+@@ -108,3 +454,664 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
  		}
  	}
  }
@@ -5332,6 +5337,46 @@ index c27c81bb0..3662cbeea 100644
 +		if _, err := base.GetSubNetworkInterface(context.Background(), id); err != nil {
 +			t.Fatalf("SubENI %s was deleted after/because of failure: %v", id, err)
 +		}
++	}
++}
++
++func TestReleaseIPsTreatsNotFoundAsConvergedAndContinues(t *testing.T) {
++	base := mock.NewAPI(nil, nil, nil)
++	for _, subENI := range []*eniTypes.SubENI{
++		{ID: "eni-a", PrivateIPAddress: "172.31.1.1"},
++		{ID: "eni-b", PrivateIPAddress: "172.31.1.2"},
++	} {
++		base.AddSubENI("instance-1", subENI)
++	}
++	api := &releaseControlAPI{API: base, notFoundAt: 1}
++	node := &Node{
++		node:    testNodeID("instance-1"),
++		manager: NewInstancesManager(api, "vpc-1", nil),
++		k8sObj: &v2.CiliumNode{Status: v2.NodeStatus{IPAM: ipamTypes.IPAMStatus{
++			Used: ipamTypes.AllocationMap{},
++		}}},
++		subENIs: map[string]eniTypes.SubENI{
++			"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.1"},
++			"eni-b": {ID: "eni-b", PrivateIPAddress: "172.31.1.2"},
++		},
++	}
++
++	err := node.ReleaseIPs(context.Background(), &ipam.ReleaseAction{IPsToRelease: []string{
++		"172.31.1.1", "172.31.1.2",
++	}})
++	if err != nil {
++		t.Fatalf("not-found delete did not converge: %v", err)
++	}
++	if api.deleteCount != 2 {
++		t.Fatalf("release stopped after not-found: delete calls=%d", api.deleteCount)
++	}
++	for _, id := range []string{"eni-a", "eni-b"} {
++		if _, err := base.GetSubNetworkInterface(context.Background(), id); err == nil {
++			t.Fatalf("SubENI %s still exists after converged release", id)
++		}
++	}
++	if len(node.subENIs) != 0 {
++		t.Fatalf("local SubENI state was not cleared: %v", node.subENIs)
 +	}
 +}
 +
@@ -5858,7 +5903,7 @@ index c27c81bb0..3662cbeea 100644
 +	}
 +}
 diff --git a/pkg/huaweicloud/eni/node.go b/pkg/huaweicloud/eni/node.go
-index 990177982..c7cd68dfa 100644
+index 990177982..7ceac9455 100644
 --- a/pkg/huaweicloud/eni/node.go
 +++ b/pkg/huaweicloud/eni/node.go
 @@ -8,6 +8,7 @@ import (
@@ -6118,7 +6163,8 @@ index 990177982..c7cd68dfa 100644
 +			continue
 +		}
 +		seenSubENIs[subENIID] = struct{}{}
-+
+ 
+-		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil {
 +		n.mutex.RLock()
 +		usedStateKnown := n.k8sObj != nil && n.k8sObj.Status.IPAM.Used != nil
 +		nowUsed := false
@@ -6129,8 +6175,8 @@ index 990177982..c7cd68dfa 100644
 +		if !usedStateKnown || nowUsed {
 +			continue
 +		}
- 
- 		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil {
++
++		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil && !errors.Is(err, hwAPI.ErrNotFound) {
  			return fmt.Errorf("failed to delete Sub-ENI %s (IP %s): %w", subENIID, ip, err)
  		}
 +		n.manager.DeleteSubENI(n.currentInstanceID(), subENIID)
