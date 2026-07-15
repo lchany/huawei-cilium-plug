@@ -1,0 +1,2940 @@
+From 7ba137271edc7e2f40e1a8be7f70310210f2b44f Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-8564-1.novalocal>
+Date: Wed, 15 Jul 2026 17:23:44 +0800
+Subject: [PATCH 2/3] huaweicloud: add data plane support
+
+---
+ bpf/Makefile                                  |   1 +
+ bpf/bpf_host.c                                |  26 +-
+ bpf/include/bpf/helpers_skb.h                 |   4 +
+ bpf/lib/common.h                              |   3 +
+ bpf/lib/huaweicloud.h                         | 222 +++++++
+ daemon/cmd/daemon.go                          |  10 +-
+ daemon/cmd/ipam.go                            |   5 +-
+ daemon/cmd/kube_proxy_replacement.go          |  27 +-
+ pkg/datapath/iptables/custom_chain.go         |   6 +
+ pkg/datapath/iptables/iptables.go             | 141 +++-
+ pkg/datapath/linux/config/config.go           |  12 +
+ pkg/datapath/linux/devices.go                 |   4 +-
+ .../linux/linux_defaults/linux_defaults.go    |   7 +
+ pkg/datapath/linux/routing/info.go            |  33 +-
+ pkg/datapath/linux/routing/routing.go         | 418 ++++++++++--
+ pkg/datapath/loader/loader.go                 |  10 +-
+ pkg/endpoint/endpoint.go                      |   2 +-
+ pkg/endpointmanager/huaweicloud_subeni.go     | 609 ++++++++++++++++++
+ pkg/endpointmanager/manager.go                |  12 +-
+ pkg/endpointmanager/subscribe.go              |   4 +
+ pkg/huaweicloud/subenimap/manager.go          | 558 ++++++++++++++++
+ pkg/huaweicloud/subenimap/types.go            | 149 +++++
+ pkg/ipam/crd.go                               |  81 ++-
+ pkg/monitor/api/drop.go                       |   3 +
+ plugins/cilium-cni/cilium-cni.go              |   2 +-
+ 25 files changed, 2276 insertions(+), 73 deletions(-)
+ create mode 100644 bpf/lib/huaweicloud.h
+ create mode 100644 pkg/endpointmanager/huaweicloud_subeni.go
+ create mode 100644 pkg/huaweicloud/subenimap/manager.go
+ create mode 100644 pkg/huaweicloud/subenimap/types.go
+
+diff --git a/bpf/Makefile b/bpf/Makefile
+index d8ea360bf..64461bd17 100644
+--- a/bpf/Makefile
++++ b/bpf/Makefile
+@@ -152,6 +152,7 @@ bpf_overlay.o: bpf_overlay.ll
+ 	$(QUIET) ${LLC} ${LLC_FLAGS} -filetype=obj -o $@ $(patsubst %.o,%.ll,$@)
+ 
+ HOST_OPTIONS = $(LXC_OPTIONS) \
++	-DENABLE_IPV4:-DENABLE_HUAWEICLOUD_VLAN:-DHWC_TRUNK_IFINDEX: \
+ 	-DENABLE_IPV4:-DENABLE_IPV6:-DENCAP_IFINDEX:-DTUNNEL_MODE:-DENABLE_HOST_FIREWALL: \
+ 	-DENABLE_IPV4:-DENABLE_IPV6:-DENCAP_IFINDEX:-DTUNNEL_MODE:-DPOLICY_VERDICT_NOTIFY:-DENABLE_SOCKET_LB_UDP:-DENABLE_SOCKET_LB_TCP:-DENABLE_HOST_FIREWALL: \
+ 	-DENABLE_IPV4:-DENABLE_IPV6:-DENCAP_IFINDEX:-DTUNNEL_MODE:-DPOLICY_VERDICT_NOTIFY:-DENABLE_SOCKET_LB_UDP:-DENABLE_SOCKET_LB_TCP:-DENABLE_DSR: \
+diff --git a/bpf/bpf_host.c b/bpf/bpf_host.c
+index 5b955a8a6..b1198e355 100644
+--- a/bpf/bpf_host.c
++++ b/bpf/bpf_host.c
+@@ -32,6 +32,9 @@
+ #endif
+ 
+ #include "lib/common.h"
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++#include "lib/huaweicloud.h"
++#endif
+ #include "lib/edt.h"
+ #include "lib/arp.h"
+ #include "lib/maps.h"
+@@ -953,10 +956,19 @@ __section("from-netdev")
+ int from_netdev(struct __ctx_buff *ctx)
+ {
+ 	__u32 __maybe_unused vlan_id;
++	int ret __maybe_unused;
++	bool hwc_vlan_handled = false;
++
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	ret = hwc_from_netdev(ctx, &hwc_vlan_handled);
++	if (IS_ERR(ret))
++		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
++					      METRIC_INGRESS);
++#endif
+ 
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 */
+-	if (ctx->vlan_present) {
++	if (!hwc_vlan_handled && ctx->vlan_present) {
+ 		vlan_id = ctx->vlan_tci & 0xfff;
+ 		if (vlan_id) {
+ 			if (allow_vlan(ctx->ifindex, vlan_id))
+@@ -1001,6 +1013,11 @@ int to_netdev(struct __ctx_buff *ctx __maybe_unused)
+ 	__u32 __maybe_unused vlan_id;
+ 	int ret = CTX_ACT_OK;
+ 
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	if (!proto)
++		validate_ethertype(ctx, &proto);
++#endif
++
+ 	/* Filter allowed vlan id's and pass them back to kernel.
+ 	 */
+ 	if (ctx->vlan_present) {
+@@ -1064,6 +1081,13 @@ out:
+ 					      METRIC_EGRESS);
+ #endif /* ENABLE_HOST_FIREWALL */
+ 
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++	ret = hwc_to_netdev(ctx, proto);
++	if (IS_ERR(ret))
++		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP,
++					      METRIC_EGRESS);
++#endif
++
+ #if defined(ENABLE_BANDWIDTH_MANAGER)
+ 	ret = edt_sched_departure(ctx);
+ 	/* No send_drop_notify_error() here given we're rate-limiting. */
+diff --git a/bpf/include/bpf/helpers_skb.h b/bpf/include/bpf/helpers_skb.h
+index d4bce1972..b72a13f6c 100644
+--- a/bpf/include/bpf/helpers_skb.h
++++ b/bpf/include/bpf/helpers_skb.h
+@@ -24,6 +24,10 @@ static int BPF_FUNC(skb_load_bytes, struct __sk_buff *skb, __u32 off,
+ static int BPF_FUNC(skb_store_bytes, struct __sk_buff *skb, __u32 off,
+ 		    const void *from, __u32 len, __u32 flags);
+ 
++static int BPF_FUNC(skb_vlan_push, struct __sk_buff *skb, __be16 vlan_proto,
++		    __u16 vlan_tci);
++static int BPF_FUNC(skb_vlan_pop, struct __sk_buff *skb);
++
+ static int BPF_FUNC(l3_csum_replace, struct __sk_buff *skb, __u32 off,
+ 		    __u32 from, __u32 to, __u32 flags);
+ static int BPF_FUNC(l4_csum_replace, struct __sk_buff *skb, __u32 off,
+diff --git a/bpf/lib/common.h b/bpf/lib/common.h
+index dc7e23fc9..62708b3e1 100644
+--- a/bpf/lib/common.h
++++ b/bpf/lib/common.h
+@@ -474,6 +474,9 @@ enum {
+ #define DROP_VLAN_FILTERED	-182
+ #define DROP_INVALID_VNI	-183
+ #define DROP_INVALID_TC_BUFFER  -184
++#define DROP_HWC_VLAN_PUSH_FAIL -185
++#define DROP_HWC_VLAN_POP_FAIL -186
++#define DROP_HWC_MAC_REWRITE_FAIL -187
+ #define DROP_NO_NODE_ID		-197
+ 
+ #define NAT_PUNT_TO_STACK	DROP_NAT_NOT_NEEDED
+diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
+new file mode 100644
+index 000000000..b060344de
+--- /dev/null
++++ b/bpf/lib/huaweicloud.h
+@@ -0,0 +1,222 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/* Copyright Authors of Cilium */
++
++#pragma once
++
++#ifdef ENABLE_HUAWEICLOUD_VLAN
++
++#include <linux/ip.h>
++
++#include "common.h"
++#include "eth.h"
++#include "drop.h"
++
++struct hwc_srcip_key4 {
++	__u32 addr;
++};
++
++struct hwc_srcip_key6 {
++	__u8 addr[16];
++};
++
++struct hwc_subeni_info {
++	__u16 vlan_id;
++	__u8 mac[6];
++	__u16 pad;
++	__u16 reserved;
++	__u32 lxc_id;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_srcip_key4);
++	__type(value, struct hwc_subeni_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_srcip4 __section_maps_btf;
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_srcip_key6);
++	__type(value, struct hwc_subeni_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_srcip6 __section_maps_btf;
++
++struct hwc_vlan_mac_key {
++	__u16 vlan_id;
++	__u8 mac[6];
++};
++
++struct hwc_ep_info {
++	__u32 ifindex;
++	__u16 lxc_id;
++	__u16 flags;
++};
++
++struct hwc_vlan_hdr {
++	__be16 tci;
++	__be16 encapsulated_proto;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_HASH);
++	__type(key, struct hwc_vlan_mac_key);
++	__type(value, struct hwc_ep_info);
++	__uint(max_entries, 65536);
++	__uint(pinning, LIBBPF_PIN_BY_NAME);
++} cilium_hwc_vlan_mac __section_maps_btf;
++
++static __always_inline __u16 hwc_vlan_id(__u16 tci)
++{
++	return tci & 0x0fff;
++}
++
++static __always_inline bool hwc_ethernet_header_complete(__u32 packet_len)
++{
++	return packet_len >= sizeof(struct ethhdr);
++}
++
++static __always_inline bool hwc_vlan_header_complete(__u32 packet_len)
++{
++	return packet_len >= sizeof(struct ethhdr) + sizeof(struct hwc_vlan_hdr);
++}
++
++static __always_inline bool hwc_vlan_id_valid(__u16 vlan_id)
++{
++	return vlan_id >= 1 && vlan_id <= 4094;
++}
++
++static __always_inline bool
++hwc_vlan_representations_match(__u16 inline_tci, __u16 metadata_tci)
++{
++	return hwc_vlan_id(inline_tci) == hwc_vlan_id(metadata_tci);
++}
++
++static __always_inline int
++hwc_vlan_pop_count(bool inline_vlan, bool metadata_vlan)
++{
++	return inline_vlan && metadata_vlan ? 2 : 1;
++}
++
++static __always_inline int hwc_vlan_map_miss_action(bool inline_vlan)
++{
++	/* An inline VLAN has already bypassed the kernel's metadata VLAN path.
++	 * It must not continue as apparently untagged traffic after an HWC map
++	 * miss. A metadata-only miss is intentionally left for the generic VLAN
++	 * allow/drop logic in bpf_host.c.
++	 */
++	return inline_vlan ? DROP_INVALID : CTX_ACT_OK;
++}
++
++static __always_inline int
++hwc_to_netdev(struct __ctx_buff *ctx, __be16 proto)
++{
++	struct hwc_subeni_info *info;
++	__u32 src_ip4 = 0;
++	struct hwc_srcip_key4 key = {};
++
++	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++		return CTX_ACT_OK;
++	if (proto != bpf_htons(ETH_P_IP))
++		return CTX_ACT_OK;
++
++	if (ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, saddr),
++			   &src_ip4, sizeof(src_ip4)) < 0)
++		return CTX_ACT_OK;
++
++	key.addr = src_ip4;
++	info = map_lookup_elem(&cilium_hwc_srcip4, &key);
++	if (!info)
++		return CTX_ACT_OK;
++
++	if (eth_store_saddr(ctx, info->mac, 0) < 0)
++		return DROP_HWC_MAC_REWRITE_FAIL;
++
++	if (skb_vlan_push(ctx, bpf_htons(ETH_P_8021Q), info->vlan_id) < 0)
++		return DROP_HWC_VLAN_PUSH_FAIL;
++
++	return CTX_ACT_OK;
++}
++
++static __always_inline int
++hwc_from_netdev(struct __ctx_buff *ctx, bool *handled)
++{
++	struct hwc_vlan_mac_key key __align_stack_8 = {};
++	struct hwc_ep_info *ep;
++	void *data, *data_end;
++	struct ethhdr *eth;
++	__u16 vlan_id;
++	__u16 inline_tci = 0;
++	__be16 inner_proto;
++	bool inline_vlan = false;
++	bool metadata_vlan;
++
++	*handled = false;
++	if (ctx->ifindex != HWC_TRUNK_IFINDEX)
++		return CTX_ACT_OK;
++
++	data = (void *)(long)ctx->data;
++	data_end = (void *)(long)ctx->data_end;
++	eth = data;
++	if (!hwc_ethernet_header_complete((__u32)((long)data_end - (long)data)))
++		return DROP_INVALID;
++	if ((void *)(eth + 1) > data_end)
++		return DROP_INVALID;
++
++	/* Prefer an inline VLAN header when both inline and skb metadata
++	 * representations are visible. HuaweiCloud virtio devices may deliver
++	 * either representation, or both at the same time.
++	 */
++	if (eth->h_proto == bpf_htons(ETH_P_8021Q) ||
++	    eth->h_proto == bpf_htons(ETH_P_8021AD)) {
++		struct hwc_vlan_hdr *vlan = (void *)(eth + 1);
++
++		if (!hwc_vlan_header_complete((__u32)((long)data_end - (long)data)))
++			return DROP_INVALID;
++		if ((void *)(vlan + 1) > data_end)
++			return DROP_INVALID;
++		inline_tci = bpf_ntohs(vlan->tci);
++		vlan_id = hwc_vlan_id(inline_tci);
++		inner_proto = vlan->encapsulated_proto;
++		inline_vlan = true;
++	} else if (ctx->vlan_present) {
++		vlan_id = hwc_vlan_id((__u16)ctx->vlan_tci);
++		inner_proto = eth->h_proto;
++	} else {
++		return CTX_ACT_OK;
++	}
++	metadata_vlan = ctx->vlan_present;
++	if (!hwc_vlan_id_valid(vlan_id))
++		return DROP_INVALID;
++	if (inline_vlan && metadata_vlan &&
++	    !hwc_vlan_representations_match(inline_tci, (__u16)ctx->vlan_tci))
++		return DROP_INVALID;
++	if (inner_proto != bpf_htons(ETH_P_IP))
++		return inline_vlan ? DROP_INVALID : CTX_ACT_OK;
++
++	key.vlan_id = vlan_id;
++	key.mac[0] = eth->h_dest[0];
++	key.mac[1] = eth->h_dest[1];
++	key.mac[2] = eth->h_dest[2];
++	key.mac[3] = eth->h_dest[3];
++	key.mac[4] = eth->h_dest[4];
++	key.mac[5] = eth->h_dest[5];
++
++	ep = map_lookup_elem(&cilium_hwc_vlan_mac, &key);
++	if (!ep)
++		return hwc_vlan_map_miss_action(inline_vlan);
++	*handled = true;
++
++	if (hwc_vlan_pop_count(inline_vlan, metadata_vlan) == 2 &&
++	    skb_vlan_pop(ctx) < 0)
++		return DROP_HWC_VLAN_POP_FAIL;
++
++	if (skb_vlan_pop(ctx) < 0)
++		return DROP_HWC_VLAN_POP_FAIL;
++
++	ctx_change_type(ctx, PACKET_HOST);
++	return CTX_ACT_OK;
++}
++
++#endif
+diff --git a/daemon/cmd/daemon.go b/daemon/cmd/daemon.go
+index 816731c08..e5ed54ce1 100644
+--- a/daemon/cmd/daemon.go
++++ b/daemon/cmd/daemon.go
+@@ -297,7 +297,7 @@ func (d *Daemon) restoreCiliumHostIPs(ipv6 bool, fromK8s net.IP) {
+ 		case ipamOption.IPAMCRD:
+ 			// The native routing CIDR is the pod CIDR in CRD mode.
+ 			cidrs = []*cidr.CIDR{option.Config.GetIPv4NativeRoutingCIDR()}
+-		case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++		case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 			// d.startIPAM() has already been called at this stage to initialize sharedNodeStore with ownNode info
+ 			// needed for GetVpcCIDRs()
+ 			cidrs = d.ipam.GetVpcCIDRs()
+@@ -718,6 +718,12 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
+ 		log.WithError(err).Error("error while opening/creating BPF maps")
+ 		return nil, nil, fmt.Errorf("error while opening/creating BPF maps: %w", err)
+ 	}
++	if cleanup, err := endpointmanager.RegisterHuaweiCloudSubENIManager(d.endpointManager); err != nil {
++		log.WithError(err).Error("error while registering HuaweiCloud SubENI manager")
++		return nil, nil, fmt.Errorf("error while registering HuaweiCloud SubENI manager: %w", err)
++	} else if cleanup != nil {
++		cleaner.cleanupFuncs.Add(cleanup)
++	}
+ 	// Upsert restored CIDRs after the new ipcache has been opened above
+ 	if len(restoredCIDRidentities) > 0 {
+ 		d.ipcache.UpsertGeneratedIdentities(restoredCIDRidentities, nil)
+@@ -1146,7 +1152,7 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
+ 	// Trigger refresh and update custom resource in the apiserver with all restored endpoints.
+ 	// Trigger after nodeDiscovery.StartDiscovery to avoid custom resource update conflict.
+ 	if option.Config.IPAM == ipamOption.IPAMCRD || option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure ||
+-		option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMClusterPoolV2 {
++		option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud || option.Config.IPAM == ipamOption.IPAMClusterPoolV2 {
+ 		if option.Config.EnableIPv6 {
+ 			d.ipam.IPv6Allocator.RestoreFinished()
+ 		}
+diff --git a/daemon/cmd/ipam.go b/daemon/cmd/ipam.go
+index bef3b11ff..92d55126c 100644
+--- a/daemon/cmd/ipam.go
++++ b/daemon/cmd/ipam.go
+@@ -254,6 +254,7 @@ func (d *Daemon) allocateDatapathIPs(family types.NodeAddressingFamily) (routerI
+ 
+ 	if (option.Config.IPAM == ipamOption.IPAMENI ||
+ 		option.Config.IPAM == ipamOption.IPAMAlibabaCloud ||
++		option.Config.IPAM == ipamOption.IPAMHuaweiCloud ||
+ 		option.Config.IPAM == ipamOption.IPAMAzure) && result != nil {
+ 		var routingInfo *linuxrouting.RoutingInfo
+ 		routingInfo, err = linuxrouting.NewRoutingInfo(result.GatewayIP, result.CIDRs,
+@@ -301,7 +302,7 @@ func (d *Daemon) allocateHealthIPs() error {
+ 			// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the ENI MAC addr
+ 			// in order to set up rules and routes on the local node to direct
+ 			// endpoint traffic out of the ENIs.
+-			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 				var err error
+ 				if d.healthEndpointRouting, err = parseRoutingInfo(result); err != nil {
+ 					log.WithError(err).Warn("Unable to allocate health information for ENI")
+@@ -375,7 +376,7 @@ func (d *Daemon) allocateIngressIPs() error {
+ 			// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the
+ 			// ENI MAC addr in order to set up rules and routes on the local node to
+ 			// direct ingress traffic out of the ENIs.
+-			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 				if ingressRouting, err := parseRoutingInfo(result); err != nil {
+ 					log.WithError(err).Warn("Unable to allocate ingress information for ENI")
+ 				} else {
+diff --git a/daemon/cmd/kube_proxy_replacement.go b/daemon/cmd/kube_proxy_replacement.go
+index 9f0fbc0ef..5b2e924c2 100644
+--- a/daemon/cmd/kube_proxy_replacement.go
++++ b/daemon/cmd/kube_proxy_replacement.go
+@@ -16,6 +16,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/spf13/viper"
+ 	"github.com/vishvananda/netlink"
+ 	"golang.org/x/sys/unix"
+ 
+@@ -76,6 +77,21 @@ func initKubeProxyReplacementOptions() (bool, error) {
+ 		return false, nil
+ 	}
+ 
++	if shouldDisableProbeFeaturesForExplicitNodePort(
++		option.Config.KubeProxyReplacement,
++		viper.IsSet(option.EnableNodePort),
++		viper.GetBool(option.EnableNodePort),
++	) {
++		log.Infof("Disabling kube-proxy replacement features because %q is explicitly false in probe mode",
++			option.EnableNodePort)
++		disableNodePort()
++		option.Config.EnableSocketLB = false
++		option.Config.EnableHostServicesTCP = false
++		option.Config.EnableHostServicesUDP = false
++		option.Config.EnableSessionAffinity = false
++		return false, nil
++	}
++
+ 	probesManager := probes.NewProbeManager()
+ 
+ 	// strict denotes to panic if any to-be enabled feature cannot be enabled
+@@ -90,7 +106,12 @@ func initKubeProxyReplacementOptions() (bool, error) {
+ 			option.EnableSessionAffinity)
+ 
+ 		option.Config.EnableHostPort = true
+-		option.Config.EnableNodePort = true
++		// Probe mode historically enables every supported replacement feature.
++		// Preserve an explicit --enable-node-port=false so kube-proxy can remain
++		// the NodePort datapath while the remaining features are probed.
++		if !viper.IsSet(option.EnableNodePort) || viper.GetBool(option.EnableNodePort) {
++			option.Config.EnableNodePort = true
++		}
+ 		option.Config.EnableExternalIPs = true
+ 		option.Config.EnableSocketLB = true
+ 		option.Config.EnableHostServicesTCP = true
+@@ -426,6 +447,10 @@ func initKubeProxyReplacementOptions() (bool, error) {
+ 	return strict, nil
+ }
+ 
++func shouldDisableProbeFeaturesForExplicitNodePort(mode string, nodePortIsSet, nodePortEnabled bool) bool {
++	return mode == option.KubeProxyReplacementProbe && nodePortIsSet && !nodePortEnabled
++}
++
+ func probeManagedNeighborSupport() {
+ 	if option.Config.DryMode {
+ 		return
+diff --git a/pkg/datapath/iptables/custom_chain.go b/pkg/datapath/iptables/custom_chain.go
+index 9cd0fce5e..1a93c19ac 100644
+--- a/pkg/datapath/iptables/custom_chain.go
++++ b/pkg/datapath/iptables/custom_chain.go
+@@ -41,6 +41,12 @@ var ciliumChains = []customChain{
+ 		feederArgs: []string{""},
+ 		ipv6:       true,
+ 	},
++	{
++		name:       ciliumOutputMangleChain,
++		table:      "mangle",
++		hook:       "OUTPUT",
++		feederArgs: []string{""},
++	},
+ 	{
+ 		name:       ciliumOutputRawChain,
+ 		table:      "raw",
+diff --git a/pkg/datapath/iptables/iptables.go b/pkg/datapath/iptables/iptables.go
+index b35944b75..c9c2adfed 100644
+--- a/pkg/datapath/iptables/iptables.go
++++ b/pkg/datapath/iptables/iptables.go
+@@ -38,21 +38,28 @@ import (
+ )
+ 
+ const (
+-	oldCiliumPrefix       = "OLD_"
+-	ciliumInputChain      = "CILIUM_INPUT"
+-	ciliumOutputChain     = "CILIUM_OUTPUT"
+-	ciliumOutputRawChain  = "CILIUM_OUTPUT_raw"
+-	ciliumPostNatChain    = "CILIUM_POST_nat"
+-	ciliumOutputNatChain  = "CILIUM_OUTPUT_nat"
+-	ciliumPreNatChain     = "CILIUM_PRE_nat"
+-	ciliumPostMangleChain = "CILIUM_POST_mangle"
+-	ciliumPreMangleChain  = "CILIUM_PRE_mangle"
+-	ciliumPreRawChain     = "CILIUM_PRE_raw"
+-	ciliumForwardChain    = "CILIUM_FORWARD"
+-	feederDescription     = "cilium-feeder:"
+-	xfrmDescription       = "cilium-xfrm-notrack:"
+-	ciliumNodeIpsetV4     = "cilium_node_set_v4"
+-	ciliumNodeIpsetV6     = "cilium_node_set_v6"
++	oldCiliumPrefix         = "OLD_"
++	ciliumInputChain        = "CILIUM_INPUT"
++	ciliumOutputChain       = "CILIUM_OUTPUT"
++	ciliumOutputMangleChain = "CILIUM_OUTPUT_mangle"
++	ciliumOutputRawChain    = "CILIUM_OUTPUT_raw"
++	ciliumPostNatChain      = "CILIUM_POST_nat"
++	ciliumOutputNatChain    = "CILIUM_OUTPUT_nat"
++	ciliumPreNatChain       = "CILIUM_PRE_nat"
++	ciliumPostMangleChain   = "CILIUM_POST_mangle"
++	ciliumPreMangleChain    = "CILIUM_PRE_mangle"
++	ciliumPreRawChain       = "CILIUM_PRE_raw"
++	ciliumForwardChain      = "CILIUM_FORWARD"
++	feederDescription       = "cilium-feeder:"
++	xfrmDescription         = "cilium-xfrm-notrack:"
++	ciliumNodeIpsetV4       = "cilium_node_set_v4"
++	ciliumNodeIpsetV6       = "cilium_node_set_v6"
++	// huaweiCloudLocalNodePortConnmark identifies a connection from a local
++	// endpoint to this node's NodePort. It deliberately does not overlap with
++	// Cilium's 0x0200-0x0f00 magic marks or kube-proxy's 0x4000 masquerade bit.
++	huaweiCloudLocalNodePortConnmark = "0x40/0x40"
++	kubeProxyMasqueradeMark          = "0x4000/0x4000"
++	kubeProxyMasqueradeMask          = "0x4000"
+ )
+ 
+ // Minimum iptables versions supporting the -w and -w<seconds> flags
+@@ -959,7 +966,8 @@ func getDeliveryInterface(ifName string) string {
+ 		return "lxc+"
+ 
+ 	case option.Config.IPAM == ipamOption.IPAMENI ||
+-		option.Config.IPAM == ipamOption.IPAMAlibabaCloud:
++		option.Config.IPAM == ipamOption.IPAMAlibabaCloud ||
++		option.Config.IPAM == ipamOption.IPAMHuaweiCloud:
+ 		return "lxc+"
+ 
+ 	default:
+@@ -1238,6 +1246,98 @@ func (m *IptablesManager) installMasqueradeRules(prog iptablesInterface, ifName,
+ 	return nil
+ }
+ 
++func installHuaweiCloudLocalServiceSNATRules(prog iptablesInterface, localDeliveryInterface, nodeIP, routerIP string, nodePortMin, nodePortMax int) error {
++	nodePortRange := fmt.Sprintf("%d:%d", nodePortMin, nodePortMax)
++	const (
++		nodePortSNATRange  = "1024-32767"
++		clusterIPSNATRange = "32768-65535"
++	)
++	// Remove rules installed directly in mangle/OUTPUT by older HuaweiCloud
++	// revisions. They were not owned by a replaceable Cilium chain and could
++	// accumulate across Agent restarts. Delete every duplicate before adding
++	// the equivalent rules to CILIUM_OUTPUT_mangle below.
++	protocols := []string{"tcp", "udp"}
++	for _, protocol := range protocols {
++		legacyRule := []string{
++			"-t", "mangle", "-D", "OUTPUT",
++			"-d", nodeIP,
++			"-p", protocol, "--dport", nodePortRange,
++			"-m", "comment", "--comment", "CILIUM_HUAWEICLOUD host to local nodeport",
++			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
++		}
++		for prog.runProg(legacyRule) == nil {
++		}
++	}
++	rules := make([][]string, 0, 11)
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
++			"-t", "mangle", "-A", ciliumPreMangleChain,
++			"-i", localDeliveryInterface,
++			"-d", nodeIP,
++			"-p", protocol, "--dport", nodePortRange,
++			"-m", "comment", "--comment", "huaweicloud local pod to local nodeport",
++			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
++		})
++	}
++	rules = append(rules, []string{
++		"-t", "nat", "-A", ciliumPostNatChain,
++		"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
++		"!", "-o", localDeliveryInterface,
++		"-m", "comment", "--comment", "huaweicloud preserve local pod source for remote nodeport backend",
++		"-j", "MARK", "--set-xmark", "0/" + kubeProxyMasqueradeMask,
++	})
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
++			"-t", "mangle", "-A", ciliumOutputMangleChain,
++			"-d", nodeIP,
++			"-p", protocol, "--dport", nodePortRange,
++			"-m", "comment", "--comment", "CILIUM_HUAWEICLOUD host to local nodeport",
++			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
++		})
++	}
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
++			"-t", "nat", "-A", ciliumPostNatChain,
++			"-p", protocol,
++			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
++			"-m", "mark", "--mark", kubeProxyMasqueradeMark,
++			"-o", localDeliveryInterface,
++			"-m", "comment", "--comment", "huaweicloud local nodeport hairpin SNAT",
++			"-j", "SNAT", "--to-source", defaults.LoopbackIPv4 + ":" + nodePortSNATRange, "--random-fully",
++		})
++	}
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
++			"-t", "nat", "-A", ciliumPostNatChain,
++			"-p", protocol,
++			"-s", nodeIP,
++			"-o", localDeliveryInterface,
++			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
++			"-m", "conntrack", "--ctstate", "DNAT",
++			"-m", "comment", "--comment", "huaweicloud host local nodeport SNAT",
++			"-j", "SNAT", "--to-source", routerIP + ":" + nodePortSNATRange, "--random-fully",
++		})
++	}
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
++			"-t", "nat", "-A", ciliumPostNatChain,
++			"-p", protocol,
++			"-s", nodeIP,
++			"-o", localDeliveryInterface,
++			"-m", "connmark", "!", "--mark", huaweiCloudLocalNodePortConnmark,
++			"-m", "conntrack", "--ctstate", "DNAT",
++			"-m", "comment", "--comment", "huaweicloud host local clusterip SNAT",
++			"-j", "SNAT", "--to-source", routerIP + ":" + clusterIPSNATRange, "--random-fully",
++		})
++	}
++	for _, rule := range rules {
++		if err := prog.runProg(rule); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
+ func createIpset(name string, ipv6 bool) error {
+ 	ipsetFamily := "inet"
+ 	if ipv6 {
+@@ -1422,6 +1522,13 @@ func (m *IptablesManager) installRules(ifName string) error {
+ 		if err := m.installHostTrafficMarkRule(ip4tables); err != nil {
+ 			return fmt.Errorf("cannot install host traffic mark rule: %w", err)
+ 		}
++		if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++			if err := installHuaweiCloudLocalServiceSNATRules(ip4tables, localDeliveryInterface,
++				node.GetIPv4().String(), node.GetInternalIPv4Router().String(),
++				option.Config.NodePortMin, option.Config.NodePortMax); err != nil {
++				return fmt.Errorf("cannot install HuaweiCloud local service SNAT rules: %w", err)
++			}
++		}
+ 
+ 		if option.Config.IptablesMasqueradingIPv4Enabled() {
+ 			if err := m.installMasqueradeRules(ip4tables, ifName, localDeliveryInterface,
+@@ -1454,7 +1561,7 @@ func (m *IptablesManager) installRules(ifName string) error {
+ 	// and route them back the same way even if the pod responding is using
+ 	// the IP of a different interface. Please see note in Reinitialize()
+ 	// in pkg/datapath/loader for more details.
+-	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 		if err := m.addCiliumENIRules(); err != nil {
+ 			return fmt.Errorf("cannot install rules for ENI multi-node NodePort: %w", err)
+ 		}
+diff --git a/pkg/datapath/linux/config/config.go b/pkg/datapath/linux/config/config.go
+index 71ee9d3f5..fca95a7bc 100644
+--- a/pkg/datapath/linux/config/config.go
++++ b/pkg/datapath/linux/config/config.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/link"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	"github.com/cilium/cilium/pkg/identity"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/labels"
+ 	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -207,6 +208,17 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
+ 		cDefinesMap["ENABLE_IPV4"] = "1"
+ 	}
+ 
++	if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++		cDefinesMap["ENABLE_HUAWEICLOUD_VLAN"] = "1"
++		trunkIfIndex, err := link.GetIfIndex(option.Config.HuaweiCloudTrunkInterface)
++		if err != nil {
++			return err
++		}
++		cDefinesMap["HWC_TRUNK_IFINDEX"] = fmt.Sprintf("%d", trunkIfIndex)
++	} else {
++		cDefinesMap["HWC_TRUNK_IFINDEX"] = "0"
++	}
++
+ 	if option.Config.EnableIPv6 {
+ 		cDefinesMap["ENABLE_IPV6"] = "1"
+ 	}
+diff --git a/pkg/datapath/linux/devices.go b/pkg/datapath/linux/devices.go
+index 1fa6b0710..a7da67dd1 100644
+--- a/pkg/datapath/linux/devices.go
++++ b/pkg/datapath/linux/devices.go
+@@ -18,6 +18,7 @@ import (
+ 
+ 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
+ 	"github.com/cilium/cilium/pkg/defaults"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/k8s"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -406,7 +407,8 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
+ func (dm *DeviceManager) AreDevicesRequired() bool {
+ 	return option.Config.EnableNodePort ||
+ 		option.Config.EnableHostFirewall ||
+-		option.Config.EnableBandwidthManager
++		option.Config.EnableBandwidthManager ||
++		option.Config.IPAM == ipamOption.IPAMHuaweiCloud
+ }
+ 
+ // expandDevices expands all wildcard device names to concrete devices.
+diff --git a/pkg/datapath/linux/linux_defaults/linux_defaults.go b/pkg/datapath/linux/linux_defaults/linux_defaults.go
+index 043345dcc..fa892ff8f 100644
+--- a/pkg/datapath/linux/linux_defaults/linux_defaults.go
++++ b/pkg/datapath/linux/linux_defaults/linux_defaults.go
+@@ -32,6 +32,13 @@ const (
+ 	// table which is between 253-255. See ip-route(8).
+ 	RouteTableInterfacesOffset = 10
+ 
++	// RouteTableHuaweiCloudInterfacesOffset is the offset for per-SubENI
++	// routing tables in HuaweiCloud VLAN mode. VLAN IDs are unique on a parent
++	// interface and range from 1 to 4094, so this reserves tables 10001-14094.
++	// The dedicated range avoids the reserved tables 253-255 and the table
++	// ranges already used by Cilium.
++	RouteTableHuaweiCloudInterfacesOffset = 10000
++
+ 	// RouteMarkDecrypt is the default route mark to use to indicate datapath
+ 	// needs to decrypt a packet.
+ 	RouteMarkDecrypt = 0x0D00
+diff --git a/pkg/datapath/linux/routing/info.go b/pkg/datapath/linux/routing/info.go
+index 672e863c9..63594c525 100644
+--- a/pkg/datapath/linux/routing/info.go
++++ b/pkg/datapath/linux/routing/info.go
+@@ -9,11 +9,17 @@ import (
+ 	"net"
+ 	"strconv"
+ 
++	"github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/mac"
+ )
+ 
+-// RoutingInfo represents information that's required to enable
+-// connectivity via the local rule and route tables while in ENI or Azure IPAM mode.
++const (
++	minHuaweiCloudVLANID = 1
++	maxHuaweiCloudVLANID = 4094
++)
++
++// RoutingInfo represents information that's required to enable connectivity
++// via the local rule and route tables while in ENI, Azure, or HuaweiCloud IPAM mode.
+ // The information in this struct is used to create rules and routes which direct
+ // traffic out of the interface (egress).
+ //
+@@ -36,8 +42,8 @@ type RoutingInfo struct {
+ 	Masquerade bool
+ 
+ 	// InterfaceNumber is the generic number of the master interface that
+-	// egress traffic is directed to. This is used to compute the table ID for
+-	// the per-ENI tables.
++	// egress traffic is directed to. In HuaweiCloud mode this is the SubENI
++	// VLAN ID. This is used to compute the per-interface route table ID.
+ 	InterfaceNumber int
+ 
+ 	// IpamMode tells us which IPAM mode is being used (e.g., ENI, AKS).
+@@ -59,7 +65,7 @@ func NewRoutingInfo(gateway string, cidrs []string, mac, ifaceNum, ipamMode stri
+ 
+ func parse(gateway string, cidrs []string, macAddr, ifaceNum, ipamMode string, masquerade bool) (*RoutingInfo, error) {
+ 	ip := net.ParseIP(gateway)
+-	if ip == nil {
++	if ip == nil || ip.To4() == nil {
+ 		return nil, fmt.Errorf("invalid ip: %s", gateway)
+ 	}
+ 
+@@ -70,9 +76,16 @@ func parse(gateway string, cidrs []string, macAddr, ifaceNum, ipamMode string, m
+ 	parsedCIDRs := make([]net.IPNet, 0, len(cidrs))
+ 	for _, cidr := range cidrs {
+ 		_, c, err := net.ParseCIDR(cidr)
+-		if err != nil {
++		if err != nil || c.IP.To4() == nil {
+ 			return nil, fmt.Errorf("invalid cidr: %s", cidr)
+ 		}
++		if ipamMode == option.IPAMHuaweiCloud {
++			for i := range parsedCIDRs {
++				if parsedCIDRs[i].String() == c.String() {
++					return nil, fmt.Errorf("duplicate HuaweiCloud CIDR: %s", c.String())
++				}
++			}
++		}
+ 
+ 		parsedCIDRs = append(parsedCIDRs, *c)
+ 	}
+@@ -81,11 +94,19 @@ func parse(gateway string, cidrs []string, macAddr, ifaceNum, ipamMode string, m
+ 	if err != nil {
+ 		return nil, fmt.Errorf("invalid mac: %s", macAddr)
+ 	}
++	if ipamMode == option.IPAMHuaweiCloud &&
++		(parsedMAC[0]&1 != 0 || parsedMAC.String() == "00:00:00:00:00:00") {
++		return nil, fmt.Errorf("invalid HuaweiCloud unicast MAC: %s", macAddr)
++	}
+ 
+ 	parsedIfaceNum, err := strconv.Atoi(ifaceNum)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("invalid interface number: %s", ifaceNum)
+ 	}
++	if ipamMode == option.IPAMHuaweiCloud &&
++		(parsedIfaceNum < minHuaweiCloudVLANID || parsedIfaceNum > maxHuaweiCloudVLANID) {
++		return nil, fmt.Errorf("invalid HuaweiCloud VLAN ID: %d", parsedIfaceNum)
++	}
+ 
+ 	return &RoutingInfo{
+ 		IPv4Gateway:     ip,
+diff --git a/pkg/datapath/linux/routing/routing.go b/pkg/datapath/linux/routing/routing.go
+index 76add0677..bfddad6d6 100644
+--- a/pkg/datapath/linux/routing/routing.go
++++ b/pkg/datapath/linux/routing/routing.go
+@@ -7,6 +7,8 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"net"
++	"strings"
++	"sync"
+ 
+ 	"github.com/sirupsen/logrus"
+ 	"github.com/vishvananda/netlink"
+@@ -25,10 +27,136 @@ import (
+ 
+ var (
+ 	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "linux-routing")
++
++	routingRouteReplace = netlink.RouteReplace
++	routingRouteDelete  = netlink.RouteDel
++	routingRuleList     = route.ListRules
++	routingRuleReplace  = route.ReplaceRule
++	routingRuleDelete   = route.DeleteRule
++
++	routingHuaweiCloudConfigureMu sync.Mutex
+ )
+ 
+-// Configure sets up the rules and routes needed when running in ENI or
+-// Azure IPAM mode.
++type routeChange struct {
++	installed netlink.Route
++	previous  *netlink.Route
++}
++
++type configureTransaction struct {
++	rules         []route.Rule
++	routes        []routeChange
++	deletedRoutes []netlink.Route
++}
++
++func (tx *configureTransaction) deleteRoute(spec netlink.Route) error {
++	if err := routingRouteDelete(&spec); err != nil {
++		return err
++	}
++	tx.deletedRoutes = append(tx.deletedRoutes, spec)
++	return nil
++}
++
++func (tx *configureTransaction) replaceRule(spec route.Rule) error {
++	existing, err := routingRuleList(netlink.FAMILY_V4, &spec)
++	if err != nil {
++		return err
++	}
++	if err := routingRuleReplace(spec); err != nil {
++		return err
++	}
++	if len(existing) == 0 {
++		tx.rules = append(tx.rules, spec)
++	}
++	return nil
++}
++
++func sameRouteDestination(a, b *net.IPNet) bool {
++	isDefault := func(dst *net.IPNet) bool {
++		if dst == nil {
++			return true
++		}
++		ones, bits := dst.Mask.Size()
++		return bits == 32 && ones == 0 && dst.IP.To4() != nil && dst.IP.To4().Equal(net.IPv4zero)
++	}
++	if isDefault(a) || isDefault(b) {
++		return isDefault(a) && isDefault(b)
++	}
++	return a.String() == b.String()
++}
++
++func sameIP(a, b net.IP) bool {
++	if a == nil || b == nil {
++		return a == nil && b == nil
++	}
++	return a.Equal(b)
++}
++
++func routeAlreadySatisfies(existing, desired netlink.Route) bool {
++	return sameRouteDestination(existing.Dst, desired.Dst) &&
++		existing.Table == desired.Table &&
++		(desired.LinkIndex == 0 || existing.LinkIndex == desired.LinkIndex) &&
++		existing.Scope == desired.Scope &&
++		sameIP(existing.Gw, desired.Gw)
++}
++
++func (tx *configureTransaction) replaceRoute(spec netlink.Route) error {
++	existing, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: spec.Table}, netlink.RT_FILTER_TABLE)
++	if err != nil {
++		return err
++	}
++	var previous *netlink.Route
++	for i := range existing {
++		if sameRouteDestination(existing[i].Dst, spec.Dst) {
++			if routeAlreadySatisfies(existing[i], spec) {
++				return nil
++			}
++			copy := existing[i]
++			previous = &copy
++			break
++		}
++	}
++	if err := routingRouteReplace(&spec); err != nil {
++		return err
++	}
++	tx.routes = append(tx.routes, routeChange{installed: spec, previous: previous})
++	return nil
++}
++
++func (tx *configureTransaction) rollback() error {
++	var rollbackErrors []string
++	for i := len(tx.deletedRoutes) - 1; i >= 0; i-- {
++		if err := routingRouteReplace(&tx.deletedRoutes[i]); err != nil {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	for i := len(tx.routes) - 1; i >= 0; i-- {
++		change := tx.routes[i]
++		var err error
++		if change.previous != nil {
++			err = routingRouteReplace(change.previous)
++		} else {
++			err = routingRouteDelete(&change.installed)
++			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
++				err = nil
++			}
++		}
++		if err != nil {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	for i := len(tx.rules) - 1; i >= 0; i-- {
++		if err := routingRuleDelete(tx.rules[i]); err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	if len(rollbackErrors) != 0 {
++		return errors.New(strings.Join(rollbackErrors, "; "))
++	}
++	return nil
++}
++
++// Configure sets up the rules and routes needed when running in ENI, Azure,
++// or HuaweiCloud IPAM mode.
+ // These rules and routes direct egress traffic out of the interface and
+ // ingress traffic back to the endpoint (`ip`). The compat flag controls which
+ // egress priority to consider when deleting the egress rules (see
+@@ -40,16 +168,67 @@ var (
+ // compat: Whether to use the compat egress priority or not.
+ // host: Whether the IP is a host IP and needs to be routed via the 'local' table
+ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) error {
++	if mtu <= 0 {
++		return fmt.Errorf("invalid MTU: %d", mtu)
++	}
++	ifindex, err := retrieveIfIndexFromMAC(info.MasterIfMAC, mtu)
++	if err != nil {
++		return fmt.Errorf("unable to find ifindex for interface MAC: %s", err)
++	}
++	return info.configureWithIfIndex(ip, compat, host, ifindex)
++}
++
++// Reconcile restores rules and routes without changing the link MTU or
++// administrative state. This distinction matters after a physical link flap:
++// reconciliation must wait for the network manager to bring the device back
++// instead of prematurely overriding an intentional down state.
++func (info *RoutingInfo) Reconcile(ip net.IP, compat bool, host bool) error {
++	link, err := retrieveLinkFromMAC(info.MasterIfMAC)
++	if err != nil {
++		return fmt.Errorf("unable to find interface for MAC: %s", err)
++	}
++	if link.Attrs().Flags&net.FlagUp == 0 {
++		return fmt.Errorf("interface %s is down", link.Attrs().Name)
++	}
++	return info.configureWithIfIndex(ip, compat, host, link.Attrs().Index)
++}
++
++func (info *RoutingInfo) configureWithIfIndex(ip net.IP, compat bool, host bool, ifindex int) (retErr error) {
+ 	if ip.To4() == nil {
+ 		log.WithFields(logrus.Fields{
+ 			"endpointIP": ip,
+ 		}).Warning("Unable to configure rules and routes because IP is not an IPv4 address")
+ 		return errors.New("IP not compatible")
+ 	}
+-
+-	ifindex, err := retrieveIfIndexFromMAC(info.MasterIfMAC, mtu)
++	egressPriority, tableID, err := info.egressRulePriorityAndTableID(ifindex, compat)
+ 	if err != nil {
+-		return fmt.Errorf("unable to find ifindex for interface MAC: %s", err)
++		return err
++	}
++	var staleHuaweiCloudRoutes []netlink.Route
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		routingHuaweiCloudConfigureMu.Lock()
++		defer routingHuaweiCloudConfigureMu.Unlock()
++		staleHuaweiCloudRoutes, err = inspectHuaweiCloudRouteTableOwnership(tableID, ifindex, info.IPv4Gateway)
++		if err != nil {
++			return err
++		}
++	}
++
++	var tx *configureTransaction
++	installRule := routingRuleReplace
++	installRoute := func(spec netlink.Route) error { return routingRouteReplace(&spec) }
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		tx = &configureTransaction{}
++		installRule = tx.replaceRule
++		installRoute = tx.replaceRoute
++		defer func() {
++			if retErr == nil {
++				return
++			}
++			if rollbackErr := tx.rollback(); rollbackErr != nil {
++				retErr = fmt.Errorf("%w; rollback failed: %v", retErr, rollbackErr)
++			}
++		}()
+ 	}
+ 
+ 	ipWithMask := net.IPNet{
+@@ -57,13 +236,30 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		Mask: net.CIDRMask(32, 32),
+ 	}
+ 
++	// The HuaweiCloud router IP is selected from a SubENI and therefore gets
++	// a source-based default route below. Keep traffic from cilium_host to VPC
++	// addresses in the main table so local endpoints without an explicit CNI
++	// ingress rule (notably cilium-health) remain reachable.
++	if host && info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		for i := range info.IPv4CIDRs {
++			if err := installRule(route.Rule{
++				Priority: linux_defaults.RulePriorityIngress,
++				From:     &ipWithMask,
++				To:       &info.IPv4CIDRs[i],
++				Table:    route.MainTable,
++			}); err != nil {
++				return fmt.Errorf("unable to install HuaweiCloud host VPC rule: %s", err)
++			}
++		}
++	}
++
+ 	// Ingress rule. This rule is not installed for the cilium_host IP, because
+ 	// the cilium_host IP is a local IP and therefore must be routed via the
+ 	// 'local' table instead of 'main'.
+ 	if !host {
+ 		// On ingress, route all traffic to the endpoint IP via the main routing
+ 		// table. Egress rules are created in a per-ENI routing table.
+-		if err := route.ReplaceRule(route.Rule{
++		if err := installRule(route.Rule{
+ 			Priority: linux_defaults.RulePriorityIngress,
+ 			To:       &ipWithMask,
+ 			Table:    route.MainTable,
+@@ -72,21 +268,12 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		}
+ 	}
+ 
+-	var egressPriority, tableID int
+-	if compat {
+-		egressPriority = linux_defaults.RulePriorityEgress
+-		tableID = ifindex
+-	} else {
+-		egressPriority = linux_defaults.RulePriorityEgressv2
+-		tableID = computeTableIDFromIfaceNumber(info.InterfaceNumber)
+-	}
+-
+ 	// The condition here should mirror the condition in Delete.
+ 	if info.Masquerade && info.IpamMode == ipamOption.IPAMENI {
+ 		// Lookup a VPC specific table for all traffic from an endpoint to the
+ 		// CIDR configured for the VPC on which the endpoint has the IP on.
+ 		for _, cidr := range info.IPv4CIDRs {
+-			if err := route.ReplaceRule(route.Rule{
++			if err := installRule(route.Rule{
+ 				Priority: egressPriority,
+ 				From:     &ipWithMask,
+ 				To:       &cidr,
+@@ -97,7 +284,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		}
+ 	} else {
+ 		// Lookup a VPC specific table for all traffic from an endpoint.
+-		if err := route.ReplaceRule(route.Rule{
++		if err := installRule(route.Rule{
+ 			Priority: egressPriority,
+ 			From:     &ipWithMask,
+ 			Table:    tableID,
+@@ -110,7 +297,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 	//
+ 	// Note: This is a /32 route to avoid any L2. The endpoint does no L2
+ 	// either.
+-	if err := netlink.RouteReplace(&netlink.Route{
++	if err := installRoute(netlink.Route{
+ 		LinkIndex: ifindex,
+ 		Dst:       &net.IPNet{IP: info.IPv4Gateway, Mask: net.CIDRMask(32, 32)},
+ 		Scope:     netlink.SCOPE_LINK,
+@@ -118,9 +305,16 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 	}); err != nil {
+ 		return fmt.Errorf("unable to add L2 nexthop route: %s", err)
+ 	}
++	if tx != nil {
++		for _, staleRoute := range staleHuaweiCloudRoutes {
++			if err := tx.deleteRoute(staleRoute); err != nil {
++				return fmt.Errorf("unable to remove stale HuaweiCloud nexthop route: %s", err)
++			}
++		}
++	}
+ 
+ 	// Default route to the VPC or subnet gateway
+-	if err := netlink.RouteReplace(&netlink.Route{
++	if err := installRoute(netlink.Route{
+ 		Dst:   &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
+ 		Table: tableID,
+ 		Gw:    info.IPv4Gateway,
+@@ -128,6 +322,122 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool, host bool) e
+ 		return fmt.Errorf("unable to add L2 nexthop route: %s", err)
+ 	}
+ 
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		if err := cleanupStaleHuaweiCloudEgressRules(&ipWithMask, egressPriority, tableID); err != nil {
++			return fmt.Errorf("unable to clean up stale HuaweiCloud egress rules: %w", err)
++		}
++	}
++
++	return nil
++}
++
++func inspectHuaweiCloudRouteTableOwnership(tableID, ifindex int, gateway net.IP) ([]netlink.Route, error) {
++	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: tableID}, netlink.RT_FILTER_TABLE)
++	if err != nil {
++		return nil, fmt.Errorf("unable to inspect HuaweiCloud route table %d: %w", tableID, err)
++	}
++	var conflicting []netlink.Route
++	for _, existing := range routes {
++		isDefault := existing.Dst == nil || existing.Dst.String() == "0.0.0.0/0"
++		if isDefault && existing.Gw != nil && existing.Gw.Equal(gateway) {
++			continue
++		}
++		isGatewayHostRoute := false
++		if existing.Dst != nil {
++			ones, bits := existing.Dst.Mask.Size()
++			isGatewayHostRoute = existing.Dst.IP.Equal(gateway) && bits == 32 && ones == 32 && existing.LinkIndex == ifindex
++		}
++		if isGatewayHostRoute {
++			continue
++		}
++		conflicting = append(conflicting, existing)
++	}
++	if len(conflicting) == 0 {
++		return nil, nil
++	}
++
++	// A deleted endpoint intentionally leaves its two reusable routes behind.
++	// Reclaim that table only when no rule still points to it and its complete
++	// contents have the exact old HuaweiCloud shape: one default route and one
++	// link-scoped /32 nexthop route whose destination equals the default gateway.
++	rules, err := routingRuleList(netlink.FAMILY_V4, &route.Rule{Table: tableID})
++	if err != nil {
++		return nil, fmt.Errorf("unable to inspect rules for HuaweiCloud route table %d: %w", tableID, err)
++	}
++	if len(rules) != 0 || len(routes) != 2 {
++		return nil, fmt.Errorf("HuaweiCloud route table %d is already owned by conflicting route %s", tableID, conflicting[0].String())
++	}
++	var oldDefault, oldNexthop *netlink.Route
++	for i := range routes {
++		existing := &routes[i]
++		if existing.Dst == nil || existing.Dst.String() == "0.0.0.0/0" {
++			if existing.Gw == nil || oldDefault != nil {
++				return nil, fmt.Errorf("HuaweiCloud route table %d has an invalid retained default route", tableID)
++			}
++			oldDefault = existing
++			continue
++		}
++		ones, bits := existing.Dst.Mask.Size()
++		if bits != 32 || ones != 32 || existing.Scope != netlink.SCOPE_LINK || existing.LinkIndex != ifindex || oldNexthop != nil {
++			return nil, fmt.Errorf("HuaweiCloud route table %d is already owned by conflicting route %s", tableID, existing.String())
++		}
++		oldNexthop = existing
++	}
++	if oldDefault == nil || oldNexthop == nil || !oldNexthop.Dst.IP.Equal(oldDefault.Gw) {
++		return nil, fmt.Errorf("HuaweiCloud route table %d does not contain a complete retained route pair", tableID)
++	}
++	return []netlink.Route{*oldNexthop}, nil
++}
++
++// cleanupStaleHuaweiCloudEgressRules removes rules left by the former shared
++// trunk-ifindex scheme or by a compatibility-priority change. It runs only
++// after the new rule and both routes are installed, so removing a stale rule
++// switches the endpoint to a complete per-VLAN routing table.
++func cleanupStaleHuaweiCloudEgressRules(ip *net.IPNet, priority, tableID int) error {
++	var deleted []route.Rule
++	restoreDeleted := func(cause error) error {
++		var restoreErrors []string
++		for i := len(deleted) - 1; i >= 0; i-- {
++			if err := routingRuleReplace(deleted[i]); err != nil {
++				restoreErrors = append(restoreErrors, err.Error())
++			}
++		}
++		if len(restoreErrors) != 0 {
++			return fmt.Errorf("%w; restoring stale rules failed: %s", cause, strings.Join(restoreErrors, "; "))
++		}
++		return cause
++	}
++
++	for _, candidatePriority := range []int{
++		linux_defaults.RulePriorityEgress,
++		linux_defaults.RulePriorityEgressv2,
++	} {
++		rules, err := routingRuleList(netlink.FAMILY_V4, &route.Rule{
++			Priority: candidatePriority,
++			From:     ip,
++		})
++		if err != nil {
++			return restoreDeleted(err)
++		}
++
++		for _, ruleToDelete := range rules {
++			if ruleToDelete.Priority == priority && ruleToDelete.Table == tableID {
++				continue
++			}
++			spec := route.Rule{
++				Priority: ruleToDelete.Priority,
++				Mark:     ruleToDelete.Mark,
++				Mask:     ruleToDelete.Mask,
++				From:     ruleToDelete.Src,
++				To:       ruleToDelete.Dst,
++				Table:    ruleToDelete.Table,
++			}
++			deleted = append(deleted, spec)
++			if err := routingRuleDelete(spec); err != nil {
++				return restoreDeleted(err)
++			}
++		}
++	}
+ 	return nil
+ }
+ 
+@@ -268,39 +578,47 @@ func deleteRule(r route.Rule) error {
+ // creating rules and routes in order to specify the table. When the ifindex is
+ // found, the device is brought up and its MTU is set.
+ func retrieveIfIndexFromMAC(mac mac.MAC, mtu int) (int, error) {
+-	var link netlink.Link
++	link, err := retrieveLinkFromMAC(mac)
++	if err != nil {
++		return -1, err
++	}
+ 
++	if err = netlink.LinkSetMTU(link, mtu); err != nil {
++		return -1, fmt.Errorf("unable to change MTU of link %s to %d: %w", link.Attrs().Name, mtu, err)
++	}
++	if err = netlink.LinkSetUp(link); err != nil {
++		return -1, fmt.Errorf("unable to up link %s: %w", link.Attrs().Name, err)
++	}
++
++	return link.Attrs().Index, nil
++}
++
++func retrieveLinkFromMAC(mac mac.MAC) (netlink.Link, error) {
++	var link netlink.Link
+ 	links, err := netlink.LinkList()
+ 	if err != nil {
+-		return -1, fmt.Errorf("unable to list interfaces: %w", err)
++		return nil, fmt.Errorf("unable to list interfaces: %w", err)
+ 	}
+ 
+-	for _, l := range links {
++	for _, candidate := range links {
+ 		// Linux slave devices have the same MAC address as their master
+ 		// device, but we want the master device.
+-		if l.Attrs().RawFlags&unix.IFF_SLAVE != 0 {
++		if candidate.Attrs().RawFlags&unix.IFF_SLAVE != 0 {
+ 			continue
+ 		}
+-		if l.Attrs().HardwareAddr.String() == mac.String() {
+-			if link != nil {
+-				return -1, fmt.Errorf("several interfaces found with MAC %s: %s and %s", mac, link.Attrs().Name, l.Attrs().Name)
+-			}
+-			link = l
++		if candidate.Attrs().HardwareAddr.String() != mac.String() {
++			continue
+ 		}
++		if link != nil {
++			return nil, fmt.Errorf("several interfaces found with MAC %s: %s and %s", mac, link.Attrs().Name, candidate.Attrs().Name)
++		}
++		link = candidate
+ 	}
+ 
+ 	if link == nil {
+-		return -1, fmt.Errorf("interface with MAC %s not found", mac)
++		return nil, fmt.Errorf("interface with MAC %s not found", mac)
+ 	}
+-
+-	if err = netlink.LinkSetMTU(link, mtu); err != nil {
+-		return -1, fmt.Errorf("unable to change MTU of link %s to %d: %w", link.Attrs().Name, mtu, err)
+-	}
+-	if err = netlink.LinkSetUp(link); err != nil {
+-		return -1, fmt.Errorf("unable to up link %s: %w", link.Attrs().Name, err)
+-	}
+-
+-	return link.Attrs().Index, nil
++	return link, nil
+ }
+ 
+ // computeTableIDFromIfaceNumber returns a computed per-ENI route table ID for the given
+@@ -308,3 +626,27 @@ func retrieveIfIndexFromMAC(mac mac.MAC, mtu int) (int, error) {
+ func computeTableIDFromIfaceNumber(num int) int {
+ 	return linux_defaults.RouteTableInterfacesOffset + num
+ }
++
++// egressRulePriorityAndTableID selects the policy-rule priority and route
++// table used for an endpoint. HuaweiCloud SubENIs share one trunk device, so
++// using the trunk ifindex as the table ID would make SubENIs with different
++// gateways replace each other's default route. Use the VLAN ID, which is
++// unique per trunk interface, to give every SubENI an isolated route table.
++func (info *RoutingInfo) egressRulePriorityAndTableID(ifindex int, compat bool) (int, int, error) {
++	priority := linux_defaults.RulePriorityEgressv2
++	if compat {
++		priority = linux_defaults.RulePriorityEgress
++	}
++
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		if info.InterfaceNumber < minHuaweiCloudVLANID || info.InterfaceNumber > maxHuaweiCloudVLANID {
++			return 0, 0, fmt.Errorf("invalid HuaweiCloud VLAN ID: %d", info.InterfaceNumber)
++		}
++		return priority, linux_defaults.RouteTableHuaweiCloudInterfacesOffset + info.InterfaceNumber, nil
++	}
++
++	if compat {
++		return priority, ifindex, nil
++	}
++	return priority, computeTableIDFromIfaceNumber(info.InterfaceNumber), nil
++}
+diff --git a/pkg/datapath/loader/loader.go b/pkg/datapath/loader/loader.go
+index 09575332f..ececaae4c 100644
+--- a/pkg/datapath/loader/loader.go
++++ b/pkg/datapath/loader/loader.go
+@@ -22,6 +22,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	"github.com/cilium/cilium/pkg/elf"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/lock"
+ 	"github.com/cilium/cilium/pkg/logging"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+@@ -93,6 +94,13 @@ func upsertEndpointRoute(ep datapath.Endpoint, ip net.IPNet) error {
+ 		Device: ep.InterfaceName(),
+ 		Scope:  netlink.SCOPE_LINK,
+ 	}
++	if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
++		if ip.IP.To4() != nil {
++			endpointRoute.Local = node.GetInternalIPv4Router()
++		} else {
++			endpointRoute.Local = node.GetIPv6Router()
++		}
++	}
+ 
+ 	return route.Upsert(endpointRoute)
+ }
+@@ -241,7 +249,7 @@ func (l *Loader) reloadHostDatapath(ctx context.Context, ep datapath.Endpoint, o
+ 		symbols = append(symbols, symbolFromHostNetdevEp)
+ 		directions = append(directions, dirIngress)
+ 		if option.Config.EnableNodePort || option.Config.EnableHostFirewall ||
+-			option.Config.EnableBandwidthManager {
++			option.Config.EnableBandwidthManager || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 			interfaceNames = append(interfaceNames, device)
+ 			symbols = append(symbols, symbolToHostNetdevEp)
+ 			directions = append(directions, dirEgress)
+diff --git a/pkg/endpoint/endpoint.go b/pkg/endpoint/endpoint.go
+index 0f7e1083f..fb15a7c8c 100644
+--- a/pkg/endpoint/endpoint.go
++++ b/pkg/endpoint/endpoint.go
+@@ -2159,7 +2159,7 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
+ 		}
+ 	}
+ 
+-	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
++	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure || option.Config.IPAM == ipamOption.IPAMAlibabaCloud || option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
+ 		e.getLogger().WithFields(logrus.Fields{
+ 			"ep":     e.GetID(),
+ 			"ipAddr": e.GetIPv4Address(),
+diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
+new file mode 100644
+index 000000000..ced7ce18a
+--- /dev/null
++++ b/pkg/endpointmanager/huaweicloud_subeni.go
+@@ -0,0 +1,609 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package endpointmanager
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"fmt"
++	"net"
++	"reflect"
++	"strconv"
++	"sync"
++	"time"
++
++	"github.com/sirupsen/logrus"
++	"github.com/vishvananda/netlink"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++
++	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
++	"github.com/cilium/cilium/pkg/endpoint"
++	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++	"github.com/cilium/cilium/pkg/k8s"
++	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/logging/logfields"
++	"github.com/cilium/cilium/pkg/node"
++	nodeTypes "github.com/cilium/cilium/pkg/node/types"
++	"github.com/cilium/cilium/pkg/option"
++)
++
++var huaweiCloudSubENILog = logging.DefaultLogger.WithField(logfields.LogSubsys, "endpointmanager-huaweicloud-subeni")
++
++type subENIMapUpdater interface {
++	Reconcile([]subenimap.EndpointInfo) error
++	OnEndpointReady(subenimap.EndpointInfo) error
++	OnEndpointDelete(subenimap.EndpointInfo) error
++	Close()
++}
++
++type huaweiCloudSubENISubscriber struct {
++	logger        *logrus.Entry
++	mapMgr        subENIMapUpdater
++	endpointMutex sync.Mutex
++	neighborMutex sync.Mutex
++	mutex         sync.Mutex
++	initialized   bool
++	pending       []pendingSubENIEvent
++	cacheMutex    sync.RWMutex
++	cache         map[string]subenimap.EndpointInfo
++	routerRouting func() (*linuxrouting.RoutingInfo, net.IP)
++	getCiliumNode func(context.Context) (*ciliumv2.CiliumNode, error)
++	reconcileStop chan struct{}
++	reconcileDone chan struct{}
++	stopOnce      sync.Once
++}
++
++const (
++	huaweiCloudRouteReconcileInterval = 5 * time.Second
++	huaweiCloudCiliumNodeGetTimeout   = 10 * time.Second
++)
++
++type pendingSubENIEvent struct {
++	kind uint8
++	ep   *endpoint.Endpoint
++}
++
++const (
++	subENIEventCreated uint8 = iota
++	subENIEventRestored
++	subENIEventDeleted
++)
++
++type subENIEndpoint interface {
++	GetIPv4Address() string
++	GetID() uint64
++	GetIfIndex() int
++}
++
++type huaweiCloudEndpointInfo struct {
++	ipv4           string
++	id             uint32
++	ifIndex        uint32
++	mac            [6]byte
++	vlanID         int32
++	gatewayIP      net.IP
++	gatewayMAC     net.HardwareAddr
++	trunkInterface string
++}
++
++func (e *huaweiCloudEndpointInfo) GetIPv4Address() string { return e.ipv4 }
++func (e *huaweiCloudEndpointInfo) GetID() uint32          { return e.id }
++func (e *huaweiCloudEndpointInfo) GetIfIndex() uint32     { return e.ifIndex }
++func (e *huaweiCloudEndpointInfo) GetMACAddress() [6]byte { return e.mac }
++func (e *huaweiCloudEndpointInfo) GetVLANID() int32       { return e.vlanID }
++
++func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
++	if option.Config.IPAM != ipamOption.IPAMHuaweiCloud || !k8s.IsEnabled() {
++		return nil, nil
++	}
++
++	mapMgr, err := subenimap.NewSubENIMapManager(huaweiCloudSubENILog)
++	if err != nil {
++		return nil, fmt.Errorf("create HuaweiCloud SubENI map manager: %w", err)
++	}
++
++	subscriber := &huaweiCloudSubENISubscriber{
++		logger: huaweiCloudSubENILog,
++		mapMgr: mapMgr,
++		cache:  map[string]subenimap.EndpointInfo{},
++		routerRouting: func() (*linuxrouting.RoutingInfo, net.IP) {
++			routingInfo, _ := node.GetRouterInfo().(*linuxrouting.RoutingInfo)
++			return routingInfo, node.GetInternalIPv4Router()
++		},
++		getCiliumNode: func(ctx context.Context) (*ciliumv2.CiliumNode, error) {
++			return k8s.CiliumClient().CiliumV2().CiliumNodes().Get(ctx, nodeTypes.GetName(), metav1.GetOptions{})
++		},
++	}
++	mgr.Subscribe(subscriber)
++	cleanupOnError := func(err error) (func(), error) {
++		mgr.Unsubscribe(subscriber)
++		mapMgr.Close()
++		return nil, err
++	}
++	endpoints := mgr.GetEndpoints()
++	initialEndpoints := make([]subENIEndpoint, 0, len(endpoints))
++	for _, ep := range endpoints {
++		initialEndpoints = append(initialEndpoints, ep)
++	}
++	initialInfos, err := subscriber.resolveInitialEndpointInfos(initialEndpoints)
++	if err != nil {
++		return cleanupOnError(err)
++	}
++	var desired []subenimap.EndpointInfo
++	for _, info := range initialInfos {
++		if err := subscriber.ensureGatewayNeighbor(info); err != nil {
++			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud gateway neighbor for endpoint %d: %w", info.id, err))
++		}
++		if err := subscriber.ensureEndpointRouting(info); err != nil {
++			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud endpoint routing for endpoint %d: %w", info.id, err))
++		}
++		desired = append(desired, info)
++	}
++	if err := mapMgr.Reconcile(desired); err != nil {
++		return cleanupOnError(fmt.Errorf("reconcile initial HuaweiCloud SubENI maps: %w", err))
++	}
++	for _, info := range desired {
++		subscriber.cacheEndpointInfo(info)
++	}
++	subscriber.finishInitialization()
++	subscriber.startRouteReconciler(huaweiCloudRouteReconcileInterval)
++
++	return func() {
++		subscriber.stopRouteReconciler()
++		mgr.Unsubscribe(subscriber)
++		mapMgr.Close()
++	}, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) EndpointCreated(ep *endpoint.Endpoint) {
++	if s.queueBeforeInitialization(pendingSubENIEvent{kind: subENIEventCreated, ep: ep}) {
++		return
++	}
++	s.upsertEndpoint(ep, "created")
++}
++
++func (s *huaweiCloudSubENISubscriber) EndpointRestored(ep *endpoint.Endpoint) {
++	if s.queueBeforeInitialization(pendingSubENIEvent{kind: subENIEventRestored, ep: ep}) {
++		return
++	}
++	s.upsertEndpoint(ep, "restored")
++}
++
++func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ endpoint.DeleteConfig) {
++	if s.queueBeforeInitialization(pendingSubENIEvent{kind: subENIEventDeleted, ep: ep}) {
++		return
++	}
++	s.deleteEndpoint(ep)
++}
++
++func (s *huaweiCloudSubENISubscriber) queueBeforeInitialization(event pendingSubENIEvent) bool {
++	s.mutex.Lock()
++	defer s.mutex.Unlock()
++	if s.initialized {
++		return false
++	}
++	s.pending = append(s.pending, event)
++	return true
++}
++
++func (s *huaweiCloudSubENISubscriber) finishInitialization() {
++	s.mutex.Lock()
++	defer s.mutex.Unlock()
++	for _, event := range s.pending {
++		switch event.kind {
++		case subENIEventCreated:
++			s.upsertEndpoint(event.ep, "created-during-initial-reconcile")
++		case subENIEventRestored:
++			s.upsertEndpoint(event.ep, "restored-during-initial-reconcile")
++		case subENIEventDeleted:
++			s.deleteEndpoint(event.ep)
++		}
++	}
++	s.pending = nil
++	s.initialized = true
++}
++
++func (s *huaweiCloudSubENISubscriber) deleteEndpoint(ep *endpoint.Endpoint) {
++	s.endpointMutex.Lock()
++	defer s.endpointMutex.Unlock()
++
++	info := s.cachedEndpointInfo(ep)
++	if info == nil {
++		var err error
++		info, err = s.resolveEndpointInfo(ep)
++		if err != nil {
++			s.logger.WithError(err).WithFields(logrus.Fields{
++				logfields.EndpointID: ep.GetID(),
++				logfields.IPv4:       ep.GetIPv4Address(),
++			}).Warn("Failed to resolve HuaweiCloud SubENI endpoint info on delete")
++			return
++		}
++	}
++	if info == nil {
++		return
++	}
++	if err := s.mapMgr.OnEndpointDelete(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++		}).Warn("Failed to delete HuaweiCloud SubENI BPF map entries")
++		return
++	}
++	s.forgetEndpointInfo(ep)
++}
++
++func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
++	info, err := s.resolveEndpointInfo(ep)
++	if err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++			"reason":             reason,
++		}).Warn("Failed to resolve HuaweiCloud SubENI endpoint info")
++		return
++	}
++	if info == nil {
++		return
++	}
++	s.upsertEndpointInfo(info, ep.GetID(), ep.GetIPv4Address(), reason)
++}
++
++func (s *huaweiCloudSubENISubscriber) upsertEndpointInfo(info *huaweiCloudEndpointInfo, endpointID uint64, ipv4, reason string) {
++	s.endpointMutex.Lock()
++	defer s.endpointMutex.Unlock()
++	s.upsertEndpointInfoLocked(info, endpointID, ipv4, reason)
++}
++
++func (s *huaweiCloudSubENISubscriber) upsertEndpointInfoLocked(info *huaweiCloudEndpointInfo, endpointID uint64, ipv4, reason string) {
++	if err := s.ensureGatewayNeighbor(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: endpointID,
++			logfields.IPv4:       ipv4,
++			"reason":             reason,
++		}).Warn("Failed to install HuaweiCloud gateway neighbor entry")
++		return
++	}
++	if err := s.ensureEndpointRouting(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: endpointID,
++			logfields.IPv4:       ipv4,
++			"reason":             reason,
++		}).Warn("Failed to install HuaweiCloud endpoint routing")
++		return
++	}
++	if err := s.mapMgr.OnEndpointReady(info); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: endpointID,
++			logfields.IPv4:       ipv4,
++			"reason":             reason,
++		}).Warn("Failed to upsert HuaweiCloud SubENI BPF map entries")
++		return
++	}
++	s.cacheEndpointInfo(info)
++}
++
++func (s *huaweiCloudSubENISubscriber) ensureEndpointRouting(info *huaweiCloudEndpointInfo) error {
++	return s.configureEndpointRouting(info, false)
++}
++
++func (s *huaweiCloudSubENISubscriber) reconcileEndpointRouting(info *huaweiCloudEndpointInfo) error {
++	return s.configureEndpointRouting(info, true)
++}
++
++func (s *huaweiCloudSubENISubscriber) configureEndpointRouting(info *huaweiCloudEndpointInfo, reconcile bool) error {
++	if info == nil || info.gatewayIP == nil || info.trunkInterface == "" {
++		return nil
++	}
++	link, err := netlink.LinkByName(info.trunkInterface)
++	if err != nil {
++		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
++	}
++	routingInfo, err := linuxrouting.NewRoutingInfo(
++		info.gatewayIP.String(), nil, link.Attrs().HardwareAddr.String(),
++		strconv.Itoa(int(info.vlanID)), ipamOption.IPAMHuaweiCloud, false,
++	)
++	if err != nil {
++		return fmt.Errorf("construct routing info: %w", err)
++	}
++	configure := func() error {
++		if reconcile {
++			return routingInfo.Reconcile(net.ParseIP(info.ipv4), option.Config.EgressMultiHomeIPRuleCompat, false)
++		}
++		return routingInfo.Configure(net.ParseIP(info.ipv4), link.Attrs().MTU,
++			option.Config.EgressMultiHomeIPRuleCompat, false)
++	}
++	if err := configure(); err != nil {
++		return fmt.Errorf("configure endpoint %s: %w", info.ipv4, err)
++	}
++	return nil
++}
++
++func (s *huaweiCloudSubENISubscriber) reconcileCachedEndpointInfos(reason string) {
++	s.endpointMutex.Lock()
++	defer s.endpointMutex.Unlock()
++
++	s.cacheMutex.RLock()
++	infos := make([]*huaweiCloudEndpointInfo, 0, len(s.cache))
++	for _, cached := range s.cache {
++		if info, ok := cached.(*huaweiCloudEndpointInfo); ok {
++			infos = append(infos, info)
++		}
++	}
++	s.cacheMutex.RUnlock()
++	for _, info := range infos {
++		fields := logrus.Fields{
++			logfields.EndpointID: info.id,
++			logfields.IPv4:       info.ipv4,
++			"reason":             reason,
++		}
++		if err := s.ensureGatewayNeighbor(info); err != nil {
++			s.logger.WithError(err).WithFields(fields).Warn("Failed to reconcile HuaweiCloud gateway neighbor entry")
++			continue
++		}
++		if err := s.reconcileEndpointRouting(info); err != nil {
++			s.logger.WithError(err).WithFields(fields).Warn("Failed to reconcile HuaweiCloud endpoint routing")
++		}
++	}
++	if s.routerRouting != nil {
++		routingInfo, routerIP := s.routerRouting()
++		if routingInfo != nil && routerIP != nil {
++			if err := routingInfo.Reconcile(routerIP, option.Config.EgressMultiHomeIPRuleCompat, true); err != nil {
++				s.logger.WithError(err).WithFields(logrus.Fields{
++					logfields.IPv4: routerIP,
++					"reason":       reason,
++				}).Warn("Failed to reconcile HuaweiCloud router routing")
++			}
++		}
++	}
++}
++
++func (s *huaweiCloudSubENISubscriber) startRouteReconciler(interval time.Duration) {
++	if interval <= 0 || s.reconcileStop != nil {
++		return
++	}
++	s.reconcileStop = make(chan struct{})
++	s.reconcileDone = make(chan struct{})
++	go func() {
++		ticker := time.NewTicker(interval)
++		defer ticker.Stop()
++		defer close(s.reconcileDone)
++		for {
++			select {
++			case <-ticker.C:
++				s.reconcileCachedEndpointInfos("periodic-route-reconcile")
++			case <-s.reconcileStop:
++				return
++			}
++		}
++	}()
++}
++
++func (s *huaweiCloudSubENISubscriber) stopRouteReconciler() {
++	if s.reconcileStop == nil {
++		return
++	}
++	s.stopOnce.Do(func() { close(s.reconcileStop) })
++	<-s.reconcileDone
++}
++
++func endpointInfoCacheKey(id uint32, ipv4 string) string {
++	return fmt.Sprintf("%d/%s", id, ipv4)
++}
++
++func (s *huaweiCloudSubENISubscriber) cacheEndpointInfo(info subenimap.EndpointInfo) {
++	if info == nil {
++		return
++	}
++	s.cacheMutex.Lock()
++	if s.cache == nil {
++		s.cache = map[string]subenimap.EndpointInfo{}
++	}
++	s.cache[endpointInfoCacheKey(info.GetID(), info.GetIPv4Address())] = info
++	s.cacheMutex.Unlock()
++}
++
++func (s *huaweiCloudSubENISubscriber) cachedEndpointInfo(ep *endpoint.Endpoint) subenimap.EndpointInfo {
++	if ep == nil {
++		return nil
++	}
++	s.cacheMutex.RLock()
++	info := s.cache[endpointInfoCacheKey(uint32(ep.GetID()), ep.GetIPv4Address())] //nolint:gosec // endpoint IDs are validated before caching
++	s.cacheMutex.RUnlock()
++	return info
++}
++
++func (s *huaweiCloudSubENISubscriber) forgetEndpointInfo(ep *endpoint.Endpoint) {
++	if ep == nil {
++		return
++	}
++	s.cacheMutex.Lock()
++	delete(s.cache, endpointInfoCacheKey(uint32(ep.GetID()), ep.GetIPv4Address())) //nolint:gosec // endpoint IDs are validated before caching
++	s.cacheMutex.Unlock()
++}
++
++func endpointCanResolveSubENI(ep subENIEndpoint) bool {
++	if ep == nil {
++		return false
++	}
++	v := reflect.ValueOf(ep)
++	if v.Kind() == reflect.Ptr && v.IsNil() {
++		return false
++	}
++	return ep.GetIfIndex() != 0 && ep.GetID() != 0 && ep.GetIPv4Address() != ""
++}
++
++func (s *huaweiCloudSubENISubscriber) getLocalCiliumNode() (*ciliumv2.CiliumNode, error) {
++	if s.getCiliumNode == nil {
++		return nil, errors.New("CiliumNode getter is not configured")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), huaweiCloudCiliumNodeGetTimeout)
++	defer cancel()
++	cn, err := s.getCiliumNode(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("get CiliumNode %s: %w", nodeTypes.GetName(), err)
++	}
++	if cn == nil {
++		return nil, fmt.Errorf("get CiliumNode %s: returned nil without an error", nodeTypes.GetName())
++	}
++	return cn, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) resolveInitialEndpointInfos(endpoints []subENIEndpoint) ([]*huaweiCloudEndpointInfo, error) {
++	var (
++		cn     *ciliumv2.CiliumNode
++		result []*huaweiCloudEndpointInfo
++	)
++	for _, ep := range endpoints {
++		if !endpointCanResolveSubENI(ep) {
++			continue
++		}
++		if cn == nil {
++			var err error
++			cn, err = s.getLocalCiliumNode()
++			if err != nil {
++				return nil, fmt.Errorf("resolve initial HuaweiCloud endpoints: %w", err)
++			}
++		}
++		info, err := subENIInfoForEndpoint(cn, ep)
++		if err != nil {
++			return nil, fmt.Errorf("resolve initial HuaweiCloud endpoint %d: %w", ep.GetID(), err)
++		}
++		if info != nil {
++			result = append(result, info)
++		}
++	}
++	return result, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint) (*huaweiCloudEndpointInfo, error) {
++	if !endpointCanResolveSubENI(ep) {
++		return nil, nil
++	}
++
++	cn, err := s.getLocalCiliumNode()
++	if err != nil {
++		return nil, err
++	}
++
++	return subENIInfoForEndpoint(cn, ep)
++}
++
++func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiCloudEndpointInfo, error) {
++	if cn == nil || cn.Status.HuaweiCloud == nil || ep == nil {
++		return nil, nil
++	}
++	if ep.GetID() == 0 || ep.GetID() > uint64(^uint16(0)) {
++		return nil, fmt.Errorf("HuaweiCloud endpoint ID %d is outside 1-65535", ep.GetID())
++	}
++	if ep.GetIfIndex() <= 0 {
++		return nil, fmt.Errorf("HuaweiCloud endpoint ifindex %d must be positive", ep.GetIfIndex())
++	}
++
++	ipv4 := ep.GetIPv4Address()
++	var matched *huaweiCloudEndpointInfo
++	for _, subENI := range cn.Status.HuaweiCloud.SubENIs {
++		if subENI.PrivateIPAddress != ipv4 {
++			continue
++		}
++
++		parsedMAC, err := net.ParseMAC(subENI.MACAddress)
++		if err != nil {
++			return nil, fmt.Errorf("parse HuaweiCloud SubENI MAC %q for %s: %w", subENI.MACAddress, ipv4, err)
++		}
++		if len(parsedMAC) != 6 || parsedMAC[0]&1 != 0 {
++			return nil, fmt.Errorf("HuaweiCloud SubENI MAC %q for %s must be a 6-byte unicast address", subENI.MACAddress, ipv4)
++		}
++		var macArr [6]byte
++		copy(macArr[:], parsedMAC)
++
++		gatewayMAC, err := parseOptionalMAC(subENI.GatewayMAC)
++		if err != nil {
++			return nil, fmt.Errorf("parse HuaweiCloud gateway MAC %q for %s: %w", subENI.GatewayMAC, ipv4, err)
++		}
++		gatewayIP, err := parseOptionalIPv4(subENI.GatewayIP)
++		if err != nil {
++			return nil, fmt.Errorf("parse HuaweiCloud gateway IP %q for %s: %w", subENI.GatewayIP, ipv4, err)
++		}
++		if (gatewayIP == nil) != (len(gatewayMAC) == 0) {
++			return nil, fmt.Errorf("HuaweiCloud gateway IP and MAC must be configured together for %s", ipv4)
++		}
++		if gatewayIP != nil && subENI.TrunkInterface == "" {
++			return nil, fmt.Errorf("HuaweiCloud trunk interface is required with gateway metadata for %s", ipv4)
++		}
++
++		if matched != nil {
++			return nil, fmt.Errorf("multiple HuaweiCloud SubENIs match endpoint IPv4 %s", ipv4)
++		}
++		matched = &huaweiCloudEndpointInfo{
++			ipv4:           ipv4,
++			id:             uint32(ep.GetID()),
++			ifIndex:        uint32(ep.GetIfIndex()),
++			mac:            macArr,
++			vlanID:         subENI.VlanID,
++			gatewayIP:      gatewayIP,
++			gatewayMAC:     gatewayMAC,
++			trunkInterface: subENI.TrunkInterface,
++		}
++	}
++
++	return matched, nil
++}
++
++func parseOptionalMAC(raw string) (net.HardwareAddr, error) {
++	if raw == "" {
++		return nil, nil
++	}
++	return net.ParseMAC(raw)
++}
++
++func parseOptionalIPv4(raw string) (net.IP, error) {
++	if raw == "" {
++		return nil, nil
++	}
++	ip := net.ParseIP(raw).To4()
++	if ip == nil {
++		return nil, fmt.Errorf("invalid IPv4 address")
++	}
++	return ip, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEndpointInfo) error {
++	if info == nil || info.gatewayIP == nil || len(info.gatewayMAC) == 0 || info.trunkInterface == "" {
++		return nil
++	}
++
++	link, err := netlink.LinkByName(info.trunkInterface)
++	if err != nil {
++		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
++	}
++
++	s.neighborMutex.Lock()
++	defer s.neighborMutex.Unlock()
++
++	neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		return fmt.Errorf("list neighbors on trunk interface %s: %w", info.trunkInterface, err)
++	}
++	for _, neighbor := range neighbors {
++		if neighbor.State&netlink.NUD_PERMANENT == 0 || !neighbor.IP.Equal(info.gatewayIP) {
++			continue
++		}
++		if !bytes.Equal(neighbor.HardwareAddr, info.gatewayMAC) {
++			return fmt.Errorf("permanent neighbor %s on trunk interface %s already uses MAC %s, conflicts with %s",
++				info.gatewayIP, info.trunkInterface, neighbor.HardwareAddr, info.gatewayMAC)
++		}
++		return nil
++	}
++
++	return netlink.NeighSet(&netlink.Neigh{
++		LinkIndex:    link.Attrs().Index,
++		Family:       netlink.FAMILY_V4,
++		State:        netlink.NUD_PERMANENT,
++		IP:           info.gatewayIP,
++		HardwareAddr: info.gatewayMAC,
++	})
++}
+diff --git a/pkg/endpointmanager/manager.go b/pkg/endpointmanager/manager.go
+index 7ed29901f..9bc828497 100644
+--- a/pkg/endpointmanager/manager.go
++++ b/pkg/endpointmanager/manager.go
+@@ -595,7 +595,17 @@ func (mgr *EndpointManager) expose(ep *endpoint.Endpoint) error {
+ // manager.
+ func (mgr *EndpointManager) RestoreEndpoint(ep *endpoint.Endpoint) error {
+ 	ep.SetDefaultConfiguration(true)
+-	return mgr.expose(ep)
++	if err := mgr.expose(ep); err != nil {
++		return err
++	}
++	mgr.mutex.RLock()
++	for s := range mgr.subscribers {
++		if restored, ok := s.(endpointRestoredSubscriber); ok {
++			restored.EndpointRestored(ep)
++		}
++	}
++	mgr.mutex.RUnlock()
++	return nil
+ }
+ 
+ // AddEndpoint takes the prepared endpoint object and starts managing it.
+diff --git a/pkg/endpointmanager/subscribe.go b/pkg/endpointmanager/subscribe.go
+index 964dc1311..efa2c4d98 100644
+--- a/pkg/endpointmanager/subscribe.go
++++ b/pkg/endpointmanager/subscribe.go
+@@ -18,6 +18,10 @@ type Subscriber interface {
+ 	EndpointDeleted(ep *endpoint.Endpoint, conf endpoint.DeleteConfig)
+ }
+ 
++type endpointRestoredSubscriber interface {
++	EndpointRestored(ep *endpoint.Endpoint)
++}
++
+ func (mgr *EndpointManager) Subscribe(s Subscriber) {
+ 	mgr.mutex.Lock()
+ 	defer mgr.mutex.Unlock()
+diff --git a/pkg/huaweicloud/subenimap/manager.go b/pkg/huaweicloud/subenimap/manager.go
+new file mode 100644
+index 000000000..f925d1cca
+--- /dev/null
++++ b/pkg/huaweicloud/subenimap/manager.go
+@@ -0,0 +1,558 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package subenimap
++
++import (
++	"errors"
++	"fmt"
++	"net"
++	"reflect"
++	"strings"
++	"unsafe"
++
++	"github.com/sirupsen/logrus"
++	"golang.org/x/sys/unix"
++
++	"github.com/cilium/cilium/pkg/bpf"
++	"github.com/cilium/cilium/pkg/lock"
++)
++
++const (
++	srcIPMapName   = "cilium_hwc_srcip4"
++	vlanMACMapName = "cilium_hwc_vlan_mac"
++	maxEntries     = 65536
++)
++
++// EndpointInfo provides the data needed to populate the SubENI BPF maps.
++type EndpointInfo interface {
++	// GetIPv4Address returns the Pod IPv4 address (e.g. "10.0.0.5").
++	GetIPv4Address() string
++	// GetID returns the endpoint's LXC ID.
++	GetID() uint32
++	// GetIfIndex returns the interface ifindex of the endpoint's veth.
++	GetIfIndex() uint32
++	// GetMACAddress returns the MAC address of the SubENI bound to this endpoint.
++	GetMACAddress() [6]byte
++	// GetVLANID returns the VLAN ID from the SubENI binding.
++	GetVLANID() int32
++}
++
++// mapBackend abstracts bpf.Map operations to allow test injection.
++type mapBackend interface {
++	Lookup(key bpf.MapKey) (bpf.MapValue, error)
++	Update(key bpf.MapKey, value bpf.MapValue) error
++	Delete(key bpf.MapKey) (bool, error)
++	Dump(callback func(bpf.MapKey, bpf.MapValue)) error
++}
++
++// bpfMapAdapter wraps *bpf.Map so it satisfies mapBackend.
++// bpf.Map.Delete returns (error), but mapBackend.Delete returns (bool, error),
++// so we delegate to SilentDelete which already returns (bool, error).
++type bpfMapAdapter struct {
++	m *bpf.Map
++}
++
++func (a *bpfMapAdapter) Update(key bpf.MapKey, value bpf.MapValue) error {
++	return a.m.Update(key, value)
++}
++
++func (a *bpfMapAdapter) Lookup(key bpf.MapKey) (bpf.MapValue, error) {
++	return a.m.Lookup(key)
++}
++
++func (a *bpfMapAdapter) Delete(key bpf.MapKey) (bool, error) {
++	return a.m.SilentDelete(key)
++}
++
++func (a *bpfMapAdapter) Dump(callback func(bpf.MapKey, bpf.MapValue)) error {
++	return a.m.DumpWithCallback(func(key bpf.MapKey, value bpf.MapValue) {
++		callback(key.DeepCopyMapKey(), value.DeepCopyMapValue())
++	})
++}
++
++// SubENIMapManager maintains two BPF maps used by the HuaweiCloud SubENI
++// datapath:
++//
++//   - cilium_hwc_srcip4   (egress):  Pod IPv4 → SubENI VLAN/MAC/LXC-ID
++//   - cilium_hwc_vlan_mac (ingress): (VLAN ID, dst MAC) → endpoint ifindex/LXC-ID
++type SubENIMapManager struct {
++	logger     *logrus.Entry
++	srcIPMap   mapBackend
++	vlanMACMap mapBackend
++	mutex      lock.RWMutex
++	closed     bool
++}
++
++func newSrcIPMap() *bpf.Map {
++	return bpf.NewMap(
++		srcIPMapName,
++		bpf.MapTypeHash,
++		&SrcIPKey4{}, int(unsafe.Sizeof(SrcIPKey4{})),
++		&SubENIInfo{}, int(unsafe.Sizeof(SubENIInfo{})),
++		maxEntries,
++		0, 0,
++		bpf.ConvertKeyValue,
++	)
++}
++
++func newVLANMACMap() *bpf.Map {
++	return bpf.NewMap(
++		vlanMACMapName,
++		bpf.MapTypeHash,
++		&VLANMACKey{}, int(unsafe.Sizeof(VLANMACKey{})),
++		&EPInfo{}, int(unsafe.Sizeof(EPInfo{})),
++		maxEntries,
++		0, 0,
++		bpf.ConvertKeyValue,
++	)
++}
++
++func openOrCreateDatapathMap(name string, spec *bpf.Map) (*bpf.Map, error) {
++	// The BTF map declarations in bpf/lib/huaweicloud.h have flags=0. Do not
++	// use Map.OpenOrCreate here: with preallocate-bpf-maps=false it adds
++	// BPF_F_NO_PREALLOC, so libbpf later replaces the map during endpoint
++	// compilation and discards entries inserted during startup.
++	fd, _, err := bpf.OpenOrCreateMap(
++		bpf.MapPath(name),
++		bpf.GetMapType(spec.MapType),
++		spec.KeySize,
++		spec.ValueSize,
++		spec.MaxEntries,
++		0,
++		0,
++		true,
++	)
++	if err != nil {
++		return nil, err
++	}
++	if err := unix.Close(fd); err != nil {
++		return nil, fmt.Errorf("close newly opened %s fd: %w", name, err)
++	}
++	if err := spec.Open(); err != nil {
++		return nil, err
++	}
++	return spec, nil
++}
++
++// NewSubENIMapManager opens or creates the pinned HuaweiCloud datapath maps
++// before endpoint events are subscribed. Waiting for the first endpoint BPF
++// program to create these maps leaves a startup race: restored Pods can become
++// Ready while both maps are still absent, and no later event repairs them.
++func NewSubENIMapManager(logger *logrus.Entry) (*SubENIMapManager, error) {
++	srcIP, err := openOrCreateDatapathMap(srcIPMapName, newSrcIPMap())
++	if err != nil {
++		return nil, fmt.Errorf("open or create pinned %s: %w", srcIPMapName, err)
++	}
++
++	vlanMAC, err := openOrCreateDatapathMap(vlanMACMapName, newVLANMACMap())
++	if err != nil {
++		_ = srcIP.Close()
++		return nil, fmt.Errorf("open or create pinned %s: %w", vlanMACMapName, err)
++	}
++
++	return &SubENIMapManager{
++		logger:     logger,
++		srcIPMap:   &bpfMapAdapter{m: srcIP},
++		vlanMACMap: &bpfMapAdapter{m: vlanMAC},
++	}, nil
++}
++
++func (m *SubENIMapManager) ensureMapsOpenLocked() error {
++	if m.closed {
++		return errors.New("SubENI map manager is closed")
++	}
++	if m.srcIPMap != nil && m.vlanMACMap != nil {
++		return nil
++	}
++
++	srcIP, err := bpf.OpenMap(bpf.MapPath(srcIPMapName))
++	if err != nil {
++		return fmt.Errorf("failed to open pinned %s: %w", srcIPMapName, err)
++	}
++
++	vlanMAC, err := bpf.OpenMap(bpf.MapPath(vlanMACMapName))
++	if err != nil {
++		_ = srcIP.Close()
++		return fmt.Errorf("failed to open pinned %s: %w", vlanMACMapName, err)
++	}
++
++	m.srcIPMap = &bpfMapAdapter{m: srcIP}
++	m.vlanMACMap = &bpfMapAdapter{m: vlanMAC}
++
++	return nil
++}
++
++// newWithBackends is used in tests to inject fake map backends without opening
++// real BPF file descriptors.
++func newWithBackends(logger *logrus.Entry, srcIP mapBackend, vlanMAC mapBackend) *SubENIMapManager {
++	return &SubENIMapManager{
++		logger:     logger,
++		srcIPMap:   srcIP,
++		vlanMACMap: vlanMAC,
++	}
++}
++
++func parseIPv4(addr string) ([4]byte, error) {
++	ip := net.ParseIP(addr)
++	if ip == nil {
++		return [4]byte{}, fmt.Errorf("invalid IPv4 address: %q", addr)
++	}
++	ip4 := ip.To4()
++	if ip4 == nil {
++		return [4]byte{}, fmt.Errorf("address is not IPv4: %q", addr)
++	}
++	var out [4]byte
++	copy(out[:], ip4)
++	return out, nil
++}
++
++type endpointMapEntries struct {
++	srcKey    *SrcIPKey4
++	srcValue  *SubENIInfo
++	vlanKey   *VLANMACKey
++	vlanValue *EPInfo
++}
++
++func mapEntriesForEndpoint(ep EndpointInfo) (*endpointMapEntries, error) {
++	if ep == nil {
++		return nil, errors.New("endpoint is nil")
++	}
++	v := reflect.ValueOf(ep)
++	if (v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface) && v.IsNil() {
++		return nil, errors.New("endpoint is nil")
++	}
++	if ep.GetID() == 0 || ep.GetID() > uint32(^uint16(0)) {
++		return nil, fmt.Errorf("endpoint ID %d is outside 1-65535", ep.GetID())
++	}
++	if ep.GetIfIndex() == 0 {
++		return nil, errors.New("endpoint ifindex must be positive")
++	}
++	if ep.GetVLANID() < 1 || ep.GetVLANID() > 4094 {
++		return nil, fmt.Errorf("VLAN ID %d is outside 1-4094", ep.GetVLANID())
++	}
++	mac := ep.GetMACAddress()
++	if mac == [6]byte{} {
++		return nil, errors.New("SubENI MAC address is empty")
++	}
++	if mac[0]&1 != 0 {
++		return nil, fmt.Errorf("SubENI MAC address %02x:%02x:%02x:%02x:%02x:%02x is multicast", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
++	}
++	addr, err := parseIPv4(ep.GetIPv4Address())
++	if err != nil {
++		return nil, err
++	}
++	vlanID := uint16(ep.GetVLANID()) //nolint:gosec // validated above
++	return &endpointMapEntries{
++		srcKey:   &SrcIPKey4{Addr: addr},
++		srcValue: &SubENIInfo{VlanID: vlanID, MAC: mac, LxcID: ep.GetID()},
++		vlanKey:  &VLANMACKey{VlanID: vlanID, MAC: mac},
++		vlanValue: &EPInfo{
++			IfIndex: ep.GetIfIndex(),
++			LxcID:   uint16(ep.GetID()), //nolint:gosec // validated above
++		},
++	}, nil
++}
++
++type mapEntry struct {
++	key   bpf.MapKey
++	value bpf.MapValue
++}
++
++func dumpMapEntries(backend mapBackend) (map[string]mapEntry, error) {
++	entries := map[string]mapEntry{}
++	err := backend.Dump(func(key bpf.MapKey, value bpf.MapValue) {
++		entries[key.String()] = mapEntry{key: key, value: value}
++	})
++	return entries, err
++}
++
++func restoreMapEntries(backend mapBackend, snapshot map[string]mapEntry) error {
++	current, err := dumpMapEntries(backend)
++	if err != nil {
++		return err
++	}
++	var restoreErrors []string
++	for keyString, entry := range current {
++		if _, keep := snapshot[keyString]; keep {
++			continue
++		}
++		if _, err := backend.Delete(entry.key); err != nil {
++			restoreErrors = append(restoreErrors, err.Error())
++		}
++	}
++	for _, entry := range snapshot {
++		if err := backend.Update(entry.key, entry.value); err != nil {
++			restoreErrors = append(restoreErrors, err.Error())
++		}
++	}
++	if len(restoreErrors) != 0 {
++		return fmt.Errorf("restore map snapshot: %s", strings.Join(restoreErrors, "; "))
++	}
++	return nil
++}
++
++func updateDesiredEntries(backend mapBackend, desired map[string]mapEntry) error {
++	for _, entry := range desired {
++		if err := backend.Update(entry.key, entry.value); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func deleteStaleEntries(backend mapBackend, current, desired map[string]mapEntry) error {
++	for keyString, entry := range current {
++		if _, keep := desired[keyString]; keep {
++			continue
++		}
++		if _, err := backend.Delete(entry.key); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// Reconcile replaces stale pinned-map ownership with the endpoint manager's
++// complete current state. Pinned maps survive an Agent restart, while health
++// and Pod endpoints may be recreated with a different LXC ID. Treating the
++// old ID as a live owner permanently rejects the replacement and leaves an
++// unreachable ingress entry. Reconciliation validates the full desired set
++// before mutation and restores both original map snapshots on any failure.
++func (m *SubENIMapManager) Reconcile(endpoints []EndpointInfo) error {
++	desiredSrc := map[string]mapEntry{}
++	desiredVLAN := map[string]mapEntry{}
++	for _, ep := range endpoints {
++		entries, err := mapEntriesForEndpoint(ep)
++		if err != nil {
++			return fmt.Errorf("Reconcile: %w", err)
++		}
++		if old, ok := desiredSrc[entries.srcKey.String()]; ok && !reflect.DeepEqual(old.value, entries.srcValue) {
++			return fmt.Errorf("Reconcile: duplicate source IP %s has conflicting endpoint owners", ep.GetIPv4Address())
++		}
++		desiredSrc[entries.srcKey.String()] = mapEntry{key: entries.srcKey, value: entries.srcValue}
++
++		if old, ok := desiredVLAN[entries.vlanKey.String()]; ok && !reflect.DeepEqual(old.value, entries.vlanValue) {
++			return fmt.Errorf("Reconcile: duplicate VLAN/MAC %s has conflicting endpoint owners", entries.vlanKey)
++		}
++		desiredVLAN[entries.vlanKey.String()] = mapEntry{key: entries.vlanKey, value: entries.vlanValue}
++	}
++
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++	if err := m.ensureMapsOpenLocked(); err != nil {
++		return fmt.Errorf("Reconcile: %w", err)
++	}
++	srcSnapshot, err := dumpMapEntries(m.srcIPMap)
++	if err != nil {
++		return fmt.Errorf("Reconcile: dump %s: %w", srcIPMapName, err)
++	}
++	vlanSnapshot, err := dumpMapEntries(m.vlanMACMap)
++	if err != nil {
++		return fmt.Errorf("Reconcile: dump %s: %w", vlanMACMapName, err)
++	}
++	rollback := func(cause error) error {
++		var rollbackErrors []string
++		if err := restoreMapEntries(m.srcIPMap, srcSnapshot); err != nil {
++			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s: %v", srcIPMapName, err))
++		}
++		if err := restoreMapEntries(m.vlanMACMap, vlanSnapshot); err != nil {
++			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s: %v", vlanMACMapName, err))
++		}
++		if len(rollbackErrors) != 0 {
++			return fmt.Errorf("%w; rollback failed: %s", cause, strings.Join(rollbackErrors, "; "))
++		}
++		return cause
++	}
++	// Install ingress ownership before making the corresponding source-IP
++	// entry usable. On removal, stop egress first and remove ingress ownership
++	// last. This ordering keeps the datapath fail-closed while the two distinct
++	// BPF maps are being reconciled.
++	if err := updateDesiredEntries(m.vlanMACMap, desiredVLAN); err != nil {
++		return rollback(fmt.Errorf("Reconcile: update %s: %w", vlanMACMapName, err))
++	}
++	if err := updateDesiredEntries(m.srcIPMap, desiredSrc); err != nil {
++		return rollback(fmt.Errorf("Reconcile: update %s: %w", srcIPMapName, err))
++	}
++	if err := deleteStaleEntries(m.srcIPMap, srcSnapshot, desiredSrc); err != nil {
++		return rollback(fmt.Errorf("Reconcile: delete stale %s entry: %w", srcIPMapName, err))
++	}
++	if err := deleteStaleEntries(m.vlanMACMap, vlanSnapshot, desiredVLAN); err != nil {
++		return rollback(fmt.Errorf("Reconcile: delete stale %s entry: %w", vlanMACMapName, err))
++	}
++	return nil
++}
++
++// OnEndpointReady upserts one entry in each BPF map for the given endpoint.
++// It is safe to call concurrently.
++func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
++	entries, err := mapEntriesForEndpoint(ep)
++	if err != nil {
++		return fmt.Errorf("OnEndpointReady: %w", err)
++	}
++	srcKey, srcVal := entries.srcKey, entries.srcValue
++	vlanKey, epVal := entries.vlanKey, entries.vlanValue
++
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++
++	if err := m.ensureMapsOpenLocked(); err != nil {
++		return fmt.Errorf("OnEndpointReady: %w", err)
++	}
++
++	// --- Map 1: srcip → subeni info (egress) ---
++	oldSrcVal, err := m.srcIPMap.Lookup(srcKey)
++	if err != nil && !errors.Is(err, unix.ENOENT) {
++		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", srcIPMapName, srcKey, err)
++	}
++	var oldSrc *SubENIInfo
++	if oldSrcVal != nil {
++		var ok bool
++		oldSrc, ok = oldSrcVal.(*SubENIInfo)
++		if !ok {
++			return fmt.Errorf("OnEndpointReady: %s key=%s contains an unexpected value type", srcIPMapName, srcKey)
++		}
++		if oldSrc.LxcID != ep.GetID() {
++			return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by endpoint %d", srcIPMapName, srcKey, oldSrc.LxcID)
++		}
++	}
++	if err := m.srcIPMap.Update(srcKey, srcVal); err != nil {
++		return fmt.Errorf("OnEndpointReady: update %s key=%s: %w", srcIPMapName, srcKey, err)
++	}
++	rollbackSrc := func() error {
++		if oldSrcVal != nil {
++			return m.srcIPMap.Update(srcKey, oldSrcVal)
++		}
++		_, rollbackErr := m.srcIPMap.Delete(srcKey)
++		return rollbackErr
++	}
++
++	// --- Map 2: (vlan-id, dst-mac) → endpoint (ingress) ---
++	oldEPVal, err := m.vlanMACMap.Lookup(vlanKey)
++	if err != nil && !errors.Is(err, unix.ENOENT) {
++		if rollbackErr := rollbackSrc(); rollbackErr != nil {
++			return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w; rollback %s: %v", vlanMACMapName, vlanKey, err, srcIPMapName, rollbackErr)
++		}
++		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", vlanMACMapName, vlanKey, err)
++	}
++	if oldEPVal != nil {
++		oldEP, ok := oldEPVal.(*EPInfo)
++		if !ok || oldEP.IfIndex != epVal.IfIndex || oldEP.LxcID != epVal.LxcID {
++			if rollbackErr := rollbackSrc(); rollbackErr != nil {
++				return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by another endpoint; rollback %s: %v", vlanMACMapName, vlanKey, srcIPMapName, rollbackErr)
++			}
++			return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by another endpoint", vlanMACMapName, vlanKey)
++		}
++	}
++	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
++		rollbackErr := rollbackSrc()
++		if rollbackErr != nil {
++			return fmt.Errorf("OnEndpointReady: update %s key=%s: %w; rollback %s: %v", vlanMACMapName, vlanKey, err, srcIPMapName, rollbackErr)
++		}
++		return fmt.Errorf("OnEndpointReady: update %s key=%s: %w", vlanMACMapName, vlanKey, err)
++	}
++
++	// When the same endpoint is rebound to another SubENI, remove its old
++	// ingress key only after both replacement entries are installed.
++	if oldSrc != nil && (oldSrc.VlanID != srcVal.VlanID || oldSrc.MAC != srcVal.MAC) {
++		oldVLANKey := &VLANMACKey{VlanID: oldSrc.VlanID, MAC: oldSrc.MAC}
++		if _, err := m.vlanMACMap.Delete(oldVLANKey); err != nil {
++			var newKeyRollbackErr error
++			if oldEPVal != nil {
++				newKeyRollbackErr = m.vlanMACMap.Update(vlanKey, oldEPVal)
++			} else {
++				_, newKeyRollbackErr = m.vlanMACMap.Delete(vlanKey)
++			}
++			srcRollbackErr := rollbackSrc()
++			return fmt.Errorf("OnEndpointReady: delete stale %s key=%s: %w; rollback replacement key: %v; rollback %s: %v",
++				vlanMACMapName, oldVLANKey, err, newKeyRollbackErr, srcIPMapName, srcRollbackErr)
++		}
++	}
++
++	return nil
++}
++
++// OnEndpointDelete removes the entries for the given endpoint from both BPF
++// maps on a best-effort basis (individual delete errors are logged but not
++// returned).
++func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
++	entries, err := mapEntriesForEndpoint(ep)
++	if err != nil {
++		return fmt.Errorf("OnEndpointDelete: %w", err)
++	}
++
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++
++	if err := m.ensureMapsOpenLocked(); err != nil {
++		return fmt.Errorf("OnEndpointDelete: %w", err)
++	}
++
++	// A delete notification can arrive after a newer Ready/Restore notification
++	// for the same Pod IP. Remove an entry only when it still describes the
++	// endpoint being deleted; otherwise a stale delete would tear down the new
++	// endpoint's datapath state.
++	srcKey := entries.srcKey
++	srcValue, srcLookupErr := m.srcIPMap.Lookup(srcKey)
++	deleteSrc := false
++	if srcLookupErr == nil {
++		if current, ok := srcValue.(*SubENIInfo); ok {
++			deleteSrc = *current == *entries.srcValue
++		}
++	} else if !errors.Is(srcLookupErr, unix.ENOENT) {
++		m.logger.WithError(srcLookupErr).WithFields(logrus.Fields{
++			"map":  srcIPMapName,
++			"addr": ep.GetIPv4Address(),
++		}).Warn("failed to verify srcip entry ownership before delete")
++	}
++	if deleteSrc {
++		if _, err := m.srcIPMap.Delete(srcKey); err != nil {
++			m.logger.WithError(err).WithFields(logrus.Fields{
++				"map":  srcIPMapName,
++				"addr": ep.GetIPv4Address(),
++			}).Warn("failed to delete srcip entry")
++		}
++	}
++
++	vlanKey := entries.vlanKey
++	vlanValue, vlanLookupErr := m.vlanMACMap.Lookup(vlanKey)
++	deleteVLAN := false
++	if vlanLookupErr == nil {
++		if current, ok := vlanValue.(*EPInfo); ok {
++			deleteVLAN = *current == *entries.vlanValue
++		}
++	} else if !errors.Is(vlanLookupErr, unix.ENOENT) {
++		m.logger.WithError(vlanLookupErr).WithFields(logrus.Fields{
++			"map":  vlanMACMapName,
++			"addr": ep.GetIPv4Address(),
++		}).Warn("failed to verify vlan-mac entry ownership before delete")
++	}
++	if deleteVLAN {
++		if _, err := m.vlanMACMap.Delete(vlanKey); err != nil {
++			m.logger.WithError(err).WithFields(logrus.Fields{
++				"map":  vlanMACMapName,
++				"addr": ep.GetIPv4Address(),
++			}).Warn("failed to delete vlan-mac entry")
++		}
++	}
++
++	return nil
++}
++
++// Close releases any resources held by the manager.
++// After Close the manager must not be used.
++func (m *SubENIMapManager) Close() {
++	m.mutex.Lock()
++	defer m.mutex.Unlock()
++	if m.closed {
++		return
++	}
++	m.closed = true
++	// If the underlying backends are real bpf.Map adapters, close the maps.
++	if a, ok := m.srcIPMap.(*bpfMapAdapter); ok {
++		_ = a.m.Close()
++	}
++	if a, ok := m.vlanMACMap.(*bpfMapAdapter); ok {
++		_ = a.m.Close()
++	}
++}
+diff --git a/pkg/huaweicloud/subenimap/types.go b/pkg/huaweicloud/subenimap/types.go
+new file mode 100644
+index 000000000..e4e1d0bc8
+--- /dev/null
++++ b/pkg/huaweicloud/subenimap/types.go
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package subenimap
++
++import (
++	"fmt"
++	"net"
++	"unsafe"
++
++	"github.com/cilium/cilium/pkg/bpf"
++)
++
++// SrcIPKey4 is the key for the cilium_hwc_srcip4 BPF map.
++// It corresponds to struct hwc_srcip_key4 in BPF C code.
++//
++// Egress path: look up SubENI info by Pod IPv4 source IP.
++type SrcIPKey4 struct {
++	Addr [4]byte `align:"addr"`
++}
++
++// String returns a human-readable representation of the key.
++func (k *SrcIPKey4) String() string {
++	return fmt.Sprintf("addr=%s", net.IP(k.Addr[:]).String())
++}
++
++// New returns a pointer to a new SrcIPKey4, satisfying bpf.MapKey.
++func (k *SrcIPKey4) New() bpf.MapKey { return &SrcIPKey4{} }
++
++// GetKeyPtr returns the unsafe pointer to this map key.
++func (k *SrcIPKey4) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
++
++// NewValue returns a new value for this key.
++func (k *SrcIPKey4) NewValue() bpf.MapValue { return &SubENIInfo{} }
++
++// DeepCopyMapKey returns a copy of this map key.
++func (k *SrcIPKey4) DeepCopyMapKey() bpf.MapKey {
++	if k == nil {
++		return nil
++	}
++	copy := *k
++	return &copy
++}
++
++// SubENIInfo is the value for the cilium_hwc_srcip4 BPF map.
++// It corresponds to struct hwc_subeni_info in BPF C code.
++type SubENIInfo struct {
++	// VlanID is the VLAN ID of the SubENI.
++	VlanID uint16 `align:"vlan_id"`
++	// MAC is the MAC address of the SubENI.
++	MAC [6]uint8 `align:"mac"`
++	// Pad is alignment padding.
++	Pad      uint16 `align:"pad"`
++	Reserved uint16 `align:"reserved"`
++	// LxcID is the endpoint (LXC) ID.
++	LxcID uint32 `align:"lxc_id"`
++}
++
++// String returns a human-readable representation of the value.
++func (v *SubENIInfo) String() string {
++	return fmt.Sprintf("vlan_id=%d mac=%02x:%02x:%02x:%02x:%02x:%02x lxc_id=%d",
++		v.VlanID,
++		v.MAC[0], v.MAC[1], v.MAC[2], v.MAC[3], v.MAC[4], v.MAC[5],
++		v.LxcID,
++	)
++}
++
++// New returns a pointer to a new SubENIInfo, satisfying bpf.MapValue.
++func (v *SubENIInfo) New() bpf.MapValue { return &SubENIInfo{} }
++
++// GetValuePtr returns the unsafe pointer to this map value.
++func (v *SubENIInfo) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
++
++// DeepCopyMapValue returns a copy of this map value.
++func (v *SubENIInfo) DeepCopyMapValue() bpf.MapValue {
++	if v == nil {
++		return nil
++	}
++	copy := *v
++	return &copy
++}
++
++// VLANMACKey is the key for the cilium_hwc_vlan_mac BPF map.
++// It corresponds to struct hwc_vlan_mac_key in BPF C code.
++//
++// Ingress path: look up endpoint by (VLAN ID, destination MAC).
++type VLANMACKey struct {
++	// VlanID is the VLAN ID of the SubENI.
++	VlanID uint16 `align:"vlan_id"`
++	// MAC is the destination MAC address.
++	MAC [6]uint8 `align:"mac"`
++}
++
++// String returns a human-readable representation of the key.
++func (k *VLANMACKey) String() string {
++	return fmt.Sprintf("vlan_id=%d mac=%02x:%02x:%02x:%02x:%02x:%02x",
++		k.VlanID,
++		k.MAC[0], k.MAC[1], k.MAC[2], k.MAC[3], k.MAC[4], k.MAC[5],
++	)
++}
++
++// New returns a pointer to a new VLANMACKey, satisfying bpf.MapKey.
++func (k *VLANMACKey) New() bpf.MapKey { return &VLANMACKey{} }
++
++// GetKeyPtr returns the unsafe pointer to this map key.
++func (k *VLANMACKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
++
++// NewValue returns a new value for this key.
++func (k *VLANMACKey) NewValue() bpf.MapValue { return &EPInfo{} }
++
++// DeepCopyMapKey returns a copy of this map key.
++func (k *VLANMACKey) DeepCopyMapKey() bpf.MapKey {
++	if k == nil {
++		return nil
++	}
++	copy := *k
++	return &copy
++}
++
++// EPInfo is the value for the cilium_hwc_vlan_mac BPF map.
++// It corresponds to struct hwc_ep_info in BPF C code.
++type EPInfo struct {
++	// IfIndex is the interface index of the endpoint's veth.
++	IfIndex uint32 `align:"ifindex"`
++	// LxcID is the endpoint (LXC) ID.
++	LxcID uint16 `align:"lxc_id"`
++	// Flags holds endpoint flags.
++	Flags uint16 `align:"flags"`
++}
++
++// String returns a human-readable representation of the value.
++func (v *EPInfo) String() string {
++	return fmt.Sprintf("ifindex=%d lxc_id=%d flags=0x%04x", v.IfIndex, v.LxcID, v.Flags)
++}
++
++// New returns a pointer to a new EPInfo, satisfying bpf.MapValue.
++func (v *EPInfo) New() bpf.MapValue { return &EPInfo{} }
++
++// GetValuePtr returns the unsafe pointer to this map value.
++func (v *EPInfo) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
++
++// DeepCopyMapValue returns a copy of this map value.
++func (v *EPInfo) DeepCopyMapValue() bpf.MapValue {
++	if v == nil {
++		return nil
++	}
++	copy := *v
++	return &copy
++}
+diff --git a/pkg/ipam/crd.go b/pkg/ipam/crd.go
+index 48181a71e..71ac4351c 100644
+--- a/pkg/ipam/crd.go
++++ b/pkg/ipam/crd.go
+@@ -24,6 +24,7 @@ import (
+ 
+ 	alibabaCloud "github.com/cilium/cilium/pkg/alibabacloud/utils"
+ 	"github.com/cilium/cilium/pkg/cidr"
++	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+ 	"github.com/cilium/cilium/pkg/ip"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+@@ -239,6 +240,32 @@ func deriveVpcCIDRs(node *ciliumv2.CiliumNode) (primaryCIDR *cidr.CIDR, secondar
+ 			return
+ 		}
+ 	}
++	if node.Status.HuaweiCloud != nil {
++		c, err := cidr.ParseCIDR(node.Status.HuaweiCloud.VPCPrimaryCIDR)
++		if err == nil && c.IP.To4() != nil {
++			primaryCIDR = c
++			accepted := []*cidr.CIDR{primaryCIDR}
++			for _, secondary := range node.Status.HuaweiCloud.VPCCIDRs {
++				candidate, parseErr := cidr.ParseCIDR(secondary)
++				if parseErr != nil || candidate.IP.To4() == nil {
++					continue
++				}
++				overlaps := false
++				for _, existing := range accepted {
++					if existing.IPNet.Contains(candidate.IP) || candidate.IPNet.Contains(existing.IP) {
++						overlaps = true
++						break
++					}
++				}
++				if overlaps {
++					continue
++				}
++				secondaryCIDRs = append(secondaryCIDRs, candidate)
++				accepted = append(accepted, candidate)
++			}
++			return
++		}
++	}
+ 	return
+ }
+ 
+@@ -314,7 +341,7 @@ func (n *nodeStore) hasMinimumIPsInPool() (minimumReached bool, required, numAva
+ 			minimumReached = true
+ 		}
+ 
+-		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud {
++		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud || n.conf.IPAMMode() == ipamOption.IPAMHuaweiCloud {
+ 			if !n.autoDetectIPv4NativeRoutingCIDR() {
+ 				minimumReached = false
+ 			}
+@@ -722,11 +749,63 @@ func (a *crdAllocator) buildAllocationResult(ip net.IP, ipInfo *ipamTypes.Alloca
+ 			return
+ 		}
+ 		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
++
++	case ipamOption.IPAMHuaweiCloud:
++		if a.store.ownNode.Status.HuaweiCloud != nil {
++			for _, subENI := range a.store.ownNode.Status.HuaweiCloud.SubENIs {
++				if subENI.ID != ipInfo.Resource {
++					continue
++				}
++				if subENI.VlanID <= 0 {
++					return nil, fmt.Errorf("missing vlan ID for HuaweiCloud Sub-ENI %s", subENI.ID)
++				}
++				primaryMAC, err := a.resolveHuaweiCloudPrimaryMAC(subENI)
++				if err != nil {
++					return nil, err
++				}
++				result.PrimaryMAC = primaryMAC
++				if subENI.SubnetCIDR != "" {
++					result.CIDRs = append(result.CIDRs, subENI.SubnetCIDR)
++				}
++				if cidr := a.conf.GetIPv4NativeRoutingCIDR(); cidr != nil {
++					result.CIDRs = append(result.CIDRs, cidr.String())
++				}
++				result.GatewayIP = subENI.GatewayIP
++				if result.GatewayIP == "" {
++					return nil, fmt.Errorf("missing gateway IP for HuaweiCloud Sub-ENI %s", subENI.ID)
++				}
++				result.InterfaceNumber = strconv.Itoa(int(subENI.VlanID))
++				return result, nil
++			}
++		}
++		return nil, fmt.Errorf("unable to find Sub-ENI %s", ipInfo.Resource)
+ 	}
+ 
+ 	return
+ }
+ 
++func (a *crdAllocator) resolveHuaweiCloudPrimaryMAC(subENI huaweiCloudTypes.SubENI) (string, error) {
++	if a.store.ownNode != nil && a.store.ownNode.Spec.HuaweiCloud != nil {
++		trunkInterface := a.store.ownNode.Spec.HuaweiCloud.TrunkInterface
++		if trunkInterface != "" {
++			link, err := netlink.LinkByName(trunkInterface)
++			if err != nil {
++				return "", fmt.Errorf("unable to resolve HuaweiCloud trunk interface %s: %w", trunkInterface, err)
++			}
++			if mac := link.Attrs().HardwareAddr.String(); mac != "" {
++				return mac, nil
++			}
++			return "", fmt.Errorf("HuaweiCloud trunk interface %s has empty MAC address", trunkInterface)
++		}
++	}
++
++	if subENI.MACAddress != "" {
++		return subENI.MACAddress, nil
++	}
++
++	return "", fmt.Errorf("HuaweiCloud primary MAC is unavailable for Sub-ENI %s", subENI.ID)
++}
++
+ // Allocate will attempt to find the specified IP in the custom resource and
+ // allocate it if it is available. If the IP is unavailable or already
+ // allocated, an error is returned. The custom resource will be updated to
+diff --git a/pkg/monitor/api/drop.go b/pkg/monitor/api/drop.go
+index 13bc0d84e..d7992606a 100644
+--- a/pkg/monitor/api/drop.go
++++ b/pkg/monitor/api/drop.go
+@@ -80,6 +80,9 @@ var errors = map[uint8]string{
+ 	182: "VLAN traffic disallowed by VLAN filter",
+ 	183: "Incorrect VNI from VTEP",
+ 	184: "Failed to update or lookup TC buffer",
++	185: "HuaweiCloud: VLAN push failed",
++	186: "HuaweiCloud: VLAN pop failed",
++	187: "HuaweiCloud: MAC rewrite failed",
+ 	197: "No node ID found",
+ }
+ 
+diff --git a/plugins/cilium-cni/cilium-cni.go b/plugins/cilium-cni/cilium-cni.go
+index 5eca17dae..91e49107d 100644
+--- a/plugins/cilium-cni/cilium-cni.go
++++ b/plugins/cilium-cni/cilium-cni.go
+@@ -560,7 +560,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
+ 	}
+ 
+ 	switch conf.IpamMode {
+-	case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
++	case ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMHuaweiCloud:
+ 		err = interfaceAdd(ipConfig, ipam.IPV4, conf)
+ 		if err != nil {
+ 			err = fmt.Errorf("unable to setup interface datapath: %s", err)
+-- 
+2.33.0
+

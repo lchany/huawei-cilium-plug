@@ -9,14 +9,14 @@
 - upstream commit：`a1d7fbd43b563c809330b1c3e28165a3e7ff43aa`
 - Kubernetes：以 `v1.24` 为目标基线
 - 网络模式：IPv4、native routing、HuaweiCloud SubENI
-- patch：`series` 中的 15 个文件
+- patch：`series` 中的 3 个文件
 
 HuaweiCloud IPAM 模式不支持同时启用 IPv6。需要双栈的环境不要使用本部署配置。
 
 ## 2. 部署流程
 
 1. 准备构建机、Kubernetes 集群、云权限和测试资源。
-2. 在固定 upstream commit 上应用 15 个 patch。
+2. 在固定 upstream commit 上依次应用控制面、数据面和测试 3 个 patch。
 3. 运行定向测试并构建 Agent、CNI 和 HuaweiCloud Operator 镜像。
 4. 选择私有镜像仓库或离线导入，不要混用两种分发方式。
 5. 创建外部凭据 Secret，填写无密 values。
@@ -100,8 +100,8 @@ git clone --branch v1.12.19 --depth 1 \
 
 ```bash
 cd "$WORKDIR/huawei-cilium-patches"
-test "$(grep -Ev '^($|#)' series | wc -l)" -eq 15
-test "$(find . -maxdepth 1 -type f -name '*.patch' | wc -l)" -eq 15
+test "$(grep -Ev '^($|#)' series | wc -l)" -eq 3
+test "$(find . -maxdepth 1 -type f -name '*.patch' | wc -l)" -eq 3
 
 cd "$WORKDIR/cilium"
 test "$(git rev-parse HEAD)" = \
@@ -119,9 +119,9 @@ cd "$WORKDIR/cilium"
 成功标准：
 
 ```bash
-test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 15
+test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 3
 test -z "$(git status --short)"
-git log --oneline --max-count=15
+git log --oneline --max-count=3
 ```
 
 若 `git am` 中断，先执行 `git am --abort`，重新确认 HEAD 和工作区，再从干净基线重放。
