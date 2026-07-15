@@ -277,7 +277,7 @@
 | OBS-06 | P0/R | Cilium monitor/drop counters | Pass | 五节点 `cilium status --brief` 全 OK 并读取 forward/drop 指标；在 pod2 连续 30 次 ClusterIP 请求期间抓取其本节点 monitor：385 events、357 含 pod2 IP、0 drop，双向 Service NAT trace 完整 |
 | OBS-07 | P1/R | Kubernetes Event | Pass | 2026-07-14 全 namespace 按 lastTimestamp 审计：5/5 Node Ready、Agent 5/5 Running/0 restart；仅见 rollout 启动窗口的瞬时 startup-probe connection-refused，随后全部健康，无持续 Warning |
 | OBS-08 | P1/R | 云 API request ID | Pass | audit92 对400/401/403/404/429/500逐项注入`X-Request-Id`，归一化错误均保留精确ID且不含AK/SK/Authorization；定向100、race20、API全包20+race20、HuaweiCloud全域10+race10及vet通过。真实无效SG错误也确认request ID存在 |
-| OBS-09 | P1/R | 资源变化审计 | Pending | 待执行 |
+| OBS-09 | P1/R | 资源变化审计 | Pass | audit94 重跑生产 Client 真实云端 CRUD：时间线严格为删除2个已确认空闲资源→单建并校验内联Tag/Show/List→删除至NotFound→批量创建2个并逐项校验Tag/Show/List→全部删除至NotFound→Operator精确补齐8个；云端父端口集合与CiliumNode池精确一致，最终pool40、used-outside0、error0、mesh56/56、无探针残留 |
 | OBS-10 | P0/R | 敏感信息二次扫描 | Pass | rendered resources、Pod spec、Operator logs 均无凭据值 |
 | OBS-11 | P1/R | 证据目录权限 | Pass | 本地 `ANALYSIS` 为 root:root 0755，核心台账/证据为 root:root 0644；递归检查无 group/other-writable 目录或文件 |
 | OBS-12 | P1/R | 指标长期趋势 | Pending | 待执行 |
