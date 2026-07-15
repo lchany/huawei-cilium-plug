@@ -76,7 +76,8 @@ datapath 后，连接跟踪、Service 和 NetworkPolicy 仍由 Cilium 负责。
 ├── build-local.sh         # 测试、镜像构建和离线导出
 ├── huaweicloud-values.example.yaml
 ├── INSTALL-DEPLOY.md
-└── TEST-CASES.md
+├── TEST-CASES.md
+└── 测试过程问题整理.md
 ```
 
 ## 使用前须知
@@ -96,6 +97,7 @@ datapath 后，连接跟踪、Service 和 NetworkPolicy 仍由 Cilium 负责。
 
 - [安装与部署](INSTALL-DEPLOY.md)：前置条件、构建、镜像分发、Helm 安装、验收、升级和回滚。
 - [完整测试用例](TEST-CASES.md)：451 项脱敏测试内容和预期结果，不包含现场执行信息。
+- [测试过程问题整理](测试过程问题整理.md)：按问题场景、根因和解决方案整理测试中发现的问题。
 - [示例 values](huaweicloud-values.example.yaml)：不含凭据，可复制后填写环境参数。
 
 ## 修改 patch
