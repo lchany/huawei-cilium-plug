@@ -1,11 +1,11 @@
-From 2017fefe578973c2cad58de8c0c62cf834d137d9 Mon Sep 17 00:00:00 2001
+From 0a18e5bd1cb0204be403af389d167e681431d831 Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 09:31:30 +0800
+Date: Wed, 15 Jul 2026 10:35:29 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
  bpf/lib/huaweicloud.h                         |   69 +-
- bpf/tests/huaweicloud_test.c                  |  322 +++++
+ bpf/tests/huaweicloud_test.c                  |  398 +++++++
  daemon/cmd/kube_proxy_replacement.go          |   19 +
  daemon/cmd/kube_proxy_replacement_test.go     |   35 +
  .../templates/cilium-operator/_helpers.tpl    |   15 +
@@ -46,7 +46,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/option/config_test.go                     |   51 +
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 42 files changed, 6738 insertions(+), 276 deletions(-)
+ 42 files changed, 6814 insertions(+), 276 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -176,10 +176,10 @@ index 187df88e7..b060344de 100644
  	if (skb_vlan_pop(ctx) < 0)
 diff --git a/bpf/tests/huaweicloud_test.c b/bpf/tests/huaweicloud_test.c
 new file mode 100644
-index 000000000..4b7a2bbb5
+index 000000000..3b9dc84b6
 --- /dev/null
 +++ b/bpf/tests/huaweicloud_test.c
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,398 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 +/* Copyright Authors of Cilium */
 +
@@ -352,6 +352,82 @@ index 000000000..4b7a2bbb5
 +	assert((__u32)((long)data_end - (long)data) ==
 +	       sizeof(struct ethhdr) + sizeof(struct iphdr));
 +	assert(eth->h_proto == bpf_htons(ETH_P_IP));
++	test_finish();
++}
++
++static __always_inline int
++test_huaweicloud_metadata_ipv4(struct __ctx_buff *ctx, __u16 packet_vlan,
++			       __u16 map_vlan, __u8 packet_mac_tail,
++			       __u8 map_mac_tail, bool expect_handled)
++{
++	struct hwc_vlan_mac_key key = {
++		.vlan_id = map_vlan,
++		.mac = { 0x02, 0, 0, 0, 0, map_mac_tail },
++	};
++	struct hwc_ep_info ep = {
++		.ifindex = 1,
++		.lxc_id = 1,
++	};
++	void *data;
++	void *data_end;
++	struct ethhdr *eth;
++	bool handled = false;
++	int ret;
++
++	if (test_skb_change_tail(ctx,
++				 sizeof(struct ethhdr) + sizeof(struct iphdr), 0) < 0)
++		return TEST_FAIL;
++	data = (void *)(long)ctx->data;
++	data_end = (void *)(long)ctx->data_end;
++	eth = data;
++	if ((void *)(eth + 1) > data_end)
++		return TEST_FAIL;
++	memset(eth, 0, sizeof(*eth));
++	eth->h_dest[0] = 0x02;
++	eth->h_dest[5] = packet_mac_tail;
++	eth->h_proto = bpf_htons(ETH_P_IP);
++	if (map_update_elem(&cilium_hwc_vlan_mac, &key, &ep, BPF_ANY) < 0)
++		return TEST_FAIL;
++	if (skb_vlan_push(ctx, bpf_htons(ETH_P_8021Q), packet_vlan) < 0)
++		return TEST_FAIL;
++	if (!ctx->vlan_present)
++		return TEST_FAIL;
++
++	ret = hwc_from_netdev(ctx, &handled);
++	if (ret != CTX_ACT_OK || handled != expect_handled)
++		return TEST_FAIL;
++	if (expect_handled) {
++		if (ctx->vlan_present)
++			return TEST_FAIL;
++	} else {
++		/* A metadata-only miss stays tagged for the generic VLAN policy
++		 * path, but must never be redirected to the wrong endpoint.
++		 */
++		if (!ctx->vlan_present || skb_vlan_pop(ctx) < 0 ||
++		    ctx->vlan_present)
++			return TEST_FAIL;
++	}
++	if (map_delete_elem(&cilium_hwc_vlan_mac, &key) < 0)
++		return TEST_FAIL;
++	return TEST_PASS;
++}
++
++CHECK("tc", "huaweicloud_metadata_ipv4_boundaries")
++int test_huaweicloud_metadata_ipv4_boundaries(struct __ctx_buff *ctx)
++{
++	test_init();
++	TEST("metadata_only_ipv4_map_hit", {
++		assert(test_huaweicloud_metadata_ipv4(ctx, 101, 101, 1, 1,
++						      true) == TEST_PASS);
++	});
++	TEST("correct_vlan_wrong_mac_is_not_redirected", {
++		assert(test_huaweicloud_metadata_ipv4(ctx, 102, 102, 2, 3,
++						      false) == TEST_PASS);
++	});
++	TEST("correct_mac_wrong_vlan_is_not_redirected", {
++		assert(test_huaweicloud_metadata_ipv4(ctx, 104, 103, 4, 4,
++						      false) == TEST_PASS);
++	});
 +	test_finish();
 +}
 +
