@@ -154,7 +154,7 @@
 | BPF-05 | P1/S | 第二张 map 写失败 | Pass | patch0029 注入 ingress map 更新失败，验证 source map 恢复旧值或删除新值；rollback 再失败时返回组合错误 |
 | BPF-06 | P1/S | 重复 Ready/Delete 事件 | Pass | patch0034 连续 Ready 10 次仅保留各一条 map entry，连续 Delete 10 次保持两图为空；普通与 `-race` 测试通过 |
 | BPF-07 | P1/S | 非法 IP/MAC/VLAN/ifindex | Pass | patch0028 在 map 写入前覆盖非法/IPv6 IP、零/组播 MAC、VLAN 越界和零 ifindex，全部 fail closed |
-| BPF-08 | P1/R | map 容量接近上限 | Pending | 待执行 |
+| BPF-08 | P1/R | map 容量接近上限 | Pass | audit102 从真实`huaweicloud_test.o`读取两张生产MapSpec，分别填满`cilium_hwc_srcip4`和`cilium_hwc_vlan_mac`的65536项；第65537项被拒绝，删1项后新key可立即插入；定向20轮、全10 BPF对象及干净15补丁回放均通过 |
 | VLAN-01 | P0/R | skb VLAN metadata 入方向 | Pass | audit97 新增独立metadata-only IPv4内核BPF包（无线内VLAN header），写入精确VLAN+MAC map key后`hwc_from_netdev`命中、`handled=true`、metadata被pop且返回CTX_ACT_OK；定向特权BPF 20轮及全8对象内核运行通过，干净补丁回放复测同样通过 |
 | VLAN-02 | P0/R | 线内 802.1Q 入方向 | Pass | audit61 两端 `eth0` 的 RX VLAN offload 均为 fixed-off；物理入口抓到 VLAN 1443/662 单层 802.1Q，20/20 ICMP 与20/20 HTTP 到达目标 Pod，内核抓包0丢包 |
 | VLAN-03 | P0/R | 线内 802.1ad 入方向 | Pass | audit59 内核 BPF_PROG_TEST_RUN 以真实 `ETH_P_8021AD` 线内帧进入 HuaweiCloud 解析路径，未知 VLAN 稳定 fail-closed；audit84 复核 20/20 完整迭代通过且无 FAIL |

@@ -1,6 +1,6 @@
-From 323d2e1685246e6f56d12092e17a0c2b1570708d Mon Sep 17 00:00:00 2001
+From c032782492cdb30e17106077c90fcf41750b7b76 Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 12:02:55 +0800
+Date: Wed, 15 Jul 2026 12:34:06 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
@@ -48,7 +48,8 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/option/config_test.go                     |   51 +
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 44 files changed, 6962 insertions(+), 276 deletions(-)
+ .../huaweicloud_map_capacity_test.go          |   84 ++
+ 45 files changed, 7046 insertions(+), 276 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_non_trunk_test.c
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 bpf/tests/huaweicloud_vlan_pop_failure_test.c
@@ -60,6 +61,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  create mode 100644 pkg/huaweicloud/metadata/metadata_privileged_test.go
  create mode 100644 pkg/huaweicloud/metadata/metadata_test.go
  create mode 100644 pkg/huaweicloud/subenimap/manager_privileged_test.go
+ create mode 100644 test/bpf_tests/huaweicloud_map_capacity_test.go
 
 diff --git a/bpf/lib/huaweicloud.h b/bpf/lib/huaweicloud.h
 index 187df88e7..b060344de 100644
@@ -9107,6 +9109,96 @@ index 0702a7689..adfa7a157 100644
  func (t *CNITypesSuite) TestReadCNIConf(c *check.C) {
  	confFile1 := `
  {
+diff --git a/test/bpf_tests/huaweicloud_map_capacity_test.go b/test/bpf_tests/huaweicloud_map_capacity_test.go
+new file mode 100644
+index 000000000..5aa86e6c9
+--- /dev/null
++++ b/test/bpf_tests/huaweicloud_map_capacity_test.go
+@@ -0,0 +1,84 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++//go:build privileged_tests
++
++package bpftests
++
++import (
++	"encoding/binary"
++	"path/filepath"
++	"testing"
++
++	"github.com/cilium/ebpf"
++	"github.com/cilium/ebpf/rlimit"
++)
++
++func capacityKey(size uint32, value uint64) []byte {
++	key := make([]byte, size)
++	if size >= 8 {
++		binary.LittleEndian.PutUint64(key, value)
++	} else {
++		binary.LittleEndian.PutUint32(key, uint32(value))
++	}
++	return key
++}
++
++func exerciseMapCapacity(t *testing.T, spec *ebpf.MapSpec) {
++	t.Helper()
++	if spec.MaxEntries != 65536 {
++		t.Fatalf("unexpected max entries: got %d, want 65536", spec.MaxEntries)
++	}
++	if spec.KeySize != 4 && spec.KeySize != 8 {
++		t.Fatalf("unsupported key size: %d", spec.KeySize)
++	}
++
++	isolatedSpec := *spec
++	isolatedSpec.Pinning = ebpf.PinNone
++	m, err := ebpf.NewMap(&isolatedSpec)
++	if err != nil {
++		t.Fatal("create map:", err)
++	}
++	defer m.Close()
++
++	value := make([]byte, spec.ValueSize)
++	for i := uint64(0); i < uint64(spec.MaxEntries); i++ {
++		if err := m.Put(capacityKey(spec.KeySize, i), value); err != nil {
++			t.Fatalf("insert entry %d: %v", i, err)
++		}
++	}
++
++	overflowKey := capacityKey(spec.KeySize, uint64(spec.MaxEntries))
++	if err := m.Put(overflowKey, value); err == nil {
++		t.Fatal("insert beyond map capacity unexpectedly succeeded")
++	}
++	if err := m.Delete(capacityKey(spec.KeySize, 0)); err != nil {
++		t.Fatal("delete entry from full map:", err)
++	}
++	if err := m.Put(overflowKey, value); err != nil {
++		t.Fatal("insert after freeing one map slot:", err)
++	}
++}
++
++func TestHuaweiCloudMapCapacity(t *testing.T) {
++	if testPath == nil || *testPath == "" {
++		t.Fatal("-bpf-test-path is a required flag")
++	}
++	if err := rlimit.RemoveMemlock(); err != nil {
++		t.Log(err)
++	}
++
++	spec, err := ebpf.LoadCollectionSpec(filepath.Join(*testPath, "huaweicloud_test.o"))
++	if err != nil {
++		t.Fatal("load collection spec:", err)
++	}
++	for _, name := range []string{"cilium_hwc_srcip4", "cilium_hwc_vlan_mac"} {
++		mapSpec, ok := spec.Maps[name]
++		if !ok {
++			t.Fatalf("map %q not found", name)
++		}
++		t.Run(name, func(t *testing.T) {
++			exerciseMapCapacity(t, mapSpec)
++		})
++	}
++}
 -- 
 2.33.0
 
