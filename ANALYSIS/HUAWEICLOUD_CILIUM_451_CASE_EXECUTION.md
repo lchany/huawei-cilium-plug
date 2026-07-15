@@ -7,7 +7,7 @@
 | BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit60：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `6fab161f8`、tree `e1d395fc4`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix/验证测试统一为 0015；`series` 与目录均为 15 项，audit87 0015 SHA256 `b84beaca...`，干净重放 tree 与最终源码 `5deb2c9a...` 完全一致 |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix/验证测试统一为 0015；`series` 与目录均为 15 项，audit90 0015 SHA256 `a75efce0...`，干净重放 tree 与最终源码 `c95f0c0b...` 完全一致 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit60 干净回放：受影响 endpointmanager/metadata 普通、race、privileged 定向测试通过；endpointmanager 全包普通/race 单轮通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
@@ -80,7 +80,7 @@
 | API-06 | P0/R | SubENI 标签写入 | Pass | audit81 发现旧实现误用仅深圳发布的 Port 标签接口；修复为单建/批建请求内联 SubENI tags，真实 cn-south-1 创建后 Show 精确核验两项标签，单元/竞态/全包及云端复测通过 |
 | API-07 | P0/R | Delete SubENI | Pass | audit81 删除两个基线空闲资源、一个单建资源和两个批建资源；每次均轮询到 NotFound，最终父网卡集合无测试资源残留 |
 | API-08 | P1/C | Delete 已不存在资源/404 | Pass | audit76 修复 404 提前返回导致本地状态残留；HTTP 404→`ErrNotFound` 归一化及 `TestReleaseIPsTreatsNotFoundAsConvergedAndContinues` 连续/竞态复测通过，证明清理本地状态并继续后续删除；新 Operator 实机回归全通过 |
-| API-09 | P1/C | Create 超时 | Pending | 待执行 |
+| API-09 | P1/C | Create 超时 | Pass | audit90 使用 20ms SDK HTTP timeout 对 200ms Create 服务端执行受控超时：返回 error、无成功 ID/对象、仅发出一次请求且小于 500ms；定向100轮、race20轮、API全包20+race20、HuaweiCloud全域10+race10及vet均通过 |
 | API-10 | P1/C | Wait Active 超过 60 秒 | Pass | `TestWaitSubENIActiveStopsOnTimeoutAndContext` 以缩短测试时钟验证完整 timeout/cancel 分支，连续 10 轮通过 |
 | API-11 | P1/C | HTTP 429 | Pass | `TestAPIHTTPErrorNormalization` 将 429 标准化为 `ErrRateLimited`，连续 10 轮通过 |
 | API-12 | P1/C | 5xx/网络断开 | Pass | `TestAPIHTTPErrorNormalization` 覆盖 500 原错返回，`TestAPINetworkDisconnectIsReturned` 覆盖断连；连续 10 轮通过 |
@@ -89,7 +89,7 @@
 | API-15 | P1/C | 打标签失败 | Pass | `TestFinalizeRollsBackAllCreatedSubENIsOnLastTagFailure` 验证末项标签失败后两个已创建 SubENI 均回滚；连续 10 轮通过 |
 | API-16 | P1/C | 回滚删除失败 | Pass | `TestRollbackReportsEveryDeleteFailure` 验证所有删除均尝试且两个资源 ID/失败均保留；连续 10 轮通过 |
 | API-17 | P1/R | API 最终一致性延迟 | Pass | `waitSubENIActive` 单测注入 NotFound→BUILD→ACTIVE 并验证 timeout/context 边界；audit81 真实创建后 Show/List 可见，删除后轮询到 NotFound，最终云端集合与 pool 精确一致 |
-| API-18 | P1/C | endpoint/region/project 配错 | Pending | 待执行 |
+| API-18 | P1/C | endpoint/region/project 配错 | Pass | audit90 修复初始化时未校验 endpoint/region/project 路径安全的问题；单测覆盖非法 scheme/host/query/credentials、region 空格/路径、project 路径注入及错误 project 的精确404作用域。实机用独立 leader namespace 启动两个隔离候选，非法 endpoint/region 均明确 Failed/fail-fast，生产 Operator 全程 Ready/restart0、pool 哈希不变，恢复后无 Pod/Namespace/ConfigMap 残留 |
 | API-19 | P1/R | API QPS/突发限制 | Pass | `TestHuaweiCloudAPIRateLimitBoundaries` 验证 burst 40 无等待、第 41 次按 20 QPS 限流并上报 delay；连续 10 轮通过 |
 | API-20 | P2/S | 错误码标准化矩阵 | Pass | `TestAPIHTTPErrorNormalization` 覆盖 400/401/403/404/429/500，`TestAPINetworkDisconnectIsReturned` 覆盖 transport error；连续 10 轮通过 |
 | IPAM-01 | P0/R | 每个 worker 首次分配 | Pass | 四 worker 均分配真实 SubENI Pod IP，8/8 Running |
@@ -255,7 +255,7 @@
 | STAB-02 | P1/R | 24 小时 Pod churn | Pending | 待执行 |
 | STAB-03 | P2/R | 72 小时发布候选 | Pending | 待执行 |
 | STAB-04 | P2/R | 长时间无变更空闲 | Pending | 待执行 |
-| UPG-01 | P0/C | 旧候选→当前 15 patch 候选滚动升级 | Pass | audit81 真实执行 audit76→audit81 Operator 滚动恢复；新候选 1/1 Ready、restart0、severe0，pool 映射不变，matrix 56/56；并额外执行 audit81→audit76→audit81 完整回滚闭环 |
+| UPG-01 | P0/C | 旧候选→当前 15 patch 候选滚动升级 | Pass | audit90 从 audit81 滚动到最新 Operator：1/1 Ready、restart0、severe0，pool 映射哈希 `0202559d...` 不变，matrix 56/56；客户 HTTP 21项各100/100、TCP 4项各5/5、源IP 19/19 全通过 |
 | UPG-02 | P0/C | `0007` 前共享表→独立表 | Pass | audit83 真实模拟旧 Agent 留存的 trunk-ifindex 共享表规则；新 Agent 启动后收敛到 per-VLAN 独立表，清除 stale 规则且数据面/pool 无回归，最终更换为 restart0 新 Pod |
 | UPG-03 | P0/C | `0008` 前→支持线内 VLAN | Pending | 待执行 |
 | UPG-04 | P0/C | values 凭据→`existingSecret` | Pending | 待执行 |

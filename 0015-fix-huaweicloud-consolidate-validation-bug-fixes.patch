@@ -1,6 +1,6 @@
-From 596cd3a1366b8e9e2451e3857ba9f0a2089f7339 Mon Sep 17 00:00:00 2001
-From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 07:53:17 +0800
+From bdc179e3cdf3b5bf3f58d29c2e6525cf52776129 Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Wed, 15 Jul 2026 08:54:23 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
@@ -22,11 +22,11 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/endpointmanager/huaweicloud_subeni.go     |  349 +++++-
  .../huaweicloud_subeni_privileged_test.go     |  292 +++++
  .../huaweicloud_subeni_test.go                |  221 ++++
- pkg/huaweicloud/api/api.go                    |  497 ++++++--
- pkg/huaweicloud/api/api_boundary_test.go      |  718 +++++++++++
+ pkg/huaweicloud/api/api.go                    |  564 +++++++--
+ pkg/huaweicloud/api/api_boundary_test.go      |  818 +++++++++++++
  pkg/huaweicloud/api/error_test.go             |   58 +
  pkg/huaweicloud/api/subnet_capacity.go        |   42 +-
- pkg/huaweicloud/api/subnet_capacity_test.go   |  203 +++-
+ pkg/huaweicloud/api/subnet_capacity_test.go   |  217 +++-
  pkg/huaweicloud/eni/instances.go              |   36 +-
  pkg/huaweicloud/eni/instances_test.go         | 1058 ++++++++++++++++-
  pkg/huaweicloud/eni/node.go                   |  166 ++-
@@ -44,7 +44,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/nodediscovery/nodediscovery.go            |   63 +-
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 40 files changed, 6459 insertions(+), 266 deletions(-)
+ 40 files changed, 6632 insertions(+), 274 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -2929,10 +2929,10 @@ index 000000000..d082ba0b4
 +	}
 +}
 diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
-index ffc692a0f..0bde68453 100644
+index ffc692a0f..5c7e98342 100644
 --- a/pkg/huaweicloud/api/api.go
 +++ b/pkg/huaweicloud/api/api.go
-@@ -4,16 +4,22 @@
+@@ -4,16 +4,23 @@
  package api
  
  import (
@@ -2943,6 +2943,7 @@ index ffc692a0f..0bde68453 100644
  	"net"
 +	"net/http"
  	"net/netip"
++	"net/url"
 +	"sort"
  	"strconv"
  	"strings"
@@ -2955,7 +2956,7 @@ index ffc692a0f..0bde68453 100644
  	coreregion "github.com/huaweicloud/huaweicloud-sdk-go-v3/core/region"
  	hwECS "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2"
  	ecsmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2/model"
-@@ -57,7 +63,40 @@ func (n noOpRateLimitMetrics) ObserveRateLimit(operation string, duration time.D
+@@ -57,7 +64,58 @@ func (n noOpRateLimitMetrics) ObserveRateLimit(operation string, duration time.D
  
  var _ HuaweiCloudAPI = &Client{}
  
@@ -2990,13 +2991,93 @@ index ffc692a0f..0bde68453 100644
 +	if strings.TrimSpace(secretKey) == "" {
 +		return nil, fmt.Errorf("HuaweiCloud secret key is required")
 +	}
-+	if strings.TrimSpace(projectID) == "" {
++	projectID = strings.TrimSpace(projectID)
++	if projectID == "" {
 +		return nil, fmt.Errorf("HuaweiCloud project ID is required")
++	}
++	if err := validateHuaweiCloudProjectID(projectID); err != nil {
++		return nil, err
++	}
++	endpoint = strings.TrimSpace(endpoint)
++	region = strings.TrimSpace(region)
++	if endpoint != "" {
++		if err := validateHuaweiCloudEndpoint(endpoint); err != nil {
++			return nil, err
++		}
++	} else {
++		if region == "" {
++			return nil, fmt.Errorf("region is required when endpoint is empty")
++		}
++		if err := validateHuaweiCloudRegion(region); err != nil {
++			return nil, err
++		}
 +	}
  	credentials, err := auth.NewBasicCredentialsBuilder().
  		WithAk(accessKey).
  		WithSk(secretKey).
-@@ -114,23 +153,36 @@ func (c *Client) CreateSubNetworkInterface(ctx context.Context, req CreateSubENI
+@@ -73,14 +131,10 @@ func NewClient(accessKey, secretKey, projectID, region, endpoint string) (*Clien
+ 	vpcBuilder = vpcBuilder.WithHttpConfig(httpConfig)
+ 	ecsBuilder = ecsBuilder.WithHttpConfig(httpConfig)
+ 
+-	if strings.TrimSpace(endpoint) != "" {
++	if endpoint != "" {
+ 		vpcBuilder = vpcBuilder.WithEndpoint(endpoint)
+ 		ecsBuilder = ecsBuilder.WithEndpoint(endpoint)
+ 	} else {
+-		if strings.TrimSpace(region) == "" {
+-			return nil, fmt.Errorf("region is required when endpoint is empty")
+-		}
+-
+ 		vpcRegion, err := hwVPCRegion.SafeValueOf(region)
+ 		if err != nil {
+ 			vpcRegion = coreregion.NewRegion(region, fmt.Sprintf("https://vpc.%s.myhuaweicloud.com", region))
+@@ -110,27 +164,82 @@ func NewClient(accessKey, secretKey, projectID, region, endpoint string) (*Clien
+ 	}, nil
+ }
+ 
++func validateHuaweiCloudEndpoint(endpoint string) error {
++	parsed, err := url.Parse(endpoint)
++	if err != nil {
++		return fmt.Errorf("invalid HuaweiCloud endpoint: %w", err)
++	}
++	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
++		return fmt.Errorf("invalid HuaweiCloud endpoint: HTTP(S) URL with host is required")
++	}
++	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
++		return fmt.Errorf("invalid HuaweiCloud endpoint: credentials, query, and fragment are not allowed")
++	}
++	return nil
++}
++
++func validateHuaweiCloudRegion(region string) error {
++	if len(region) > 64 {
++		return fmt.Errorf("invalid HuaweiCloud region %q", region)
++	}
++	for _, char := range region {
++		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
++			(char >= '0' && char <= '9') || char == '-' {
++			continue
++		}
++		return fmt.Errorf("invalid HuaweiCloud region %q", region)
++	}
++	return nil
++}
++
++func validateHuaweiCloudProjectID(projectID string) error {
++	if len(projectID) > 128 {
++		return fmt.Errorf("invalid HuaweiCloud project ID %q", projectID)
++	}
++	for _, char := range projectID {
++		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
++			(char >= '0' && char <= '9') || char == '-' || char == '_' {
++			continue
++		}
++		return fmt.Errorf("invalid HuaweiCloud project ID %q", projectID)
++	}
++	return nil
++}
++
+ func (c *Client) CreateSubNetworkInterface(ctx context.Context, req CreateSubENIRequest) (string, *eniTypes.SubENI, error) {
  	if err := ctx.Err(); err != nil {
  		return "", nil, err
  	}
@@ -3038,7 +3119,7 @@ index ffc692a0f..0bde68453 100644
  		return "", nil, err
  	}
  	return subENI.ID, subENI, nil
-@@ -146,41 +198,178 @@ func (c *Client) BatchCreateSubNetworkInterfaces(ctx context.Context, count int,
+@@ -146,41 +255,178 @@ func (c *Client) BatchCreateSubNetworkInterfaces(ctx context.Context, count int,
  	if count > 10 {
  		return nil, fmt.Errorf("batch create count exceeds max 10")
  	}
@@ -3227,7 +3308,7 @@ index ffc692a0f..0bde68453 100644
  	}
  	return nil
  }
-@@ -188,14 +377,22 @@ func (c *Client) finalizeCreatedSubENIs(ctx context.Context, subENIs []*eniTypes
+@@ -188,14 +434,22 @@ func (c *Client) finalizeCreatedSubENIs(ctx context.Context, subENIs []*eniTypes
  func (c *Client) rollbackCreatedSubENIs(subENIs []*eniTypes.SubENI, cause error) error {
  	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
  	defer cancel()
@@ -3254,7 +3335,7 @@ index ffc692a0f..0bde68453 100644
  	}
  	return cause
  }
-@@ -207,6 +404,9 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
+@@ -207,6 +461,9 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
  	if len(tags) == 0 {
  		return nil
  	}
@@ -3264,7 +3345,7 @@ index ffc692a0f..0bde68453 100644
  	resourceTags := make([]vpcmodel.ResourceTag, 0, len(tags))
  	for key, value := range tags {
  		resourceTags = append(resourceTags, vpcmodel.ResourceTag{Key: key, Value: value})
-@@ -215,7 +415,9 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
+@@ -215,7 +472,9 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
  		PortId: subENIID,
  		Body:   &vpcmodel.BatchCreatePortTagsRequestBody{Tags: resourceTags},
  	}
@@ -3275,7 +3356,7 @@ index ffc692a0f..0bde68453 100644
  	_, err := c.vpcClient.BatchCreatePortTags(request)
  	return normalizeAPIError(err)
  }
-@@ -225,7 +427,9 @@ func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string)
+@@ -225,7 +484,9 @@ func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string)
  		return err
  	}
  	request := &vpcmodel.DeleteSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
@@ -3286,7 +3367,7 @@ index ffc692a0f..0bde68453 100644
  	_, err := c.vpcClient.DeleteSubNetworkInterface(request)
  	return normalizeAPIError(err)
  }
-@@ -235,7 +439,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
+@@ -235,7 +496,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
  		return nil, err
  	}
  	request := &vpcmodel.ShowSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
@@ -3297,7 +3378,7 @@ index ffc692a0f..0bde68453 100644
  	response, err := c.vpcClient.ShowSubNetworkInterface(request)
  	if err != nil {
  		return nil, normalizeAPIError(err)
-@@ -244,6 +450,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
+@@ -244,6 +507,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
  		return nil, fmt.Errorf("sub-eni %s not found", subENIID)
  	}
  	subENI := parseSubENI(response.SubNetworkInterface)
@@ -3307,7 +3388,7 @@ index ffc692a0f..0bde68453 100644
  	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
  		return nil, err
  	}
-@@ -262,6 +471,9 @@ func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string)
+@@ -262,6 +528,9 @@ func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string)
  	result := make([]*eniTypes.SubENI, 0, len(items))
  	for _, item := range items {
  		subENI := parseSubENI(&item)
@@ -3317,7 +3398,7 @@ index ffc692a0f..0bde68453 100644
  		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
  			return nil, err
  		}
-@@ -278,11 +490,14 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
+@@ -278,11 +547,14 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
  		request.ParentId = &parentIDs
  	}
  	var result []vpcmodel.SubNetworkInterface
@@ -3333,7 +3414,7 @@ index ffc692a0f..0bde68453 100644
  		response, err := c.vpcClient.ListSubNetworkInterfaces(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -290,8 +505,12 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
+@@ -290,8 +562,12 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
  		if response.SubNetworkInterfaces != nil {
  			result = append(result, (*response.SubNetworkInterfaces)...)
  		}
@@ -3348,7 +3429,7 @@ index ffc692a0f..0bde68453 100644
  			return result, nil
  		}
  	}
-@@ -304,11 +523,25 @@ func nextMarker(pageInfo *vpcmodel.PageInfo) *string {
+@@ -304,11 +580,25 @@ func nextMarker(pageInfo *vpcmodel.PageInfo) *string {
  	return pageInfo.NextMarker
  }
  
@@ -3375,7 +3456,7 @@ index ffc692a0f..0bde68453 100644
  	response, err := c.vpcClient.ShowPort(&vpcmodel.ShowPortRequest{PortId: portID})
  	if err != nil {
  		return nil, normalizeAPIError(err)
-@@ -320,8 +553,11 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
+@@ -320,8 +610,11 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
  }
  
  func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
@@ -3389,7 +3470,7 @@ index ffc692a0f..0bde68453 100644
  	}
  	if subENI.GatewayIP == "" || subENI.SubnetCIDR == "" {
  		gatewayIP, subnetCIDR, err := c.resolveSubENISubnetMetadata(ctx, subENI.SubnetID, subENI.PrivateIPAddress, cachedSubnets)
-@@ -348,16 +584,27 @@ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.Sub
+@@ -348,16 +641,27 @@ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.Sub
  		VirsubnetId: &virsubnetIDs,
  	}
  
@@ -3420,7 +3501,7 @@ index ffc692a0f..0bde68453 100644
  	return nil
  }
  
-@@ -379,17 +626,19 @@ func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, priv
+@@ -379,17 +683,19 @@ func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, priv
  	ids := []string{subnetID}
  	request := &vpcmodel.ListVirsubnetsRequest{Limit: &limit, Id: &ids}
  
@@ -3444,7 +3525,7 @@ index ffc692a0f..0bde68453 100644
  }
  
  func belongsToCIDR(ipStr, cidrStr string) bool {
-@@ -404,23 +653,38 @@ func belongsToCIDR(ipStr, cidrStr string) bool {
+@@ -404,23 +710,38 @@ func belongsToCIDR(ipStr, cidrStr string) bool {
  	return prefix.Contains(ip)
  }
  
@@ -3489,7 +3570,7 @@ index ffc692a0f..0bde68453 100644
  }
  
  func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error) {
-@@ -428,7 +692,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
+@@ -428,7 +749,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
  		return nil, err
  	}
  	request := &ecsmodel.ShowServerRequest{ServerId: instanceID}
@@ -3500,7 +3581,7 @@ index ffc692a0f..0bde68453 100644
  	serverResp, err := c.ecsClient.ShowServer(request)
  	if err != nil {
  		return nil, normalizeAPIError(err)
-@@ -450,6 +716,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
+@@ -450,6 +773,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
  	}
  	for _, item := range items {
  		subENI := parseSubENI(&item)
@@ -3510,7 +3591,7 @@ index ffc692a0f..0bde68453 100644
  		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
  			return nil, err
  		}
-@@ -468,7 +737,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
+@@ -468,7 +794,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
  	}
  
  	serverReq := &ecsmodel.ShowServerRequest{ServerId: instanceID}
@@ -3521,7 +3602,7 @@ index ffc692a0f..0bde68453 100644
  	serverResp, err := c.ecsClient.ShowServer(serverReq)
  	if err != nil {
  		return ipamTypes.Limits{}, normalizeAPIError(err)
-@@ -480,7 +751,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
+@@ -480,7 +808,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
  	}
  
  	flavorsReq := &ecsmodel.ListFlavorsRequest{FlavorId: &flavorID}
@@ -3532,7 +3613,7 @@ index ffc692a0f..0bde68453 100644
  	flavorsResp, err := c.ecsClient.ListFlavors(flavorsReq)
  	if err != nil {
  		return ipamTypes.Limits{}, normalizeAPIError(err)
-@@ -522,8 +795,8 @@ func subENILimitFromFlavors(flavors *[]ecsmodel.Flavor, flavorID string) (int, e
+@@ -522,8 +852,8 @@ func subENILimitFromFlavors(flavors *[]ecsmodel.Flavor, flavorID string) (int, e
  		if err != nil {
  			return 0, fmt.Errorf("parse sub network interface limit for flavor %s: %w", flavorID, err)
  		}
@@ -3543,7 +3624,7 @@ index ffc692a0f..0bde68453 100644
  		}
  
  		return limit, nil
-@@ -559,6 +832,9 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+@@ -559,6 +889,9 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
  	instances := ipamTypes.NewInstanceMap()
  	for _, item := range items {
  		subENI := parseSubENI(&item)
@@ -3553,7 +3634,7 @@ index ffc692a0f..0bde68453 100644
  		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets); err != nil {
  			return nil, err
  		}
-@@ -579,11 +855,14 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
+@@ -579,11 +912,14 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
  	limit := int32(1000)
  	request := &ecsmodel.ListServersDetailsRequest{Limit: &limit}
  	var result []ecsmodel.ServerDetail
@@ -3569,7 +3650,7 @@ index ffc692a0f..0bde68453 100644
  		response, err := c.ecsClient.ListServersDetails(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -592,10 +871,20 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
+@@ -592,10 +928,20 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
  			return result, nil
  		}
  		result = append(result, (*response.Servers)...)
@@ -3590,7 +3671,7 @@ index ffc692a0f..0bde68453 100644
  		request.Marker = &marker
  	}
  }
-@@ -617,8 +906,14 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+@@ -617,8 +963,14 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
  	}
  
  	result := ipamTypes.SubnetMap{}
@@ -3606,7 +3687,7 @@ index ffc692a0f..0bde68453 100644
  		response, err := c.vpcClient.ListVirsubnets(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -636,8 +931,12 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+@@ -636,8 +988,12 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
  				result[item.Id] = subnet
  			}
  		}
@@ -3621,7 +3702,7 @@ index ffc692a0f..0bde68453 100644
  			return result, nil
  		}
  	}
-@@ -648,7 +947,10 @@ func newIPAMSubnet(item vpcmodel.Virsubnet, availableAddresses int) (*ipamTypes.
+@@ -648,7 +1004,10 @@ func newIPAMSubnet(item vpcmodel.Virsubnet, availableAddresses int) (*ipamTypes.
  		return nil, fmt.Errorf("invalid available address count %d for subnet %s", availableAddresses, item.Id)
  	}
  
@@ -3633,7 +3714,7 @@ index ffc692a0f..0bde68453 100644
  	subnet := &ipamTypes.Subnet{
  		ID:                 item.Id,
  		Name:               item.Name,
-@@ -673,8 +975,14 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
+@@ -673,8 +1032,14 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
  	request.Limit = &limit
  
  	result := ipamTypes.VirtualNetworkMap{}
@@ -3649,7 +3730,7 @@ index ffc692a0f..0bde68453 100644
  		response, err := c.vpcClient.ListVpcs(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -684,8 +992,12 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
+@@ -684,8 +1049,12 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
  				result[item.Id] = &ipamTypes.VirtualNetwork{ID: item.Id, PrimaryCIDR: item.Cidr, CIDRs: append([]string(nil), item.ExtendCidrs...)}
  			}
  		}
@@ -3664,7 +3745,7 @@ index ffc692a0f..0bde68453 100644
  			return result, nil
  		}
  	}
-@@ -700,8 +1012,14 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
+@@ -700,8 +1069,14 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
  	request.Limit = &limit
  
  	result := hwTypes.SecurityGroupMap{}
@@ -3680,7 +3761,7 @@ index ffc692a0f..0bde68453 100644
  		response, err := c.vpcClient.ListSecurityGroups(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -711,41 +1029,86 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
+@@ -711,41 +1086,86 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
  				result[item.Id] = &hwTypes.SecurityGroup{ID: item.Id, VPCID: vpcID, Tags: parseResourceTags(item.Tags)}
  			}
  		}
@@ -3781,10 +3862,10 @@ index ffc692a0f..0bde68453 100644
  		return nil
 diff --git a/pkg/huaweicloud/api/api_boundary_test.go b/pkg/huaweicloud/api/api_boundary_test.go
 new file mode 100644
-index 000000000..1e6105877
+index 000000000..f639c5c5c
 --- /dev/null
 +++ b/pkg/huaweicloud/api/api_boundary_test.go
-@@ -0,0 +1,718 @@
+@@ -0,0 +1,818 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -3841,6 +3922,106 @@ index 000000000..1e6105877
 +	client, err := NewClient("ak+/=_-", "sk!@#$%^&*()[]{}:;,.?", "project-1", "", "https://example.invalid")
 +	if err != nil || client == nil {
 +		t.Fatalf("opaque credential characters were rejected: client=%v err=%v", client, err)
++	}
++}
++
++func TestNewClientRejectsInvalidEndpointAndRegion(t *testing.T) {
++	tests := []struct {
++		name     string
++		region   string
++		endpoint string
++		want     string
++	}{
++		{name: "empty endpoint and region", want: "region is required"},
++		{name: "endpoint without scheme", endpoint: "vpc.example.com", want: "endpoint"},
++		{name: "endpoint with unsupported scheme", endpoint: "ftp://vpc.example.com", want: "endpoint"},
++		{name: "endpoint without host", endpoint: "https://", want: "endpoint"},
++		{name: "endpoint with credentials", endpoint: "https://user@example.com", want: "credentials"},
++		{name: "endpoint with query", endpoint: "https://example.com?project=other", want: "query"},
++		{name: "region with whitespace", region: "cn south 1", want: "region"},
++		{name: "region with path separator", region: "cn-south-1/other", want: "region"},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if _, err := NewClient("ak", "sk", "project-1", tt.region, tt.endpoint); err == nil || !strings.Contains(err.Error(), tt.want) {
++				t.Fatalf("got %v, want %q validation error", err, tt.want)
++			}
++		})
++	}
++
++	if client, err := NewClient("ak", "sk", "project-1", "future-region-1", ""); err != nil || client == nil {
++		t.Fatalf("syntactically valid future region should retain SDK fallback support: client=%v err=%v", client, err)
++	}
++}
++
++func TestNewClientRejectsUnsafeProjectID(t *testing.T) {
++	for _, projectID := range []string{"project/other", "project?other", "project#other", strings.Repeat("p", 129)} {
++		if _, err := NewClient("ak", "sk", projectID, "", "https://example.invalid"); err == nil || !strings.Contains(err.Error(), "project ID") {
++			t.Fatalf("project ID %q was not rejected: %v", projectID, err)
++		}
++	}
++
++	client, err := NewClient("ak", "sk", " project-1 ", "", "https://example.invalid")
++	if err != nil || client == nil {
++		t.Fatalf("trimmed safe project ID was rejected: client=%v err=%v", client, err)
++	}
++}
++
++func TestCreateSubNetworkInterfaceHTTPTimeout(t *testing.T) {
++	var requests atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests.Add(1)
++		time.Sleep(200 * time.Millisecond)
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = fmt.Fprint(w, `{"sub_network_interface":{"id":"eni-late"}}`)
++	}))
++	defer server.Close()
++
++	client := newTestClientWithTimeout(t, server.URL, 20*time.Millisecond)
++	started := time.Now()
++	id, item, err := client.CreateSubNetworkInterface(context.Background(), CreateSubENIRequest{
++		SubnetID: "subnet-1", TrunkInterfaceID: "port-1",
++	})
++	elapsed := time.Since(started)
++	if err == nil {
++		t.Fatal("expected bounded HTTP timeout")
++	}
++	if elapsed >= 500*time.Millisecond {
++		t.Fatalf("HTTP timeout was not bounded: %s", elapsed)
++	}
++	if id != "" || item != nil {
++		t.Fatalf("timed-out create returned success data: id=%q item=%#v", id, item)
++	}
++	if requests.Load() != 1 {
++		t.Fatalf("timed-out create was retried unexpectedly: requests=%d", requests.Load())
++	}
++}
++
++func TestCreateWithWrongProjectFailsWithoutSuccess(t *testing.T) {
++	var path string
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		path = r.URL.Path
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusNotFound)
++		_, _ = fmt.Fprint(w, `{"error_code":"VPC.0101","error_msg":"project not found"}`)
++	}))
++	defer server.Close()
++
++	client, err := NewClient("ak", "sk", "wrong-project", "", server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++	id, item, err := client.CreateSubNetworkInterface(context.Background(), CreateSubENIRequest{
++		SubnetID: "subnet-1", TrunkInterfaceID: "port-1",
++	})
++	if !errors.Is(err, ErrNotFound) {
++		t.Fatalf("got %v, want ErrNotFound", err)
++	}
++	if id != "" || item != nil {
++		t.Fatalf("wrong-project create returned success data: id=%q item=%#v", id, item)
++	}
++	if !strings.HasPrefix(path, "/v3/wrong-project/") {
++		t.Fatalf("request did not remain scoped to configured project: %q", path)
 +	}
 +}
 +
@@ -4651,10 +4832,10 @@ index 4b57d0acc..e429894c0 100644
  
  func stringPtr(value string) *string { return &value }
 diff --git a/pkg/huaweicloud/api/subnet_capacity_test.go b/pkg/huaweicloud/api/subnet_capacity_test.go
-index 7b9c65f4e..c5637b9f3 100644
+index 7b9c65f4e..f52a55ac9 100644
 --- a/pkg/huaweicloud/api/subnet_capacity_test.go
 +++ b/pkg/huaweicloud/api/subnet_capacity_test.go
-@@ -9,7 +9,10 @@ import (
+@@ -9,9 +9,13 @@ import (
  	"fmt"
  	"net/http"
  	"net/http/httptest"
@@ -4664,8 +4845,11 @@ index 7b9c65f4e..c5637b9f3 100644
 +	"time"
  
  	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth"
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/config"
  	hwVPC "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3"
-@@ -71,6 +74,146 @@ func TestGetSubnetAvailableAddressesUsesV2SubnetAPI(t *testing.T) {
+ 	vpcmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/model"
+ 
+@@ -71,6 +75,146 @@ func TestGetSubnetAvailableAddressesUsesV2SubnetAPI(t *testing.T) {
  	}
  }
  
@@ -4812,7 +4996,7 @@ index 7b9c65f4e..c5637b9f3 100644
  func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
  	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
  		w.Header().Set("Content-Type", "application/json")
-@@ -85,7 +228,7 @@ func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
+@@ -85,7 +229,7 @@ func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
  		case "/v3/project-1/vpc/virsubnets":
  			_, _ = fmt.Fprint(w, `{
  				"virsubnets": [
@@ -4821,7 +5005,7 @@ index 7b9c65f4e..c5637b9f3 100644
  					{"id": "subnet-ready", "name": "ready", "vpc_id": "vpc-1", "zone_id": "az-1", "subnet_cidrs": [{"ip_version": "4", "cidr": "10.0.0.0/24", "gateway_ip": "10.0.0.1"}]}
  				]
  			}`)
-@@ -109,6 +252,54 @@ func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
+@@ -109,7 +253,59 @@ func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
  	}
  }
  
@@ -4874,9 +5058,31 @@ index 7b9c65f4e..c5637b9f3 100644
 +}
 +
  func newTestClient(t *testing.T, endpoint string) *Client {
++	return newTestClientWithTimeout(t, endpoint, 0)
++}
++
++func newTestClientWithTimeout(t *testing.T, endpoint string, timeout time.Duration) *Client {
  	t.Helper()
  	credentials, err := auth.NewBasicCredentialsBuilder().
-@@ -165,3 +356,13 @@ func TestNewIPAMSubnetRejectsNegativeAvailableAddresses(t *testing.T) {
+ 		WithAk("test-ak").
+@@ -119,10 +315,13 @@ func newTestClient(t *testing.T, endpoint string) *Client {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	hcClient, err := hwVPC.VpcClientBuilder().
++	builder := hwVPC.VpcClientBuilder().
+ 		WithEndpoint(endpoint).
+-		WithCredential(credentials).
+-		SafeBuild()
++		WithCredential(credentials)
++	if timeout > 0 {
++		builder = builder.WithHttpConfig(config.DefaultHttpConfig().WithTimeout(timeout))
++	}
++	hcClient, err := builder.SafeBuild()
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -165,3 +364,13 @@ func TestNewIPAMSubnetRejectsNegativeAvailableAddresses(t *testing.T) {
  		t.Fatal("expected negative available address count to be rejected")
  	}
  }
