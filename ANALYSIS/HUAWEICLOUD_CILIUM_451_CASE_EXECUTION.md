@@ -225,8 +225,8 @@
 | REC-08 | P1/C | worker-b2 重启 | Pass | node0002 整机重启后 audit53 自动创建并 pin HuaweiCloud BPF map，5/5 Agent/Node Ready，客户矩阵全通过 |
 | REC-09 | P1/C | worker cordon/drain/uncordon | Pass | audit68 对node0004执行真实cordon/drain，节点保持Ready+SchedulingDisabled，Cilium/kube-proxy/matrix DaemonSet保持，客户pod2→pod3 20/20；uncordon后unschedulable与临时taint均为空，mesh 56/56 |
 | REC-10 | P1/C | 控制面 API Server 短时不可达 | Pass | 2026-07-14：控制面因压力失联并完成软重启；发现 Worker Agent 通过 Service IP 启动形成循环依赖，设置 `k8s-api-server=https://192.168.1.65:6443` 后 Agent 5/5、Operator 1/1 恢复，客户25项及 mesh 56/56 复测通过 |
-| REC-11 | P1/C | Operator→云 API 网络断开 | Pending | 待执行 |
-| REC-12 | P1/C | 节点 DNS 故障 | Pending | 待执行 |
+| REC-11 | P1/C | Operator→云 API 网络断开 | Pass | audit93 通过独立leader namespace启动隔离audit90 Operator并把API endpoint指向TEST-NET黑洞；候选以明确connect/timeout网络错误进入Failed，生产Operator全程Ready/restart0、pool哈希不变，恢复后endpoint key无残留、mesh56/56 |
+| REC-12 | P1/C | 节点 DNS 故障 | Pass | audit93 隔离候选使用不存在的`.invalid`云API域名，DNS错误被明确归因并进入Failed；生产单例未替换/重启，测试Pod/namespace/ConfigMap全部清理，pool40、error0、mesh56/56 |
 | REC-13 | P1/C | 错误云凭据 | Pass | audit79 无效凭据窗口只造成新云操作鉴权失败，现有 Pod 网络 mesh 56/56、40 个 pool 资源映射不变；恢复原 Secret 后 Operator Ready/restart0、各 CiliumNode error 为空 |
 | REC-14 | P1/C | 测试子网耗尽 | Pending | 待执行 |
 | REC-15 | P1/C | 测试 SG 临时阻断 | Pending | 待执行 |
