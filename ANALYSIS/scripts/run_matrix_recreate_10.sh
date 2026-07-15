@@ -2,10 +2,12 @@
 set -euo pipefail
 
 LOCK_FILE=${CUSTOMER25_LOCK_FILE:-/tmp/huaweicloud-customer25.lock}
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "another destructive/customer suite is already running (lock: $LOCK_FILE)" >&2
-  exit 75
+if [[ ${CUSTOMER25_LOCK_HELD:-0} != 1 ]]; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "another destructive/customer suite is already running (lock: $LOCK_FILE)" >&2
+    exit 75
+  fi
 fi
 
 KEY=${KEY:-/root/.ssh/id_ed25519_github_leicheng}

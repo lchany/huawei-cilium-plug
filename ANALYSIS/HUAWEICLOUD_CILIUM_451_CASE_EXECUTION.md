@@ -169,7 +169,7 @@
 | VLAN-12 | P1/C | VLAN pop helper 失败 | Pass | audit100 通过独立特权内核BPF对象对`skb_vlan_pop`做确定性失败注入；trunk metadata VLAN且VLAN+MAC精确命中时，`hwc_from_netdev`稳定返回`DROP_HWC_VLAN_POP_FAIL`，不误报成功且metadata仍在；定向20轮、全10对象及干净15补丁回放均通过 |
 | VLAN-13 | P1/O | 双层 QinQ | Pass | audit59 真实内核 BPF 包级测试分别构造 802.1ad→802.1Q 双标签与三标签，两者均稳定 `DROP_INVALID`/handled=false；20/20 完整迭代通过 |
 | VLAN-14 | P1/R | 非 trunk 接口 VLAN 流量 | Pass | audit99 新增独立内核BPF对象，在非trunk ifindex上构造metadata VLAN IPv4包并预置精确匹配的VLAN+MAC map项；`hwc_from_netdev`返回CTX_ACT_OK、`handled=false`且VLAN metadata保持，证明不会误重定向；定向20轮、全9对象及干净15补丁回放均通过 |
-| VLAN-15 | P1/R | GSO/GRO/checksum offload 开关矩阵 | Pending | 待执行 |
+| VLAN-15 | P1/R | GSO/GRO/checksum offload 开关矩阵 | Pass | audit101 在跨节点流量源/目的宿主机真实切换baseline、GRO-off、GSO-off、TX-checksum-off、GRO/GSO/TSO/SG/TX全off五态；每态功能值实查、mesh 56/56、同/跨节点各3次8MiB TCP及各300 ICMP全通过，最终恢复原offload并再过56/56 |
 | VLAN-16 | P1/R | ICMP/TCP/UDP、分片与大包 | Pass | audit61 跨节点双向 ICMP、双向1MiB TCP及双向100行 UDP 哈希一致；4KB ICMP 双向5/5，物理两端均抓到 VLAN 分片且0丢包；另覆盖56/1400/1472/2000字节与HTTP 20/20 |
 | NET-01 | P0/R | 同节点 Pod↔Pod | Pass | 客户场景 1，HTTP 100/100；见五节点实机结果 |
 | NET-02 | P0/R | 同 AZ 跨节点 Pod↔Pod | Pass | 客户场景 4，HTTP 100/100；见五节点实机结果 |
