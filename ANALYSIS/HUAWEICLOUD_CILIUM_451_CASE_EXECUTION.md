@@ -49,8 +49,8 @@
 | SEC-10 | P0/S | Helm values 和命令行扫描 | Pass | 渲染物无 AK/SK 值，只有 Secret key 引用 |
 | SEC-11 | P0/R | Helm release Secret 扫描 | Pass | 运行资源与 Helm 配置扫描未发现内联云凭据 |
 | SEC-12 | P0/R | Pod spec、事件、日志扫描 | Pass | Pod spec 无内联值，Operator 最后 500 行无凭据泄漏 |
-| SEC-13 | P0/R | Helm upgrade/rollback | Pending | 待执行 |
-| SEC-14 | P0/R | Helm uninstall | Pending | 待执行 |
+| SEC-13 | P0/R | Helm upgrade/rollback | Pass | audit91 用最新 audit90 Git Chart 在隔离 namespace 实跑 install rev1→upgrade rev2→rollback rev1（历史rev3）；外部 Secret 的 UID、resourceVersion、data哈希及非Helm所有权元数据逐阶段完全不变，release manifest 始终不含该 Secret |
+| SEC-14 | P0/R | Helm uninstall | Pass | audit91 卸载隔离 release 后 release 归零而外部 Secret 仍以相同 UID/resourceVersion/data哈希存在；仅在断言通过后由测试显式删除，namespace/release无残留，生产 mesh 56/56 |
 | SEC-15 | P1/O | 自定义 Secret 名称 | Pass | audit80 从原 Secret 仅在集群内复制临时自定义名称并切换两个 secretKeyRef；新 Operator Ready/restart0、无鉴权错误，mesh 56/56、pool 恒等；最终恢复原引用并删除临时 Secret |
 | SEC-16 | P1/C | Secret 位于错误 namespace | Pass | audit80 将凭据副本仅放在 default、kube-system 引用同名缺失 Secret；候选 Pod 稳定 CreateContainerConfigError，旧 Operator 保持 Ready，mesh/pool 不变；恢复原引用后坏 Pod 与跨 namespace 临时 Secret 均清零 |
 | SEC-17 | P1/R | 特殊字符凭据 | Pass | `TestNewClientAcceptsOpaqueCredentialCharacters` 验证非空凭据中的标点按 opaque string 接受；API 边界批次连续 10 轮通过 |
