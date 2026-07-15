@@ -139,10 +139,10 @@
 | ROUTE-08 | P0/R | worker 重启 | Pass | node0002 实机重启暴露并修复启动期 BPF pin-map 竞态；audit53 无人工干预恢复，客户 HTTP 21/21、TCP 4/4、源 IP 19/19 全通过 |
 | ROUTE-09 | P0/C | 从旧共享 ifindex 表升级 | Pass | audit83 在 node0003 停止 Agent 进程后为存量 Pod 注入 priority-111/from-IP/table=eth0-ifindex(2) 旧规则；Agent 重启自动删除旧规则，保留独立 VLAN 表 13109 及两条完整路由，pool 不变、mesh 56/56 |
 | ROUTE-10 | P0/R | 显式 compat=false | Pass | 当前 compat=false 客户配置下 8 Pod 路由表及 56/56 mesh 通过 |
-| ROUTE-11 | P1/R | 显式 compat=true | Pending | 待执行 |
+| ROUTE-11 | P1/R | 显式 compat=true | Pass | audit88 等待 ConfigMap 投影生效后仅重建 node0003 Agent；两个活跃 matrix Pod 均从 priority111 切换为 compat priority110，无同源旧优先级，per-VLAN 表仍完整，pool不变、mesh56/56；恢复后反向切回111并再次全通 |
 | ROUTE-12 | P1/C | 遗留重复 rule | Pass | audit65 在 node0002 为 pod3 注入 priority-110 legacy rule 与独立 blackhole 表；周期reconcile在4秒内只删除旧rule，保留正确priority-111 rule/两条当前路由且不修改外部表，清理后mesh 56/56 |
-| ROUTE-13 | P1/R | VLAN 边界和表范围 | Pending | 待执行 |
-| ROUTE-14 | P1/C | VLAN 0、>4094 或解析错误 | Pending | 待执行 |
+| ROUTE-13 | P1/R | VLAN 边界和表范围 | Pass | audit88 `TestEgressRulePriorityAndTableID` 覆盖 VLAN1、旧 offset 可能碰 main 的 VLAN244、VLAN4094+compat，精确断言 priority/table 范围及两 VLAN 不共表；定向100轮、race20轮、privileged20/race10 及 vet 通过 |
+| ROUTE-14 | P1/C | VLAN 0、>4094 或解析错误 | Pass | audit88 同一边界套件明确拒绝 VLAN0/4095；`TestHuaweiCloudRoutingInfoBoundaries` 拒绝空、非数字、0/4095 interface number 以及非法网关/MAC/CIDR，高重复普通/race/privileged 执行通过 |
 | ROUTE-15 | P1/C | 手工删除测试 route/rule | Pass | audit64 在 node0002 同时删除 pod3 与 `cilium_host` 的 priority-111 rule、两组完整路由以及 permanent gateway neighbor；3秒内全部恢复，Agent未重启，两张 HuaweiCloud map 哈希不变，随后 mesh 56/56 |
 | ROUTE-16 | P1/R | 宿主已有其他策略规则 | Pass | audit65 注入 priority-112、源198.51.100.1、table50000及blackhole default；跨4个五秒reconcile周期rule/route逐字不变，全部当前HuaweiCloud策略表仍完整，清理后mesh 56/56 |
 | ROUTE-17 | P1/R | VPC 内网与公网双目标 | Pending | 待执行 |
