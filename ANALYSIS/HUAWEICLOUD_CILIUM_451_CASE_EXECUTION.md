@@ -168,7 +168,7 @@
 | VLAN-11 | P1/C | 截断/非法 VLAN header | Pass | audit98 在真实特权内核BPF ProgTestRun中构造仅17字节的skb：完整Ethernet header声明802.1Q，但VLAN header缺1字节；`hwc_from_netdev`稳定返回DROP_INVALID且`handled=false`，定向20轮、全8对象及干净补丁回放20轮/全对象均通过 |
 | VLAN-12 | P1/C | VLAN pop helper 失败 | Pending | 待执行 |
 | VLAN-13 | P1/O | 双层 QinQ | Pass | audit59 真实内核 BPF 包级测试分别构造 802.1ad→802.1Q 双标签与三标签，两者均稳定 `DROP_INVALID`/handled=false；20/20 完整迭代通过 |
-| VLAN-14 | P1/R | 非 trunk 接口 VLAN 流量 | Pending | 待执行 |
+| VLAN-14 | P1/R | 非 trunk 接口 VLAN 流量 | Pass | audit99 新增独立内核BPF对象，在非trunk ifindex上构造metadata VLAN IPv4包并预置精确匹配的VLAN+MAC map项；`hwc_from_netdev`返回CTX_ACT_OK、`handled=false`且VLAN metadata保持，证明不会误重定向；定向20轮、全9对象及干净15补丁回放均通过 |
 | VLAN-15 | P1/R | GSO/GRO/checksum offload 开关矩阵 | Pending | 待执行 |
 | VLAN-16 | P1/R | ICMP/TCP/UDP、分片与大包 | Pass | audit61 跨节点双向 ICMP、双向1MiB TCP及双向100行 UDP 哈希一致；4KB ICMP 双向5/5，物理两端均抓到 VLAN 分片且0丢包；另覆盖56/1400/1472/2000字节与HTTP 20/20 |
 | NET-01 | P0/R | 同节点 Pod↔Pod | Pass | 客户场景 1，HTTP 100/100；见五节点实机结果 |
