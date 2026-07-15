@@ -1,4 +1,4 @@
-From c032782492cdb30e17106077c90fcf41750b7b76 Mon Sep 17 00:00:00 2001
+From f63000ce501b9dee34d78f44bbbb68660ba06f9a Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
 Date: Wed, 15 Jul 2026 12:34:06 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
@@ -12,44 +12,47 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  daemon/cmd/kube_proxy_replacement_test.go     |   35 +
  .../templates/cilium-operator/_helpers.tpl    |   15 +
  .../templates/cilium-operator/deployment.yaml |    4 +-
+ pkg/alibabacloud/api/api.go                   |   24 +-
  pkg/api/helpers/rate_limit.go                 |   29 +-
  pkg/api/helpers/rate_limit_test.go            |   15 +-
+ pkg/aws/ec2/ec2.go                            |   60 +-
+ pkg/azure/api/api.go                          |   16 +-
  pkg/datapath/iptables/custom_chain.go         |    6 +
- pkg/datapath/iptables/iptables.go             |  152 ++-
+ pkg/datapath/iptables/iptables.go             |  128 +-
  pkg/datapath/iptables/iptables_test.go        |   31 +
  pkg/datapath/linux/routing/info.go            |   15 +-
  pkg/datapath/linux/routing/info_test.go       |   71 ++
  pkg/datapath/linux/routing/routing.go         |  349 +++++-
  pkg/datapath/linux/routing/routing_test.go    |  354 ++++++
- pkg/endpointmanager/huaweicloud_subeni.go     |  349 +++++-
+ pkg/endpointmanager/huaweicloud_subeni.go     |  422 ++++++-
  .../huaweicloud_subeni_privileged_test.go     |  292 +++++
- .../huaweicloud_subeni_test.go                |  221 ++++
- pkg/huaweicloud/api/api.go                    |  564 +++++++--
+ .../huaweicloud_subeni_test.go                |  255 ++++
+ pkg/huaweicloud/api/api.go                    |  568 +++++++--
  pkg/huaweicloud/api/api_boundary_test.go      |  818 +++++++++++++
  pkg/huaweicloud/api/error_test.go             |   96 ++
  pkg/huaweicloud/api/subnet_capacity.go        |   42 +-
  pkg/huaweicloud/api/subnet_capacity_test.go   |  217 +++-
- pkg/huaweicloud/eni/instances.go              |   36 +-
- pkg/huaweicloud/eni/instances_test.go         | 1058 ++++++++++++++++-
- pkg/huaweicloud/eni/node.go                   |  166 ++-
- pkg/huaweicloud/metadata/metadata.go          |   83 +-
+ pkg/huaweicloud/eni/instances.go              |   50 +-
+ pkg/huaweicloud/eni/instances_test.go         | 1083 ++++++++++++++++-
+ pkg/huaweicloud/eni/node.go                   |  215 +++-
+ pkg/huaweicloud/metadata/metadata.go          |  135 +-
  .../metadata/metadata_privileged_test.go      |   64 +
  pkg/huaweicloud/metadata/metadata_test.go     |  216 ++++
- pkg/huaweicloud/subenimap/manager.go          |  371 +++++-
+ pkg/huaweicloud/subenimap/manager.go          |  401 +++++-
  .../subenimap/manager_privileged_test.go      |   95 ++
  pkg/huaweicloud/subenimap/manager_test.go     |  435 ++++++-
  pkg/ipam/crd.go                               |   20 +-
  pkg/ipam/huaweicloud_test.go                  |   47 +
  pkg/ipam/node_test.go                         |    1 +
  pkg/ipam/types/types.go                       |   13 +
- pkg/nodediscovery/huaweicloud_test.go         |   24 +-
- pkg/nodediscovery/nodediscovery.go            |   63 +-
+ pkg/nodediscovery/huaweicloud_test.go         |  182 ++-
+ pkg/nodediscovery/nodediscovery.go            |  239 ++--
  pkg/option/config.go                          |   19 +-
  pkg/option/config_test.go                     |   51 +
- plugins/cilium-cni/types/types.go             |  118 +-
- plugins/cilium-cni/types/types_test.go        |   49 +
+ plugins/cilium-cni/types/types.go             |  134 +-
+ plugins/cilium-cni/types/types_test.go        |   55 +
  .../huaweicloud_map_capacity_test.go          |   84 ++
- 45 files changed, 7046 insertions(+), 276 deletions(-)
+ 48 files changed, 7560 insertions(+), 475 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_non_trunk_test.c
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 bpf/tests/huaweicloud_vlan_pop_failure_test.c
@@ -868,6 +871,76 @@ index 7221d4eac..09bd2643b 100644
                key: CILIUM_HUAWEI_CLOUD_SECRET_KEY
                optional: false
          {{- end }}
+diff --git a/pkg/alibabacloud/api/api.go b/pkg/alibabacloud/api/api.go
+index 01f156b4c..f7898dedd 100644
+--- a/pkg/alibabacloud/api/api.go
++++ b/pkg/alibabacloud/api/api.go
+@@ -95,7 +95,9 @@ func (c *Client) GetVSwitches(ctx context.Context) (ipamTypes.SubnetMap, error)
+ 		req := vpc.CreateDescribeVSwitchesRequest()
+ 		req.PageNumber = requests.NewInteger(i)
+ 		req.PageSize = requests.NewInteger(50)
+-		c.limiter.Limit(ctx, "DescribeVSwitches")
++		if err := c.limiter.Limit(ctx, "DescribeVSwitches"); err != nil {
++			return nil, err
++		}
+ 		resp, err := c.vpcClient.DescribeVSwitches(req)
+ 		if err != nil {
+ 			return nil, err
+@@ -138,7 +140,9 @@ func (c *Client) GetVSwitches(ctx context.Context) (ipamTypes.SubnetMap, error)
+ 		req := vpc.CreateListTagResourcesRequest()
+ 		req.ResourceType = "VSWITCH"
+ 		req.ResourceId = &ids
+-		c.limiter.Limit(ctx, "ListTagResources")
++		if err := c.limiter.Limit(ctx, "ListTagResources"); err != nil {
++			return nil, err
++		}
+ 		resp, err := c.vpcClient.ListTagResources(req)
+ 		if err != nil {
+ 			return nil, err
+@@ -159,7 +163,9 @@ func (c *Client) GetVSwitches(ctx context.Context) (ipamTypes.SubnetMap, error)
+ func (c *Client) GetVPC(ctx context.Context, vpcID string) (*ipamTypes.VirtualNetwork, error) {
+ 	req := vpc.CreateDescribeVpcsRequest()
+ 	req.VpcId = vpcID
+-	c.limiter.Limit(ctx, "DescribeVpcs")
++	if err := c.limiter.Limit(ctx, "DescribeVpcs"); err != nil {
++		return nil, err
++	}
+ 	resp, err := c.vpcClient.DescribeVpcs(req)
+ 	if err != nil {
+ 		return nil, err
+@@ -277,7 +283,9 @@ func (c *Client) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPC
+ 	}
+ 	req.Tag = &reqTag
+ 
+-	c.limiter.Limit(ctx, "CreateNetworkInterface")
++	if err := c.limiter.Limit(ctx, "CreateNetworkInterface"); err != nil {
++		return "", nil, err
++	}
+ 
+ 	sinceStart := spanstat.Start()
+ 	resp, err := c.ecsClient.CreateNetworkInterface(req)
+@@ -317,7 +325,9 @@ func (c *Client) AttachNetworkInterface(ctx context.Context, instanceID, eniID s
+ 	req := ecs.CreateAttachNetworkInterfaceRequest()
+ 	req.InstanceId = instanceID
+ 	req.NetworkInterfaceId = eniID
+-	c.limiter.Limit(ctx, "AttachNetworkInterface")
++	if err := c.limiter.Limit(ctx, "AttachNetworkInterface"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ecsClient.AttachNetworkInterface(req)
+ 	c.metricsAPI.ObserveAPICall("AttachNetworkInterface", deriveStatus(err), sinceStart.Seconds())
+@@ -390,7 +400,9 @@ func (c *Client) describeNetworkInterfaces(ctx context.Context, subnets ipamType
+ 			req.PageNumber = requests.NewInteger(i)
+ 			req.PageSize = requests.NewInteger(50)
+ 			req.VSwitchId = subnet.ID
+-			c.limiter.Limit(ctx, "DescribeNetworkInterfaces")
++			if err := c.limiter.Limit(ctx, "DescribeNetworkInterfaces"); err != nil {
++				return nil, err
++			}
+ 			resp, err := c.ecsClient.DescribeNetworkInterfaces(req)
+ 			if err != nil {
+ 				return nil, err
 diff --git a/pkg/api/helpers/rate_limit.go b/pkg/api/helpers/rate_limit.go
 index 54cbf66e4..7764af53a 100644
 --- a/pkg/api/helpers/rate_limit.go
@@ -935,6 +1008,223 @@ index fa4625716..5395090e4 100644
 +	c.Assert(err, check.Equals, context.Canceled)
 +	c.Assert(time.Since(started) < 100*time.Millisecond, check.Equals, true)
 +}
+diff --git a/pkg/aws/ec2/ec2.go b/pkg/aws/ec2/ec2.go
+index 658e77572..c878756a3 100644
+--- a/pkg/aws/ec2/ec2.go
++++ b/pkg/aws/ec2/ec2.go
+@@ -159,7 +159,9 @@ func (c *Client) describeNetworkInterfaces(ctx context.Context, subnets ipamType
+ 	}
+ 	paginator := ec2.NewDescribeNetworkInterfacesPaginator(c.ec2Client, input)
+ 	for paginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeNetworkInterfaces")
++		if err := c.limiter.Limit(ctx, "DescribeNetworkInterfaces"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := paginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeNetworkInterfaces", deriveStatus(err), sinceStart.Seconds())
+@@ -182,7 +184,9 @@ func (c *Client) describeNetworkInterfacesFromInstances(ctx context.Context) ([]
+ 
+ 	paginator := ec2.NewDescribeInstancesPaginator(c.ec2Client, instanceAttrs)
+ 	for paginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeInstances")
++		if err := c.limiter.Limit(ctx, "DescribeInstances"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := paginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeInstances", deriveStatus(err), sinceStart.Seconds())
+@@ -223,7 +227,9 @@ func (c *Client) describeNetworkInterfacesFromInstances(ctx context.Context) ([]
+ 
+ 	ENIPaginator := ec2.NewDescribeNetworkInterfacesPaginator(c.ec2Client, ENIAttrs)
+ 	for ENIPaginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeNetworkInterfaces")
++		if err := c.limiter.Limit(ctx, "DescribeNetworkInterfaces"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := ENIPaginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeNetworkInterfaces", deriveStatus(err), sinceStart.Seconds())
+@@ -359,7 +365,9 @@ func (c *Client) describeVpcs(ctx context.Context) ([]ec2_types.Vpc, error) {
+ 	var result []ec2_types.Vpc
+ 	paginator := ec2.NewDescribeVpcsPaginator(c.ec2Client, &ec2.DescribeVpcsInput{})
+ 	for paginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeVpcs")
++		if err := c.limiter.Limit(ctx, "DescribeVpcs"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := paginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeVpcs", deriveStatus(err), sinceStart.Seconds())
+@@ -408,7 +416,9 @@ func (c *Client) describeSubnets(ctx context.Context) ([]ec2_types.Subnet, error
+ 	}
+ 	paginator := ec2.NewDescribeSubnetsPaginator(c.ec2Client, input)
+ 	for paginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeSubnets")
++		if err := c.limiter.Limit(ctx, "DescribeSubnets"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := paginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeSubnets", deriveStatus(err), sinceStart.Seconds())
+@@ -485,7 +495,9 @@ func (c *Client) CreateNetworkInterface(ctx context.Context, toAllocate int32, s
+ 		}
+ 	}
+ 
+-	c.limiter.Limit(ctx, "CreateNetworkInterface")
++	if err := c.limiter.Limit(ctx, "CreateNetworkInterface"); err != nil {
++		return "", nil, err
++	}
+ 	sinceStart := spanstat.Start()
+ 	output, err := c.ec2Client.CreateNetworkInterface(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("CreateNetworkInterface", deriveStatus(err), sinceStart.Seconds())
+@@ -512,7 +524,9 @@ func (c *Client) DeleteNetworkInterface(ctx context.Context, eniID string) error
+ 		NetworkInterfaceId: aws.String(eniID),
+ 	}
+ 
+-	c.limiter.Limit(ctx, "DeleteNetworkInterface")
++	if err := c.limiter.Limit(ctx, "DeleteNetworkInterface"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ec2Client.DeleteNetworkInterface(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("DeleteNetworkInterface", deriveStatus(err), sinceStart.Seconds())
+@@ -527,7 +541,9 @@ func (c *Client) AttachNetworkInterface(ctx context.Context, index int32, instan
+ 		NetworkInterfaceId: aws.String(eniID),
+ 	}
+ 
+-	c.limiter.Limit(ctx, "AttachNetworkInterface")
++	if err := c.limiter.Limit(ctx, "AttachNetworkInterface"); err != nil {
++		return "", err
++	}
+ 	sinceStart := spanstat.Start()
+ 	output, err := c.ec2Client.AttachNetworkInterface(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("AttachNetworkInterface", deriveStatus(err), sinceStart.Seconds())
+@@ -550,7 +566,9 @@ func (c *Client) ModifyNetworkInterface(ctx context.Context, eniID, attachmentID
+ 		NetworkInterfaceId: aws.String(eniID),
+ 	}
+ 
+-	c.limiter.Limit(ctx, "ModifyNetworkInterfaceAttribute")
++	if err := c.limiter.Limit(ctx, "ModifyNetworkInterfaceAttribute"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ec2Client.ModifyNetworkInterfaceAttribute(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("ModifyNetworkInterface", deriveStatus(err), sinceStart.Seconds())
+@@ -565,7 +583,9 @@ func (c *Client) AssignPrivateIpAddresses(ctx context.Context, eniID string, add
+ 		SecondaryPrivateIpAddressCount: aws.Int32(addresses),
+ 	}
+ 
+-	c.limiter.Limit(ctx, "AssignPrivateIpAddresses")
++	if err := c.limiter.Limit(ctx, "AssignPrivateIpAddresses"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ec2Client.AssignPrivateIpAddresses(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("AssignPrivateIpAddresses", deriveStatus(err), sinceStart.Seconds())
+@@ -579,7 +599,9 @@ func (c *Client) UnassignPrivateIpAddresses(ctx context.Context, eniID string, a
+ 		PrivateIpAddresses: addresses,
+ 	}
+ 
+-	c.limiter.Limit(ctx, "UnassignPrivateIpAddresses")
++	if err := c.limiter.Limit(ctx, "UnassignPrivateIpAddresses"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ec2Client.UnassignPrivateIpAddresses(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("UnassignPrivateIpAddresses", deriveStatus(err), sinceStart.Seconds())
+@@ -592,7 +614,9 @@ func (c *Client) AssignENIPrefixes(ctx context.Context, eniID string, prefixes i
+ 		Ipv4PrefixCount:    aws.Int32(prefixes),
+ 	}
+ 
+-	c.limiter.Limit(ctx, "AssignPrivateIpAddresses")
++	if err := c.limiter.Limit(ctx, "AssignPrivateIpAddresses"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ec2Client.AssignPrivateIpAddresses(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("AssignPrivateIpAddresses", deriveStatus(err), sinceStart.Seconds())
+@@ -605,7 +629,9 @@ func (c *Client) UnassignENIPrefixes(ctx context.Context, eniID string, prefixes
+ 		Ipv4Prefixes:       prefixes,
+ 	}
+ 
+-	c.limiter.Limit(ctx, "UnassignPrivateIpAddresses")
++	if err := c.limiter.Limit(ctx, "UnassignPrivateIpAddresses"); err != nil {
++		return err
++	}
+ 	sinceStart := spanstat.Start()
+ 	_, err := c.ec2Client.UnassignPrivateIpAddresses(ctx, input)
+ 	c.metricsAPI.ObserveAPICall("UnassignPrivateIpAddresses", deriveStatus(err), sinceStart.Seconds())
+@@ -629,7 +655,9 @@ func (c *Client) describeSecurityGroups(ctx context.Context) ([]ec2_types.Securi
+ 	var result []ec2_types.SecurityGroup
+ 	paginator := ec2.NewDescribeSecurityGroupsPaginator(c.ec2Client, &ec2.DescribeSecurityGroupsInput{})
+ 	for paginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeSecurityGroups")
++		if err := c.limiter.Limit(ctx, "DescribeSecurityGroups"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := paginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeSecurityGroups", deriveStatus(err), sinceStart.Seconds())
+@@ -675,7 +703,9 @@ func (c *Client) GetInstanceTypes(ctx context.Context) ([]ec2_types.InstanceType
+ 	var result []ec2_types.InstanceTypeInfo
+ 	paginator := ec2.NewDescribeInstanceTypesPaginator(c.ec2Client, &ec2.DescribeInstanceTypesInput{})
+ 	for paginator.HasMorePages() {
+-		c.limiter.Limit(ctx, "DescribeInstanceTypes")
++		if err := c.limiter.Limit(ctx, "DescribeInstanceTypes"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		output, err := paginator.NextPage(ctx)
+ 		c.metricsAPI.ObserveAPICall("DescribeInstanceTypes", deriveStatus(err), sinceStart.Seconds())
+diff --git a/pkg/azure/api/api.go b/pkg/azure/api/api.go
+index 3e43e825e..9b37ae0d2 100644
+--- a/pkg/azure/api/api.go
++++ b/pkg/azure/api/api.go
+@@ -136,7 +136,9 @@ func (c *Client) describeNetworkInterfaces(ctx context.Context) ([]network.Inter
+ func (c *Client) vmNetworkInterfaces(ctx context.Context) ([]network.Interface, error) {
+ 	var networkInterfaces []network.Interface
+ 
+-	c.limiter.Limit(ctx, "Interfaces.ListComplete")
++	if err := c.limiter.Limit(ctx, "Interfaces.ListComplete"); err != nil {
++		return nil, err
++	}
+ 	sinceStart := spanstat.Start()
+ 	result, err := c.interfaces.ListComplete(ctx, c.resourceGroup)
+ 	c.metricsAPI.ObserveAPICall("Interfaces.ListComplete", deriveStatus(err), sinceStart.Seconds())
+@@ -165,7 +167,9 @@ func (c *Client) vmNetworkInterfaces(ctx context.Context) ([]network.Interface,
+ func (c *Client) vmssNetworkInterfaces(ctx context.Context) ([]network.Interface, error) {
+ 	var networkInterfaces []network.Interface
+ 
+-	c.limiter.Limit(ctx, "VirtualMachineScaleSets.ListAll")
++	if err := c.limiter.Limit(ctx, "VirtualMachineScaleSets.ListAll"); err != nil {
++		return nil, err
++	}
+ 	sinceStart := spanstat.Start()
+ 	result, err := c.vmscalesets.ListComplete(ctx, c.resourceGroup)
+ 	c.metricsAPI.ObserveAPICall("VirtualMachineScaleSets.ListAll", deriveStatus(err), sinceStart.Seconds())
+@@ -185,7 +189,9 @@ func (c *Client) vmssNetworkInterfaces(ctx context.Context) ([]network.Interface
+ 			continue
+ 		}
+ 
+-		c.limiter.Limit(ctx, "Interfaces.ListAll")
++		if err := c.limiter.Limit(ctx, "Interfaces.ListAll"); err != nil {
++			return nil, err
++		}
+ 		sinceStart := spanstat.Start()
+ 		result2, err2 := c.interfaces.ListVirtualMachineScaleSetNetworkInterfacesComplete(ctx, c.resourceGroup, *scaleset.Name)
+ 		c.metricsAPI.ObserveAPICall("Interfaces.ListVirtualMachineScaleSetNetworkInterfacesComplete", deriveStatus(err2), sinceStart.Seconds())
+@@ -299,7 +305,9 @@ func (c *Client) GetInstances(ctx context.Context, subnets ipamTypes.SubnetMap)
+ 
+ // describeVpcs lists all VPCs
+ func (c *Client) describeVpcs(ctx context.Context) ([]network.VirtualNetwork, error) {
+-	c.limiter.Limit(ctx, "VirtualNetworks.List")
++	if err := c.limiter.Limit(ctx, "VirtualNetworks.List"); err != nil {
++		return nil, err
++	}
+ 
+ 	sinceStart := spanstat.Start()
+ 	result, err := c.virtualnetworks.ListAllComplete(ctx)
 diff --git a/pkg/datapath/iptables/custom_chain.go b/pkg/datapath/iptables/custom_chain.go
 index 9cd0fce5e..1a93c19ac 100644
 --- a/pkg/datapath/iptables/custom_chain.go
@@ -953,7 +1243,7 @@ index 9cd0fce5e..1a93c19ac 100644
  		name:       ciliumOutputRawChain,
  		table:      "raw",
 diff --git a/pkg/datapath/iptables/iptables.go b/pkg/datapath/iptables/iptables.go
-index 3638eeac8..1d7e92c2d 100644
+index 3638eeac8..c9c2adfed 100644
 --- a/pkg/datapath/iptables/iptables.go
 +++ b/pkg/datapath/iptables/iptables.go
 @@ -38,21 +38,28 @@ import (
@@ -1000,11 +1290,13 @@ index 3638eeac8..1d7e92c2d 100644
  )
  
  // Minimum iptables versions supporting the -w and -w<seconds> flags
-@@ -1239,22 +1246,122 @@ func (m *IptablesManager) installMasqueradeRules(prog iptablesInterface, ifName,
+@@ -1239,23 +1246,89 @@ func (m *IptablesManager) installMasqueradeRules(prog iptablesInterface, ifName,
  	return nil
  }
  
 -func installHuaweiCloudLocalServiceSNATRules(prog iptablesInterface, localDeliveryInterface, nodeIP, routerIP string) error {
+-	rules := [][]string{
+-		{
 +func installHuaweiCloudLocalServiceSNATRules(prog iptablesInterface, localDeliveryInterface, nodeIP, routerIP string, nodePortMin, nodePortMax int) error {
 +	nodePortRange := fmt.Sprintf("%d:%d", nodePortMin, nodePortMax)
 +	const (
@@ -1015,7 +1307,8 @@ index 3638eeac8..1d7e92c2d 100644
 +	// revisions. They were not owned by a replaceable Cilium chain and could
 +	// accumulate across Agent restarts. Delete every duplicate before adding
 +	// the equivalent rules to CILIUM_OUTPUT_mangle below.
-+	for _, protocol := range []string{"tcp", "udp"} {
++	protocols := []string{"tcp", "udp"}
++	for _, protocol := range protocols {
 +		legacyRule := []string{
 +			"-t", "mangle", "-D", "OUTPUT",
 +			"-d", nodeIP,
@@ -1026,110 +1319,79 @@ index 3638eeac8..1d7e92c2d 100644
 +		for prog.runProg(legacyRule) == nil {
 +		}
 +	}
- 	rules := [][]string{
-+		{
++	rules := make([][]string, 0, 11)
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
 +			"-t", "mangle", "-A", ciliumPreMangleChain,
 +			"-i", localDeliveryInterface,
 +			"-d", nodeIP,
-+			"-p", "tcp", "--dport", nodePortRange,
++			"-p", protocol, "--dport", nodePortRange,
 +			"-m", "comment", "--comment", "huaweicloud local pod to local nodeport",
 +			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
-+		},
-+		{
-+			"-t", "mangle", "-A", ciliumPreMangleChain,
-+			"-i", localDeliveryInterface,
-+			"-d", nodeIP,
-+			"-p", "udp", "--dport", nodePortRange,
-+			"-m", "comment", "--comment", "huaweicloud local pod to local nodeport",
-+			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
-+		},
-+		{
-+			"-t", "nat", "-A", ciliumPostNatChain,
-+			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
-+			"!", "-o", localDeliveryInterface,
-+			"-m", "comment", "--comment", "huaweicloud preserve local pod source for remote nodeport backend",
-+			"-j", "MARK", "--set-xmark", "0/" + kubeProxyMasqueradeMask,
-+		},
-+		{
++		})
++	}
++	rules = append(rules, []string{
++		"-t", "nat", "-A", ciliumPostNatChain,
++		"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
++		"!", "-o", localDeliveryInterface,
++		"-m", "comment", "--comment", "huaweicloud preserve local pod source for remote nodeport backend",
++		"-j", "MARK", "--set-xmark", "0/" + kubeProxyMasqueradeMask,
++	})
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
 +			"-t", "mangle", "-A", ciliumOutputMangleChain,
 +			"-d", nodeIP,
-+			"-p", "tcp", "--dport", nodePortRange,
++			"-p", protocol, "--dport", nodePortRange,
 +			"-m", "comment", "--comment", "CILIUM_HUAWEICLOUD host to local nodeport",
 +			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
-+		},
-+		{
-+			"-t", "mangle", "-A", ciliumOutputMangleChain,
-+			"-d", nodeIP,
-+			"-p", "udp", "--dport", nodePortRange,
-+			"-m", "comment", "--comment", "CILIUM_HUAWEICLOUD host to local nodeport",
-+			"-j", "CONNMARK", "--set-xmark", huaweiCloudLocalNodePortConnmark,
-+		},
-+		{
-+			"-t", "nat", "-A", ciliumPostNatChain,
-+			"-p", "tcp",
-+			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
-+			"-m", "mark", "--mark", kubeProxyMasqueradeMark,
-+			"-o", localDeliveryInterface,
-+			"-m", "comment", "--comment", "huaweicloud local nodeport hairpin SNAT",
-+			"-j", "SNAT", "--to-source", defaults.LoopbackIPv4 + ":" + nodePortSNATRange, "--random-fully",
-+		},
- 		{
++		})
++	}
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
  			"-t", "nat", "-A", ciliumPostNatChain,
 -			"-m", "mark", "--mark", "0x4000/0x4000",
-+			"-p", "udp",
++			"-p", protocol,
 +			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
 +			"-m", "mark", "--mark", kubeProxyMasqueradeMark,
  			"-o", localDeliveryInterface,
 -			"-m", "comment", "--comment", "huaweicloud local service hairpin SNAT",
 -			"-j", "SNAT", "--to-source", routerIP,
+-		},
+-		{
 +			"-m", "comment", "--comment", "huaweicloud local nodeport hairpin SNAT",
 +			"-j", "SNAT", "--to-source", defaults.LoopbackIPv4 + ":" + nodePortSNATRange, "--random-fully",
-+		},
-+		{
++		})
++	}
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
 +			"-t", "nat", "-A", ciliumPostNatChain,
-+			"-p", "tcp",
++			"-p", protocol,
 +			"-s", nodeIP,
 +			"-o", localDeliveryInterface,
 +			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
 +			"-m", "conntrack", "--ctstate", "DNAT",
 +			"-m", "comment", "--comment", "huaweicloud host local nodeport SNAT",
 +			"-j", "SNAT", "--to-source", routerIP + ":" + nodePortSNATRange, "--random-fully",
-+		},
-+		{
-+			"-t", "nat", "-A", ciliumPostNatChain,
-+			"-p", "udp",
-+			"-s", nodeIP,
-+			"-o", localDeliveryInterface,
-+			"-m", "connmark", "--mark", huaweiCloudLocalNodePortConnmark,
-+			"-m", "conntrack", "--ctstate", "DNAT",
-+			"-m", "comment", "--comment", "huaweicloud host local nodeport SNAT",
-+			"-j", "SNAT", "--to-source", routerIP + ":" + nodePortSNATRange, "--random-fully",
-+		},
-+		{
-+			"-t", "nat", "-A", ciliumPostNatChain,
-+			"-p", "tcp",
-+			"-s", nodeIP,
-+			"-o", localDeliveryInterface,
-+			"-m", "connmark", "!", "--mark", huaweiCloudLocalNodePortConnmark,
-+			"-m", "conntrack", "--ctstate", "DNAT",
-+			"-m", "comment", "--comment", "huaweicloud host local clusterip SNAT",
-+			"-j", "SNAT", "--to-source", routerIP + ":" + clusterIPSNATRange, "--random-fully",
- 		},
- 		{
++		})
++	}
++	for _, protocol := range protocols {
++		rules = append(rules, []string{
  			"-t", "nat", "-A", ciliumPostNatChain,
-+			"-p", "udp",
++			"-p", protocol,
  			"-s", nodeIP,
  			"-o", localDeliveryInterface,
 +			"-m", "connmark", "!", "--mark", huaweiCloudLocalNodePortConnmark,
  			"-m", "conntrack", "--ctstate", "DNAT",
 -			"-m", "comment", "--comment", "huaweicloud host local service SNAT",
 -			"-j", "SNAT", "--to-source", routerIP,
+-		},
 +			"-m", "comment", "--comment", "huaweicloud host local clusterip SNAT",
 +			"-j", "SNAT", "--to-source", routerIP + ":" + clusterIPSNATRange, "--random-fully",
- 		},
++		})
  	}
  	for _, rule := range rules {
-@@ -1451,7 +1558,8 @@ func (m *IptablesManager) installRules(ifName string) error {
+ 		if err := prog.runProg(rule); err != nil {
+@@ -1451,7 +1524,8 @@ func (m *IptablesManager) installRules(ifName string) error {
  		}
  		if option.Config.IPAM == ipamOption.IPAMHuaweiCloud {
  			if err := installHuaweiCloudLocalServiceSNATRules(ip4tables, localDeliveryInterface,
@@ -2163,17 +2425,19 @@ index f4f81a673..123ca1323 100644
  	ipWithMask := &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
  	rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{
 diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
-index f357fafe7..30e99167d 100644
+index f357fafe7..ced7ce18a 100644
 --- a/pkg/endpointmanager/huaweicloud_subeni.go
 +++ b/pkg/endpointmanager/huaweicloud_subeni.go
-@@ -4,14 +4,19 @@
+@@ -4,14 +4,21 @@
  package endpointmanager
  
  import (
 +	"bytes"
  	"context"
++	"errors"
  	"fmt"
  	"net"
++	"reflect"
 +	"strconv"
 +	"sync"
 +	"time"
@@ -2186,7 +2450,7 @@ index f357fafe7..30e99167d 100644
  	"github.com/cilium/cilium/pkg/endpoint"
  	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
  	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
-@@ -19,6 +24,7 @@ import (
+@@ -19,6 +26,7 @@ import (
  	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
  	"github.com/cilium/cilium/pkg/logging"
  	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -2194,7 +2458,7 @@ index f357fafe7..30e99167d 100644
  	nodeTypes "github.com/cilium/cilium/pkg/node/types"
  	"github.com/cilium/cilium/pkg/option"
  )
-@@ -26,16 +32,41 @@ import (
+@@ -26,16 +34,45 @@ import (
  var huaweiCloudSubENILog = logging.DefaultLogger.WithField(logfields.LogSubsys, "endpointmanager-huaweicloud-subeni")
  
  type subENIMapUpdater interface {
@@ -2217,12 +2481,16 @@ index f357fafe7..30e99167d 100644
 +	cacheMutex    sync.RWMutex
 +	cache         map[string]subenimap.EndpointInfo
 +	routerRouting func() (*linuxrouting.RoutingInfo, net.IP)
++	getCiliumNode func(context.Context) (*ciliumv2.CiliumNode, error)
 +	reconcileStop chan struct{}
 +	reconcileDone chan struct{}
 +	stopOnce      sync.Once
  }
  
-+const huaweiCloudRouteReconcileInterval = 5 * time.Second
++const (
++	huaweiCloudRouteReconcileInterval = 5 * time.Second
++	huaweiCloudCiliumNodeGetTimeout   = 10 * time.Second
++)
 +
 +type pendingSubENIEvent struct {
 +	kind uint8
@@ -2238,7 +2506,7 @@ index f357fafe7..30e99167d 100644
  type subENIEndpoint interface {
  	GetIPv4Address() string
  	GetID() uint64
-@@ -69,35 +100,118 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
+@@ -69,35 +106,123 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
  		return nil, fmt.Errorf("create HuaweiCloud SubENI map manager: %w", err)
  	}
  
@@ -2251,34 +2519,40 @@ index f357fafe7..30e99167d 100644
 +			routingInfo, _ := node.GetRouterInfo().(*linuxrouting.RoutingInfo)
 +			return routingInfo, node.GetInternalIPv4Router()
 +		},
++		getCiliumNode: func(ctx context.Context) (*ciliumv2.CiliumNode, error) {
++			return k8s.CiliumClient().CiliumV2().CiliumNodes().Get(ctx, nodeTypes.GetName(), metav1.GetOptions{})
++		},
 +	}
  	mgr.Subscribe(subscriber)
+-	for _, ep := range mgr.GetEndpoints() {
+-		subscriber.upsertEndpoint(ep, "initial-sync")
 +	cleanupOnError := func(err error) (func(), error) {
 +		mgr.Unsubscribe(subscriber)
 +		mapMgr.Close()
 +		return nil, err
 +	}
++	endpoints := mgr.GetEndpoints()
++	initialEndpoints := make([]subENIEndpoint, 0, len(endpoints))
++	for _, ep := range endpoints {
++		initialEndpoints = append(initialEndpoints, ep)
+ 	}
++	initialInfos, err := subscriber.resolveInitialEndpointInfos(initialEndpoints)
++	if err != nil {
++		return cleanupOnError(err)
++	}
 +	var desired []subenimap.EndpointInfo
- 	for _, ep := range mgr.GetEndpoints() {
--		subscriber.upsertEndpoint(ep, "initial-sync")
-+		info, err := subscriber.resolveEndpointInfo(ep)
-+		if err != nil {
-+			return cleanupOnError(fmt.Errorf("resolve initial HuaweiCloud endpoint %d: %w", ep.GetID(), err))
-+		}
-+		if info == nil {
-+			continue
-+		}
++	for _, info := range initialInfos {
 +		if err := subscriber.ensureGatewayNeighbor(info); err != nil {
-+			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud gateway neighbor for endpoint %d: %w", ep.GetID(), err))
++			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud gateway neighbor for endpoint %d: %w", info.id, err))
 +		}
 +		if err := subscriber.ensureEndpointRouting(info); err != nil {
-+			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud endpoint routing for endpoint %d: %w", ep.GetID(), err))
++			return cleanupOnError(fmt.Errorf("install initial HuaweiCloud endpoint routing for endpoint %d: %w", info.id, err))
 +		}
 +		desired = append(desired, info)
 +	}
 +	if err := mapMgr.Reconcile(desired); err != nil {
 +		return cleanupOnError(fmt.Errorf("reconcile initial HuaweiCloud SubENI maps: %w", err))
- 	}
++	}
 +	for _, info := range desired {
 +		subscriber.cacheEndpointInfo(info)
 +	}
@@ -2365,7 +2639,7 @@ index f357fafe7..30e99167d 100644
  	if info == nil {
  		return
  	}
-@@ -106,7 +220,9 @@ func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ e
+@@ -106,7 +231,9 @@ func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ e
  			logfields.EndpointID: ep.GetID(),
  			logfields.IPv4:       ep.GetIPv4Address(),
  		}).Warn("Failed to delete HuaweiCloud SubENI BPF map entries")
@@ -2375,7 +2649,7 @@ index f357fafe7..30e99167d 100644
  }
  
  func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
-@@ -122,20 +238,180 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reas
+@@ -122,41 +249,262 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reas
  	if info == nil {
  		return
  	}
@@ -2416,7 +2690,7 @@ index f357fafe7..30e99167d 100644
  			"reason":             reason,
  		}).Warn("Failed to upsert HuaweiCloud SubENI BPF map entries")
 +		return
-+	}
+ 	}
 +	s.cacheEndpointInfo(info)
 +}
 +
@@ -2431,7 +2705,7 @@ index f357fafe7..30e99167d 100644
 +func (s *huaweiCloudSubENISubscriber) configureEndpointRouting(info *huaweiCloudEndpointInfo, reconcile bool) error {
 +	if info == nil || info.gatewayIP == nil || info.trunkInterface == "" {
 +		return nil
- 	}
++	}
 +	link, err := netlink.LinkByName(info.trunkInterface)
 +	if err != nil {
 +		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
@@ -2557,10 +2831,76 @@ index f357fafe7..30e99167d 100644
 +	s.cacheMutex.Lock()
 +	delete(s.cache, endpointInfoCacheKey(uint32(ep.GetID()), ep.GetIPv4Address())) //nolint:gosec // endpoint IDs are validated before caching
 +	s.cacheMutex.Unlock()
++}
++
++func endpointCanResolveSubENI(ep subENIEndpoint) bool {
++	if ep == nil {
++		return false
++	}
++	v := reflect.ValueOf(ep)
++	if v.Kind() == reflect.Ptr && v.IsNil() {
++		return false
++	}
++	return ep.GetIfIndex() != 0 && ep.GetID() != 0 && ep.GetIPv4Address() != ""
++}
++
++func (s *huaweiCloudSubENISubscriber) getLocalCiliumNode() (*ciliumv2.CiliumNode, error) {
++	if s.getCiliumNode == nil {
++		return nil, errors.New("CiliumNode getter is not configured")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), huaweiCloudCiliumNodeGetTimeout)
++	defer cancel()
++	cn, err := s.getCiliumNode(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("get CiliumNode %s: %w", nodeTypes.GetName(), err)
++	}
++	if cn == nil {
++		return nil, fmt.Errorf("get CiliumNode %s: returned nil without an error", nodeTypes.GetName())
++	}
++	return cn, nil
++}
++
++func (s *huaweiCloudSubENISubscriber) resolveInitialEndpointInfos(endpoints []subENIEndpoint) ([]*huaweiCloudEndpointInfo, error) {
++	var (
++		cn     *ciliumv2.CiliumNode
++		result []*huaweiCloudEndpointInfo
++	)
++	for _, ep := range endpoints {
++		if !endpointCanResolveSubENI(ep) {
++			continue
++		}
++		if cn == nil {
++			var err error
++			cn, err = s.getLocalCiliumNode()
++			if err != nil {
++				return nil, fmt.Errorf("resolve initial HuaweiCloud endpoints: %w", err)
++			}
++		}
++		info, err := subENIInfoForEndpoint(cn, ep)
++		if err != nil {
++			return nil, fmt.Errorf("resolve initial HuaweiCloud endpoint %d: %w", ep.GetID(), err)
++		}
++		if info != nil {
++			result = append(result, info)
++		}
++	}
++	return result, nil
  }
  
  func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint) (*huaweiCloudEndpointInfo, error) {
-@@ -152,11 +428,18 @@ func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint)
+-	if ep == nil || ep.GetIfIndex() == 0 || ep.GetID() == 0 || ep.GetIPv4Address() == "" {
++	if !endpointCanResolveSubENI(ep) {
+ 		return nil, nil
+ 	}
+ 
+-	cn, err := k8s.CiliumClient().CiliumV2().CiliumNodes().Get(context.Background(), nodeTypes.GetName(), metav1.GetOptions{})
++	cn, err := s.getLocalCiliumNode()
+ 	if err != nil {
+-		return nil, fmt.Errorf("get CiliumNode %s: %w", nodeTypes.GetName(), err)
++		return nil, err
+ 	}
+ 
+ 	return subENIInfoForEndpoint(cn, ep)
  }
  
  func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiCloudEndpointInfo, error) {
@@ -2580,7 +2920,7 @@ index f357fafe7..30e99167d 100644
  	for _, subENI := range cn.Status.HuaweiCloud.SubENIs {
  		if subENI.PrivateIPAddress != ipv4 {
  			continue
-@@ -166,6 +449,9 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
+@@ -166,6 +514,9 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
  		if err != nil {
  			return nil, fmt.Errorf("parse HuaweiCloud SubENI MAC %q for %s: %w", subENI.MACAddress, ipv4, err)
  		}
@@ -2590,7 +2930,7 @@ index f357fafe7..30e99167d 100644
  		var macArr [6]byte
  		copy(macArr[:], parsedMAC)
  
-@@ -177,8 +463,17 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
+@@ -177,8 +528,17 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
  		if err != nil {
  			return nil, fmt.Errorf("parse HuaweiCloud gateway IP %q for %s: %w", subENI.GatewayIP, ipv4, err)
  		}
@@ -2609,7 +2949,7 @@ index f357fafe7..30e99167d 100644
  			ipv4:           ipv4,
  			id:             uint32(ep.GetID()),
  			ifIndex:        uint32(ep.GetIfIndex()),
-@@ -187,10 +482,10 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
+@@ -187,10 +547,10 @@ func subENIInfoForEndpoint(cn *ciliumv2.CiliumNode, ep subENIEndpoint) (*huaweiC
  			gatewayIP:      gatewayIP,
  			gatewayMAC:     gatewayMAC,
  			trunkInterface: subENI.TrunkInterface,
@@ -2622,7 +2962,7 @@ index f357fafe7..30e99167d 100644
  }
  
  func parseOptionalMAC(raw string) (net.HardwareAddr, error) {
-@@ -221,6 +516,24 @@ func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEnd
+@@ -221,6 +581,24 @@ func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEnd
  		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
  	}
  
@@ -2947,16 +3287,17 @@ index 000000000..e4c8fe62b
 +}
 diff --git a/pkg/endpointmanager/huaweicloud_subeni_test.go b/pkg/endpointmanager/huaweicloud_subeni_test.go
 new file mode 100644
-index 000000000..d082ba0b4
+index 000000000..36ef666bb
 --- /dev/null
 +++ b/pkg/endpointmanager/huaweicloud_subeni_test.go
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,255 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
 +package endpointmanager
 +
 +import (
++	"context"
 +	"errors"
 +	"net"
 +	"strings"
@@ -3056,6 +3397,39 @@ index 000000000..d082ba0b4
 +	second.VlanID = 200
 +	if _, err := subENIInfoForEndpoint(testCiliumNode(map[string]eniTypes.SubENI{"a": first, "b": second}), ep); err == nil {
 +		t.Fatal("duplicate private-IP matches were accepted")
++	}
++}
++
++func TestResolveInitialEndpointInfosFetchesCiliumNodeOnce(t *testing.T) {
++	first := validSubENI()
++	second := first
++	second.ID = "eni-2"
++	second.PrivateIPAddress = "10.0.0.3"
++	second.VlanID = 101
++	cn := testCiliumNode(map[string]eniTypes.SubENI{"eni-1": first, "eni-2": second})
++	getCalls := 0
++	subscriber := &huaweiCloudSubENISubscriber{
++		getCiliumNode: func(ctx context.Context) (*ciliumv2.CiliumNode, error) {
++			getCalls++
++			deadline, ok := ctx.Deadline()
++			if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > huaweiCloudCiliumNodeGetTimeout {
++				t.Fatalf("CiliumNode GET context has invalid deadline: %v, %v", deadline, ok)
++			}
++			return cn, nil
++		},
++	}
++	infos, err := subscriber.resolveInitialEndpointInfos([]subENIEndpoint{
++		testSubENIEndpoint{ip: first.PrivateIPAddress, id: 1, ifindex: 2},
++		testSubENIEndpoint{ip: second.PrivateIPAddress, id: 2, ifindex: 3},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(infos) != 2 {
++		t.Fatalf("resolved infos=%d, want 2", len(infos))
++	}
++	if getCalls != 1 {
++		t.Fatalf("CiliumNode GET calls=%d, want 1", getCalls)
 +	}
 +}
 +
@@ -3173,7 +3547,7 @@ index 000000000..d082ba0b4
 +	}
 +}
 diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
-index ffc692a0f..5c7e98342 100644
+index ffc692a0f..b9ed4f0ef 100644
 --- a/pkg/huaweicloud/api/api.go
 +++ b/pkg/huaweicloud/api/api.go
 @@ -4,16 +4,23 @@
@@ -3579,28 +3953,29 @@ index ffc692a0f..5c7e98342 100644
  	}
  	return cause
  }
-@@ -207,6 +461,9 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
+@@ -207,15 +461,16 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
  	if len(tags) == 0 {
  		return nil
  	}
+-	resourceTags := make([]vpcmodel.ResourceTag, 0, len(tags))
+-	for key, value := range tags {
+-		resourceTags = append(resourceTags, vpcmodel.ResourceTag{Key: key, Value: value})
 +	if err := validateResourceTags(tags); err != nil {
 +		return err
-+	}
- 	resourceTags := make([]vpcmodel.ResourceTag, 0, len(tags))
- 	for key, value := range tags {
- 		resourceTags = append(resourceTags, vpcmodel.ResourceTag{Key: key, Value: value})
-@@ -215,7 +472,9 @@ func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, ta
- 		PortId: subENIID,
- 		Body:   &vpcmodel.BatchCreatePortTagsRequestBody{Tags: resourceTags},
  	}
--	c.limiter.Limit(ctx, "BatchCreatePortTags")
+ 	request := &vpcmodel.BatchCreatePortTagsRequest{
+ 		PortId: subENIID,
+-		Body:   &vpcmodel.BatchCreatePortTagsRequestBody{Tags: resourceTags},
++		Body:   &vpcmodel.BatchCreatePortTagsRequestBody{Tags: resourceTags(tags)},
++	}
 +	if err := c.limiter.Limit(ctx, "BatchCreatePortTags"); err != nil {
 +		return err
-+	}
+ 	}
+-	c.limiter.Limit(ctx, "BatchCreatePortTags")
  	_, err := c.vpcClient.BatchCreatePortTags(request)
  	return normalizeAPIError(err)
  }
-@@ -225,7 +484,9 @@ func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string)
+@@ -225,7 +480,9 @@ func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string)
  		return err
  	}
  	request := &vpcmodel.DeleteSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
@@ -3611,7 +3986,7 @@ index ffc692a0f..5c7e98342 100644
  	_, err := c.vpcClient.DeleteSubNetworkInterface(request)
  	return normalizeAPIError(err)
  }
-@@ -235,7 +496,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
+@@ -235,7 +492,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
  		return nil, err
  	}
  	request := &vpcmodel.ShowSubNetworkInterfaceRequest{SubNetworkInterfaceId: subENIID}
@@ -3622,7 +3997,7 @@ index ffc692a0f..5c7e98342 100644
  	response, err := c.vpcClient.ShowSubNetworkInterface(request)
  	if err != nil {
  		return nil, normalizeAPIError(err)
-@@ -244,6 +507,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
+@@ -244,6 +503,9 @@ func (c *Client) GetSubNetworkInterface(ctx context.Context, subENIID string) (*
  		return nil, fmt.Errorf("sub-eni %s not found", subENIID)
  	}
  	subENI := parseSubENI(response.SubNetworkInterface)
@@ -3632,7 +4007,7 @@ index ffc692a0f..5c7e98342 100644
  	if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
  		return nil, err
  	}
-@@ -262,6 +528,9 @@ func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string)
+@@ -262,6 +524,9 @@ func (c *Client) ListSubNetworkInterfaces(ctx context.Context, parentID string)
  	result := make([]*eniTypes.SubENI, 0, len(items))
  	for _, item := range items {
  		subENI := parseSubENI(&item)
@@ -3642,7 +4017,7 @@ index ffc692a0f..5c7e98342 100644
  		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
  			return nil, err
  		}
-@@ -278,11 +547,14 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
+@@ -278,11 +543,14 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
  		request.ParentId = &parentIDs
  	}
  	var result []vpcmodel.SubNetworkInterface
@@ -3658,7 +4033,7 @@ index ffc692a0f..5c7e98342 100644
  		response, err := c.vpcClient.ListSubNetworkInterfaces(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -290,8 +562,12 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
+@@ -290,8 +558,12 @@ func (c *Client) listSubNetworkInterfaces(ctx context.Context, parentIDs []strin
  		if response.SubNetworkInterfaces != nil {
  			result = append(result, (*response.SubNetworkInterfaces)...)
  		}
@@ -3673,7 +4048,7 @@ index ffc692a0f..5c7e98342 100644
  			return result, nil
  		}
  	}
-@@ -304,11 +580,25 @@ func nextMarker(pageInfo *vpcmodel.PageInfo) *string {
+@@ -304,11 +576,25 @@ func nextMarker(pageInfo *vpcmodel.PageInfo) *string {
  	return pageInfo.NextMarker
  }
  
@@ -3700,7 +4075,7 @@ index ffc692a0f..5c7e98342 100644
  	response, err := c.vpcClient.ShowPort(&vpcmodel.ShowPortRequest{PortId: portID})
  	if err != nil {
  		return nil, normalizeAPIError(err)
-@@ -320,8 +610,11 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
+@@ -320,8 +606,11 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
  }
  
  func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
@@ -3714,7 +4089,7 @@ index ffc692a0f..5c7e98342 100644
  	}
  	if subENI.GatewayIP == "" || subENI.SubnetCIDR == "" {
  		gatewayIP, subnetCIDR, err := c.resolveSubENISubnetMetadata(ctx, subENI.SubnetID, subENI.PrivateIPAddress, cachedSubnets)
-@@ -348,16 +641,27 @@ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.Sub
+@@ -348,16 +637,27 @@ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.Sub
  		VirsubnetId: &virsubnetIDs,
  	}
  
@@ -3745,7 +4120,7 @@ index ffc692a0f..5c7e98342 100644
  	return nil
  }
  
-@@ -379,17 +683,19 @@ func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, priv
+@@ -379,17 +679,19 @@ func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, priv
  	ids := []string{subnetID}
  	request := &vpcmodel.ListVirsubnetsRequest{Limit: &limit, Id: &ids}
  
@@ -3769,7 +4144,7 @@ index ffc692a0f..5c7e98342 100644
  }
  
  func belongsToCIDR(ipStr, cidrStr string) bool {
-@@ -404,23 +710,38 @@ func belongsToCIDR(ipStr, cidrStr string) bool {
+@@ -404,23 +706,38 @@ func belongsToCIDR(ipStr, cidrStr string) bool {
  	return prefix.Contains(ip)
  }
  
@@ -3814,7 +4189,7 @@ index ffc692a0f..5c7e98342 100644
  }
  
  func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error) {
-@@ -428,7 +749,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
+@@ -428,7 +745,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
  		return nil, err
  	}
  	request := &ecsmodel.ShowServerRequest{ServerId: instanceID}
@@ -3825,7 +4200,7 @@ index ffc692a0f..5c7e98342 100644
  	serverResp, err := c.ecsClient.ShowServer(request)
  	if err != nil {
  		return nil, normalizeAPIError(err)
-@@ -450,6 +773,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
+@@ -450,6 +769,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
  	}
  	for _, item := range items {
  		subENI := parseSubENI(&item)
@@ -3835,7 +4210,7 @@ index ffc692a0f..5c7e98342 100644
  		if err := c.fillSubENIGatewayInfo(ctx, subENI, nil); err != nil {
  			return nil, err
  		}
-@@ -468,7 +794,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
+@@ -468,7 +790,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
  	}
  
  	serverReq := &ecsmodel.ShowServerRequest{ServerId: instanceID}
@@ -3846,7 +4221,7 @@ index ffc692a0f..5c7e98342 100644
  	serverResp, err := c.ecsClient.ShowServer(serverReq)
  	if err != nil {
  		return ipamTypes.Limits{}, normalizeAPIError(err)
-@@ -480,7 +808,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
+@@ -480,7 +804,9 @@ func (c *Client) GetInstanceLimits(ctx context.Context, instanceID string) (ipam
  	}
  
  	flavorsReq := &ecsmodel.ListFlavorsRequest{FlavorId: &flavorID}
@@ -3857,7 +4232,7 @@ index ffc692a0f..5c7e98342 100644
  	flavorsResp, err := c.ecsClient.ListFlavors(flavorsReq)
  	if err != nil {
  		return ipamTypes.Limits{}, normalizeAPIError(err)
-@@ -522,8 +852,8 @@ func subENILimitFromFlavors(flavors *[]ecsmodel.Flavor, flavorID string) (int, e
+@@ -522,8 +848,8 @@ func subENILimitFromFlavors(flavors *[]ecsmodel.Flavor, flavorID string) (int, e
  		if err != nil {
  			return 0, fmt.Errorf("parse sub network interface limit for flavor %s: %w", flavorID, err)
  		}
@@ -3868,7 +4243,7 @@ index ffc692a0f..5c7e98342 100644
  		}
  
  		return limit, nil
-@@ -559,6 +889,9 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+@@ -559,6 +885,9 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
  	instances := ipamTypes.NewInstanceMap()
  	for _, item := range items {
  		subENI := parseSubENI(&item)
@@ -3878,7 +4253,7 @@ index ffc692a0f..5c7e98342 100644
  		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets); err != nil {
  			return nil, err
  		}
-@@ -579,11 +912,14 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
+@@ -579,11 +908,14 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
  	limit := int32(1000)
  	request := &ecsmodel.ListServersDetailsRequest{Limit: &limit}
  	var result []ecsmodel.ServerDetail
@@ -3894,7 +4269,7 @@ index ffc692a0f..5c7e98342 100644
  		response, err := c.ecsClient.ListServersDetails(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -592,10 +928,20 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
+@@ -592,10 +924,20 @@ func (c *Client) listServers(ctx context.Context) ([]ecsmodel.ServerDetail, erro
  			return result, nil
  		}
  		result = append(result, (*response.Servers)...)
@@ -3915,7 +4290,7 @@ index ffc692a0f..5c7e98342 100644
  		request.Marker = &marker
  	}
  }
-@@ -617,8 +963,14 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+@@ -617,8 +959,14 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
  	}
  
  	result := ipamTypes.SubnetMap{}
@@ -3931,7 +4306,7 @@ index ffc692a0f..5c7e98342 100644
  		response, err := c.vpcClient.ListVirsubnets(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -636,8 +988,12 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
+@@ -636,8 +984,12 @@ func (c *Client) GetSubnets(ctx context.Context, vpcID string) (ipamTypes.Subnet
  				result[item.Id] = subnet
  			}
  		}
@@ -3946,7 +4321,7 @@ index ffc692a0f..5c7e98342 100644
  			return result, nil
  		}
  	}
-@@ -648,7 +1004,10 @@ func newIPAMSubnet(item vpcmodel.Virsubnet, availableAddresses int) (*ipamTypes.
+@@ -648,7 +1000,10 @@ func newIPAMSubnet(item vpcmodel.Virsubnet, availableAddresses int) (*ipamTypes.
  		return nil, fmt.Errorf("invalid available address count %d for subnet %s", availableAddresses, item.Id)
  	}
  
@@ -3958,7 +4333,7 @@ index ffc692a0f..5c7e98342 100644
  	subnet := &ipamTypes.Subnet{
  		ID:                 item.Id,
  		Name:               item.Name,
-@@ -673,8 +1032,14 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
+@@ -673,8 +1028,14 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
  	request.Limit = &limit
  
  	result := ipamTypes.VirtualNetworkMap{}
@@ -3974,7 +4349,7 @@ index ffc692a0f..5c7e98342 100644
  		response, err := c.vpcClient.ListVpcs(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -684,8 +1049,12 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
+@@ -684,8 +1045,12 @@ func (c *Client) GetVPCs(ctx context.Context) (ipamTypes.VirtualNetworkMap, erro
  				result[item.Id] = &ipamTypes.VirtualNetwork{ID: item.Id, PrimaryCIDR: item.Cidr, CIDRs: append([]string(nil), item.ExtendCidrs...)}
  			}
  		}
@@ -3989,7 +4364,7 @@ index ffc692a0f..5c7e98342 100644
  			return result, nil
  		}
  	}
-@@ -700,8 +1069,14 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
+@@ -700,8 +1065,14 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
  	request.Limit = &limit
  
  	result := hwTypes.SecurityGroupMap{}
@@ -4005,7 +4380,7 @@ index ffc692a0f..5c7e98342 100644
  		response, err := c.vpcClient.ListSecurityGroups(request)
  		if err != nil {
  			return nil, normalizeAPIError(err)
-@@ -711,41 +1086,86 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
+@@ -711,41 +1082,86 @@ func (c *Client) GetSecurityGroups(ctx context.Context, vpcID string) (hwTypes.S
  				result[item.Id] = &hwTypes.SecurityGroup{ID: item.Id, VPCID: vpcID, Tags: parseResourceTags(item.Tags)}
  			}
  		}
@@ -4106,7 +4481,7 @@ index ffc692a0f..5c7e98342 100644
  		return nil
 diff --git a/pkg/huaweicloud/api/api_boundary_test.go b/pkg/huaweicloud/api/api_boundary_test.go
 new file mode 100644
-index 000000000..f639c5c5c
+index 000000000..61c733f51
 --- /dev/null
 +++ b/pkg/huaweicloud/api/api_boundary_test.go
 @@ -0,0 +1,818 @@
@@ -4212,9 +4587,9 @@ index 000000000..f639c5c5c
 +}
 +
 +func TestCreateSubNetworkInterfaceHTTPTimeout(t *testing.T) {
-+	var requests atomic.Int32
++	var requests int32
 +	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-+		requests.Add(1)
++		atomic.AddInt32(&requests, 1)
 +		time.Sleep(200 * time.Millisecond)
 +		w.Header().Set("Content-Type", "application/json")
 +		_, _ = fmt.Fprint(w, `{"sub_network_interface":{"id":"eni-late"}}`)
@@ -4236,8 +4611,8 @@ index 000000000..f639c5c5c
 +	if id != "" || item != nil {
 +		t.Fatalf("timed-out create returned success data: id=%q item=%#v", id, item)
 +	}
-+	if requests.Load() != 1 {
-+		t.Fatalf("timed-out create was retried unexpectedly: requests=%d", requests.Load())
++	if got := atomic.LoadInt32(&requests); got != 1 {
++		t.Fatalf("timed-out create was retried unexpectedly: requests=%d", got)
 +	}
 +}
 +
@@ -5379,10 +5754,38 @@ index 7b9c65f4e..f52a55ac9 100644
 +	}
 +}
 diff --git a/pkg/huaweicloud/eni/instances.go b/pkg/huaweicloud/eni/instances.go
-index a60a02a64..fe30ba647 100644
+index a60a02a64..47a7a708f 100644
 --- a/pkg/huaweicloud/eni/instances.go
 +++ b/pkg/huaweicloud/eni/instances.go
-@@ -191,12 +191,26 @@ func (m *InstancesManager) ForeachInstance(instanceID string, fn ipamTypes.Inter
+@@ -20,6 +20,18 @@ import (
+ 
+ var _ ipam.AllocationImplementation = (*InstancesManager)(nil)
+ 
++type cloudAPI interface {
++	BatchCreateSubNetworkInterfaces(context.Context, int, hwAPI.CreateSubENIRequest) ([]*eniTypes.SubENI, error)
++	DeleteSubNetworkInterface(context.Context, string) error
++	GetPortSecurityGroups(context.Context, string) ([]string, error)
++	GetInstance(context.Context, string) (*ipamTypes.Instance, error)
++	GetInstanceLimits(context.Context, string) (ipamTypes.Limits, error)
++	GetInstances(context.Context, ipamTypes.VirtualNetworkMap, ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error)
++	GetSubnets(context.Context, string) (ipamTypes.SubnetMap, error)
++	GetVPCs(context.Context) (ipamTypes.VirtualNetworkMap, error)
++	GetSecurityGroups(context.Context, string) (hwTypes.SecurityGroupMap, error)
++}
++
+ type InstancesManager struct {
+ 	logger         *logrus.Entry
+ 	mutex          lock.RWMutex
+@@ -28,7 +40,7 @@ type InstancesManager struct {
+ 	subnets        ipamTypes.SubnetMap
+ 	vpcs           ipamTypes.VirtualNetworkMap
+ 	securityGroups hwTypes.SecurityGroupMap
+-	api            hwAPI.HuaweiCloudAPI
++	api            cloudAPI
+ 	vpcID          string
+ 	subENITags     map[string]string
+ }
+@@ -191,12 +203,26 @@ func (m *InstancesManager) ForeachInstance(instanceID string, fn ipamTypes.Inter
  }
  
  func (m *InstancesManager) UpdateSubENI(instanceID string, subENI *eniTypes.SubENI) {
@@ -5409,7 +5812,7 @@ index a60a02a64..fe30ba647 100644
  	if len(spec.Subnets) > 0 {
  		return m.findSubnetByIDs(spec, toAllocate)
  	}
-@@ -215,7 +229,8 @@ func (m *InstancesManager) FindOneSubnet(spec eniTypes.Spec, toAllocate int) *ip
+@@ -215,7 +241,8 @@ func (m *InstancesManager) FindOneSubnet(spec eniTypes.Spec, toAllocate int) *ip
  		if len(spec.SubnetTags) > 0 && !subnet.Tags.Match(spec.SubnetTags) {
  			continue
  		}
@@ -5419,7 +5822,7 @@ index a60a02a64..fe30ba647 100644
  			bestSubnet = subnet
  		}
  	}
-@@ -227,25 +242,20 @@ func (m *InstancesManager) findSubnetByIDs(spec eniTypes.Spec, toAllocate int) *
+@@ -227,25 +254,20 @@ func (m *InstancesManager) findSubnetByIDs(spec eniTypes.Spec, toAllocate int) *
  	m.mutex.RLock()
  	defer m.mutex.RUnlock()
  
@@ -5453,7 +5856,7 @@ index a60a02a64..fe30ba647 100644
  
  func (m *InstancesManager) FindSecurityGroupByTags(vpcID string, required ipamTypes.Tags) []*hwTypes.SecurityGroup {
 diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
-index c27c81bb0..98ccc0ce2 100644
+index c27c81bb0..6050742c6 100644
 --- a/pkg/huaweicloud/eni/instances_test.go
 +++ b/pkg/huaweicloud/eni/instances_test.go
 @@ -5,14 +5,108 @@ package eni
@@ -5891,7 +6294,7 @@ index c27c81bb0..98ccc0ce2 100644
  		subENIs: map[string]eniTypes.SubENI{
  			"eni-c": {ID: "eni-c", PrivateIPAddress: "172.31.1.30"},
  			"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.10"},
-@@ -108,3 +503,664 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
+@@ -108,3 +503,689 @@ func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
  		}
  	}
  }
@@ -6113,6 +6516,31 @@ index c27c81bb0..98ccc0ce2 100644
 +	}
 +	if got := unknownNode.GetMaximumAllocatableIPv4(); got != 0 {
 +		t.Fatalf("lookup failure without static fallback returned %d, want 0", got)
++	}
++}
++
++func TestGetUsedIPWithPrefixesConcurrentUpdatedNode(t *testing.T) {
++	node := &Node{}
++	obj := &v2.CiliumNode{Status: v2.NodeStatus{IPAM: ipamTypes.IPAMStatus{Used: ipamTypes.AllocationMap{"10.0.0.1": {}}}}}
++	var wg sync.WaitGroup
++	wg.Add(2)
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 1000; i++ {
++			node.UpdatedNode(obj)
++			node.UpdatedNode(nil)
++		}
++	}()
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 1000; i++ {
++			_ = node.GetUsedIPWithPrefixes()
++		}
++	}()
++	wg.Wait()
++	node.UpdatedNode(obj)
++	if got := node.GetUsedIPWithPrefixes(); got != 1 {
++		t.Fatalf("used addresses=%d, want 1", got)
 +	}
 +}
 +
@@ -6557,7 +6985,7 @@ index c27c81bb0..98ccc0ce2 100644
 +	}
 +}
 diff --git a/pkg/huaweicloud/eni/node.go b/pkg/huaweicloud/eni/node.go
-index 990177982..7ceac9455 100644
+index 990177982..407f2206b 100644
 --- a/pkg/huaweicloud/eni/node.go
 +++ b/pkg/huaweicloud/eni/node.go
 @@ -8,6 +8,7 @@ import (
@@ -6663,8 +7091,45 @@ index 990177982..7ceac9455 100644
  	}
  
  	// No explicit subnet list: use FindOneSubnet (legacy path).
-@@ -174,28 +199,33 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
- 		return 0, unableToCreateSubENI, fmt.Errorf("%s: %w", errUnableToCreateSubENI, err)
+@@ -156,46 +181,65 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
+ 		return 0, unableToDetermineParentENI, errors.New(errUnableToDetermineParentENI)
+ 	}
+ 
++	created, err := n.createSubENIsInSubnet(ctx, instanceID, bestSubnet.ID, parentENIID, securityGroupIDs, toAllocate, scopedLog)
++	if err != nil {
++		return 0, unableToCreateSubENI, fmt.Errorf("%s: %w", errUnableToCreateSubENI, err)
++	}
++	return created, "", nil
++}
++
++func (n *Node) createSubENIsInSubnet(
++	ctx context.Context,
++	instanceID, subnetID, trunkInterfaceID string,
++	securityGroupIDs []string,
++	toAllocate int,
++	scopedLog *logrus.Entry,
++) (int, error) {
+ 	scopedLog = scopedLog.WithFields(logrus.Fields{
+ 		"securityGroupIDs": securityGroupIDs,
+-		"subnetID":         bestSubnet.ID,
+-		"parentENIID":      parentENIID,
++		"subnetID":         subnetID,
++		"trunkInterfaceID": trunkInterfaceID,
+ 		"toAllocate":       toAllocate,
+ 	})
+ 	scopedLog.Info("Creating Sub-ENIs")
+ 
+ 	subENIs, err := n.manager.api.BatchCreateSubNetworkInterfaces(ctx, toAllocate, hwAPI.CreateSubENIRequest{
+-		TrunkInterfaceID: parentENIID,
+-		SubnetID:         bestSubnet.ID,
++		TrunkInterfaceID: trunkInterfaceID,
++		SubnetID:         subnetID,
+ 		SecurityGroupIDs: securityGroupIDs,
+ 		Tags:             n.manager.subENITags,
+ 	})
+ 	if err != nil {
+-		return 0, unableToCreateSubENI, fmt.Errorf("%s: %w", errUnableToCreateSubENI, err)
++		return 0, err
  	}
  
 +	created := 0
@@ -6686,10 +7151,10 @@ index 990177982..7ceac9455 100644
 -	scopedLog.WithField("created", len(subENIs)).Info("Created Sub-ENIs")
 -	return len(subENIs), "", nil
 +	if created == 0 {
-+		return 0, unableToCreateSubENI, errors.New("BatchCreateSubNetworkInterfaces returned no valid Sub-ENIs")
++		return 0, errors.New("BatchCreateSubNetworkInterfaces returned no valid Sub-ENIs")
 +	}
 +	scopedLog.WithField("created", created).Info("Created Sub-ENIs")
-+	return created, "", nil
++	return created, nil
  }
  
  // createSubENIWithFallback tries each subnet in order, skipping to the next
@@ -6700,37 +7165,49 @@ index 990177982..7ceac9455 100644
  	subnetIDs []string,
  	trunkInterfaceID string,
  	securityGroupIDs []string,
-@@ -223,22 +253,26 @@ func (n *Node) createSubENIWithFallback(
+@@ -206,39 +250,10 @@ func (n *Node) createSubENIWithFallback(
+ 	var lastErr error
+ 
+ 	for _, subnetID := range subnetIDs {
+-		scopedLog = scopedLog.WithFields(logrus.Fields{
+-			"securityGroupIDs": securityGroupIDs,
+-			"subnetID":         subnetID,
+-			"trunkInterfaceID": trunkInterfaceID,
+-			"toAllocate":       toAllocate,
+-		})
+-		scopedLog.Info("Creating Sub-ENIs (subnet fallback)")
+-
+-		subENIs, err := n.manager.api.BatchCreateSubNetworkInterfaces(ctx, toAllocate, hwAPI.CreateSubENIRequest{
+-			TrunkInterfaceID: trunkInterfaceID,
+-			SubnetID:         subnetID,
+-			SecurityGroupIDs: securityGroupIDs,
+-			Tags:             n.manager.subENITags,
+-		})
++		created, err := n.createSubENIsInSubnet(ctx, instanceID, subnetID, trunkInterfaceID, securityGroupIDs, toAllocate, scopedLog)
  		if err == nil {
  			allocation.PoolID = ipamTypes.PoolID(subnetID)
- 
-+			created := 0
- 			n.mutex.Lock()
- 			if n.subENIs == nil {
- 				n.subENIs = map[string]eniTypes.SubENI{}
- 			}
+-
+-			n.mutex.Lock()
+-			if n.subENIs == nil {
+-				n.subENIs = map[string]eniTypes.SubENI{}
+-			}
 -			instanceID := n.node.InstanceID()
- 			for _, subENI := range subENIs {
- 				if subENI == nil {
- 					continue
- 				}
-+				created++
- 				n.subENIs[subENI.ID] = *subENI
- 				n.manager.UpdateSubENI(instanceID, subENI)
- 			}
- 			n.mutex.Unlock()
- 
+-			for _, subENI := range subENIs {
+-				if subENI == nil {
+-					continue
+-				}
+-				n.subENIs[subENI.ID] = *subENI
+-				n.manager.UpdateSubENI(instanceID, subENI)
+-			}
+-			n.mutex.Unlock()
+-
 -			scopedLog.WithField("created", len(subENIs)).Info("Created Sub-ENIs")
 -			return len(subENIs), "", nil
-+			if created == 0 {
-+				return 0, unableToCreateSubENI, errors.New("BatchCreateSubNetworkInterfaces returned no valid Sub-ENIs")
-+			}
-+			scopedLog.WithField("created", created).Info("Created Sub-ENIs")
 +			return created, "", nil
  		}
  
  		if errors.Is(err, hwAPI.ErrSubnetInsufficientIP) {
-@@ -254,6 +288,13 @@ func (n *Node) createSubENIWithFallback(
+@@ -254,6 +269,13 @@ func (n *Node) createSubENIWithFallback(
  }
  
  func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Entry) (ipamTypes.AllocationMap, error) {
@@ -6744,7 +7221,7 @@ index 990177982..7ceac9455 100644
  	scopedLog.Info("Starting HuaweiCloud ResyncInterfacesAndIPs")
  	scopedLog.Info("Resolving HuaweiCloud instance limits")
  	l, limitsAvailable := n.getLimits()
-@@ -262,31 +303,42 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
+@@ -262,31 +284,42 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Ent
  		return nil, fmt.Errorf(errUnableToDetermineLimits)
  	}
  
@@ -6790,7 +7267,7 @@ index 990177982..7ceac9455 100644
  	scopedLog.WithFields(logrus.Fields{"instanceID": instanceID, "subENICount": subENICount, "availableIPs": len(available)}).Info("Completed HuaweiCloud instance interface iteration")
  
  	scopedLog.WithField("remainingInterfaces", maxInt(l.IPv4-subENICount, 0)).Info("Completed HuaweiCloud ResyncInterfacesAndIPs")
-@@ -337,6 +389,9 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.Re
+@@ -337,6 +370,9 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ipam.Re
  	if n.k8sObj == nil {
  		return r
  	}
@@ -6800,7 +7277,7 @@ index 990177982..7ceac9455 100644
  
  	var freeIPs []string
  	for _, subENI := range n.subENIs {
-@@ -392,15 +447,35 @@ func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
+@@ -392,15 +428,35 @@ func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
  	}
  	n.mutex.RUnlock()
  
@@ -6817,8 +7294,7 @@ index 990177982..7ceac9455 100644
 +			continue
 +		}
 +		seenSubENIs[subENIID] = struct{}{}
- 
--		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil {
++
 +		n.mutex.RLock()
 +		usedStateKnown := n.k8sObj != nil && n.k8sObj.Status.IPAM.Used != nil
 +		nowUsed := false
@@ -6829,7 +7305,8 @@ index 990177982..7ceac9455 100644
 +		if !usedStateKnown || nowUsed {
 +			continue
 +		}
-+
+ 
+-		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil {
 +		if err := n.manager.api.DeleteSubNetworkInterface(ctx, subENIID); err != nil && !errors.Is(err, hwAPI.ErrNotFound) {
  			return fmt.Errorf("failed to delete Sub-ENI %s (IP %s): %w", subENIID, ip, err)
  		}
@@ -6837,7 +7314,16 @@ index 990177982..7ceac9455 100644
  
  		n.mutex.Lock()
  		delete(n.subENIs, subENIID)
-@@ -445,6 +520,10 @@ func (n *Node) getLimits() (ipamTypes.Limits, bool) {
+@@ -428,6 +484,8 @@ func (n *Node) IsPrefixDelegated() bool {
+ }
+ 
+ func (n *Node) GetUsedIPWithPrefixes() int {
++	n.mutex.RLock()
++	defer n.mutex.RUnlock()
+ 	if n.k8sObj == nil {
+ 		return 0
+ 	}
+@@ -445,6 +503,10 @@ func (n *Node) getLimits() (ipamTypes.Limits, bool) {
  	instanceID := n.instanceID
  	n.mutex.RUnlock()
  
@@ -6848,7 +7334,7 @@ index 990177982..7ceac9455 100644
  	if n.manager != nil && n.manager.api != nil && instanceID != "" {
  		lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
  		defer cancel()
-@@ -467,18 +546,26 @@ func (n *Node) getLimits() (ipamTypes.Limits, bool) {
+@@ -467,18 +529,26 @@ func (n *Node) getLimits() (ipamTypes.Limits, bool) {
  
  func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]string, error) {
  	if len(spec.SecurityGroups) > 0 {
@@ -6880,7 +7366,7 @@ index 990177982..7ceac9455 100644
  	}
  
  	if spec.TrunkInterfaceID != "" {
-@@ -486,15 +573,16 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]s
+@@ -486,15 +556,16 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]s
  		if err != nil {
  			return nil, fmt.Errorf("get trunk port security groups: %w", err)
  		}
@@ -6899,7 +7385,7 @@ index 990177982..7ceac9455 100644
  		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
  			e, ok := rev.Resource.(*eniTypes.SubENI)
  			if !ok || len(e.SecurityGroups) == 0 {
-@@ -516,12 +604,38 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]s
+@@ -516,12 +587,38 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, spec eniTypes.Spec) ([]s
  		})
  
  	if len(securityGroups) > 0 {
@@ -6939,7 +7425,7 @@ index 990177982..7ceac9455 100644
  func (n *Node) getParentENIID() string {
  	n.mutex.RLock()
  	for _, subENI := range n.subENIs {
-@@ -534,7 +648,7 @@ func (n *Node) getParentENIID() string {
+@@ -534,7 +631,7 @@ func (n *Node) getParentENIID() string {
  	n.mutex.RUnlock()
  
  	var parentENIID string
@@ -6949,7 +7435,7 @@ index 990177982..7ceac9455 100644
  			if parentENIID != "" {
  				return nil
 diff --git a/pkg/huaweicloud/metadata/metadata.go b/pkg/huaweicloud/metadata/metadata.go
-index 41b7e9106..3c095086e 100644
+index 41b7e9106..e192e34e4 100644
 --- a/pkg/huaweicloud/metadata/metadata.go
 +++ b/pkg/huaweicloud/metadata/metadata.go
 @@ -4,10 +4,12 @@
@@ -7003,47 +7489,64 @@ index 41b7e9106..3c095086e 100644
  }
  
  // GetZoneID returns the zone ID from metadata.
-@@ -103,9 +112,7 @@ func GetVPCID(ctx context.Context) (string, error) {
+@@ -103,27 +112,8 @@ func GetVPCID(ctx context.Context) (string, error) {
  
  // getMetadata gets metadata.
  func getMetadata(ctx context.Context, path string) (string, error) {
 -	client := &http.Client{
 -		Timeout: time.Second * 10,
 -	}
-+	client := &http.Client{Timeout: metadataHTTPTimeout}
- 
+-
  	url := fmt.Sprintf("%s/%s", metadataEC2URL, path)
- 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-@@ -123,7 +130,7 @@ func getMetadata(ctx context.Context, path string) (string, error) {
- 		return "", fmt.Errorf("metadata service returned status code %d for path %s", resp.StatusCode, path)
- 	}
- 
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	resp, err := client.Do(req)
+-	if err != nil {
+-		return "", err
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		return "", fmt.Errorf("metadata service returned status code %d for path %s", resp.StatusCode, path)
+-	}
+-
 -	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, metadataMaxRead))
-+	respBytes, err := readMetadataBody(resp.Body)
++	respBytes, err := readMetadataURL(ctx, url, fmt.Sprintf("metadata path %s", path))
  	if err != nil {
  		return "", err
  	}
-@@ -133,9 +140,7 @@ func getMetadata(ctx context.Context, path string) (string, error) {
+@@ -133,26 +123,7 @@ func getMetadata(ctx context.Context, path string) (string, error) {
  
  // getOpenStackMetadata gets and parses OpenStack metadata JSON.
  func getOpenStackMetadata(ctx context.Context) (*openStackMetadata, error) {
 -	client := &http.Client{
 -		Timeout: time.Second * 10,
 -	}
-+	client := &http.Client{Timeout: metadataHTTPTimeout}
- 
- 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataOpenStackURL, nil)
- 	if err != nil {
-@@ -152,7 +157,7 @@ func getOpenStackMetadata(ctx context.Context) (*openStackMetadata, error) {
- 		return nil, fmt.Errorf("OpenStack metadata service returned status code %d", resp.StatusCode)
- 	}
- 
+-
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataOpenStackURL, nil)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	resp, err := client.Do(req)
+-	if err != nil {
+-		return nil, err
+-	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		return nil, fmt.Errorf("OpenStack metadata service returned status code %d", resp.StatusCode)
+-	}
+-
 -	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, metadataMaxRead))
-+	respBytes, err := readMetadataBody(resp.Body)
++	respBytes, err := readMetadataURL(ctx, metadataOpenStackURL, "OpenStack metadata service")
  	if err != nil {
  		return nil, err
  	}
-@@ -165,10 +170,18 @@ func getOpenStackMetadata(ctx context.Context) (*openStackMetadata, error) {
+@@ -165,27 +136,18 @@ func getOpenStackMetadata(ctx context.Context) (*openStackMetadata, error) {
  	return &meta, nil
  }
  
@@ -7051,38 +7554,58 @@ index 41b7e9106..3c095086e 100644
 -// It reads the network_data.json metadata endpoint and extracts links[0].vif_id.
 -func GetTrunkInterfaceID(ctx context.Context) (string, error) {
 -	client := &http.Client{Timeout: time.Second * 10}
+-
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataNetworkDataURL, nil)
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	resp, err := client.Do(req)
 +// GetTrunkInterfaceID returns the metadata port ID whose MAC address matches
 +// the configured trunk interface. Link ordering is not significant.
 +func GetTrunkInterfaceID(ctx context.Context, interfaceName string) (string, error) {
 +	iface, err := net.InterfaceByName(interfaceName)
-+	if err != nil {
+ 	if err != nil {
+-		return "", err
 +		return "", fmt.Errorf("unable to find trunk interface %q: %w", interfaceName, err)
-+	}
+ 	}
+-	defer resp.Body.Close()
+-
+-	if resp.StatusCode != http.StatusOK {
+-		return "", fmt.Errorf("network_data metadata returned status code %d", resp.StatusCode)
 +	if len(iface.HardwareAddr) == 0 {
 +		return "", fmt.Errorf("trunk interface %q has no hardware address", interfaceName)
-+	}
-+
-+	client := &http.Client{Timeout: metadataHTTPTimeout}
- 
- 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataNetworkDataURL, nil)
- 	if err != nil {
-@@ -185,7 +198,7 @@ func GetTrunkInterfaceID(ctx context.Context) (string, error) {
- 		return "", fmt.Errorf("network_data metadata returned status code %d", resp.StatusCode)
  	}
  
 -	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, metadataMaxRead))
-+	respBytes, err := readMetadataBody(resp.Body)
++	respBytes, err := readMetadataURL(ctx, metadataNetworkDataURL, "network_data metadata")
  	if err != nil {
  		return "", err
  	}
-@@ -198,9 +211,37 @@ func GetTrunkInterfaceID(ctx context.Context) (string, error) {
+@@ -198,9 +160,54 @@ func GetTrunkInterfaceID(ctx context.Context) (string, error) {
  	if len(data.Links) == 0 {
  		return "", fmt.Errorf("network_data.json: links array is empty")
  	}
 -	if data.Links[0].VifID == "" {
 -		return "", fmt.Errorf("network_data.json: links[0].vif_id is empty")
--	}
 +	return selectTrunkInterfaceID(data, iface.HardwareAddr)
++}
++
++func readMetadataURL(ctx context.Context, url, description string) ([]byte, error) {
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
++	if err != nil {
++		return nil, err
++	}
++	client := &http.Client{Timeout: metadataHTTPTimeout}
++	resp, err := client.Do(req)
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("%s returned status code %d", description, resp.StatusCode)
+ 	}
++	return readMetadataBody(resp.Body)
 +}
 +
 +func selectTrunkInterfaceID(data networkData, trunkMAC net.HardwareAddr) (string, error) {
@@ -7410,7 +7933,7 @@ index 000000000..fc49efd9c
 +	}
 +}
 diff --git a/pkg/huaweicloud/subenimap/manager.go b/pkg/huaweicloud/subenimap/manager.go
-index ec52513bc..91712cc26 100644
+index ec52513bc..f925d1cca 100644
 --- a/pkg/huaweicloud/subenimap/manager.go
 +++ b/pkg/huaweicloud/subenimap/manager.go
 @@ -7,6 +7,9 @@ import (
@@ -7535,38 +8058,55 @@ index ec52513bc..91712cc26 100644
  	if m.srcIPMap != nil && m.vlanMACMap != nil {
  		return nil
  	}
-@@ -127,9 +207,180 @@ func parseIPv4(addr string) ([4]byte, error) {
+@@ -127,19 +207,191 @@ func parseIPv4(addr string) ([4]byte, error) {
  	return out, nil
  }
  
-+func validateEndpoint(ep EndpointInfo) error {
++type endpointMapEntries struct {
++	srcKey    *SrcIPKey4
++	srcValue  *SubENIInfo
++	vlanKey   *VLANMACKey
++	vlanValue *EPInfo
++}
++
++func mapEntriesForEndpoint(ep EndpointInfo) (*endpointMapEntries, error) {
 +	if ep == nil {
-+		return errors.New("endpoint is nil")
++		return nil, errors.New("endpoint is nil")
 +	}
 +	v := reflect.ValueOf(ep)
 +	if (v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface) && v.IsNil() {
-+		return errors.New("endpoint is nil")
++		return nil, errors.New("endpoint is nil")
 +	}
 +	if ep.GetID() == 0 || ep.GetID() > uint32(^uint16(0)) {
-+		return fmt.Errorf("endpoint ID %d is outside 1-65535", ep.GetID())
++		return nil, fmt.Errorf("endpoint ID %d is outside 1-65535", ep.GetID())
 +	}
 +	if ep.GetIfIndex() == 0 {
-+		return errors.New("endpoint ifindex must be positive")
++		return nil, errors.New("endpoint ifindex must be positive")
 +	}
 +	if ep.GetVLANID() < 1 || ep.GetVLANID() > 4094 {
-+		return fmt.Errorf("VLAN ID %d is outside 1-4094", ep.GetVLANID())
++		return nil, fmt.Errorf("VLAN ID %d is outside 1-4094", ep.GetVLANID())
 +	}
 +	mac := ep.GetMACAddress()
 +	if mac == [6]byte{} {
-+		return errors.New("SubENI MAC address is empty")
++		return nil, errors.New("SubENI MAC address is empty")
 +	}
 +	if mac[0]&1 != 0 {
-+		return fmt.Errorf("SubENI MAC address %02x:%02x:%02x:%02x:%02x:%02x is multicast", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
++		return nil, fmt.Errorf("SubENI MAC address %02x:%02x:%02x:%02x:%02x:%02x is multicast", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 +	}
-+	if _, err := parseIPv4(ep.GetIPv4Address()); err != nil {
-+		return err
++	addr, err := parseIPv4(ep.GetIPv4Address())
++	if err != nil {
++		return nil, err
 +	}
-+	return nil
++	vlanID := uint16(ep.GetVLANID()) //nolint:gosec // validated above
++	return &endpointMapEntries{
++		srcKey:   &SrcIPKey4{Addr: addr},
++		srcValue: &SubENIInfo{VlanID: vlanID, MAC: mac, LxcID: ep.GetID()},
++		vlanKey:  &VLANMACKey{VlanID: vlanID, MAC: mac},
++		vlanValue: &EPInfo{
++			IfIndex: ep.GetIfIndex(),
++			LxcID:   uint16(ep.GetID()), //nolint:gosec // validated above
++		},
++	}, nil
 +}
 +
 +type mapEntry struct {
@@ -7638,28 +8178,19 @@ index ec52513bc..91712cc26 100644
 +	desiredSrc := map[string]mapEntry{}
 +	desiredVLAN := map[string]mapEntry{}
 +	for _, ep := range endpoints {
-+		if err := validateEndpoint(ep); err != nil {
-+			return fmt.Errorf("Reconcile: %w", err)
-+		}
-+		addr, err := parseIPv4(ep.GetIPv4Address())
++		entries, err := mapEntriesForEndpoint(ep)
 +		if err != nil {
 +			return fmt.Errorf("Reconcile: %w", err)
 +		}
-+		mac := ep.GetMACAddress()
-+		vlanID := uint16(ep.GetVLANID()) //nolint:gosec // validated above
-+		srcKey := &SrcIPKey4{Addr: addr}
-+		srcValue := &SubENIInfo{VlanID: vlanID, MAC: mac, LxcID: ep.GetID()}
-+		if old, ok := desiredSrc[srcKey.String()]; ok && !reflect.DeepEqual(old.value, srcValue) {
++		if old, ok := desiredSrc[entries.srcKey.String()]; ok && !reflect.DeepEqual(old.value, entries.srcValue) {
 +			return fmt.Errorf("Reconcile: duplicate source IP %s has conflicting endpoint owners", ep.GetIPv4Address())
 +		}
-+		desiredSrc[srcKey.String()] = mapEntry{key: srcKey, value: srcValue}
++		desiredSrc[entries.srcKey.String()] = mapEntry{key: entries.srcKey, value: entries.srcValue}
 +
-+		vlanKey := &VLANMACKey{VlanID: vlanID, MAC: mac}
-+		vlanValue := &EPInfo{IfIndex: ep.GetIfIndex(), LxcID: uint16(ep.GetID())} //nolint:gosec // validated above
-+		if old, ok := desiredVLAN[vlanKey.String()]; ok && !reflect.DeepEqual(old.value, vlanValue) {
-+			return fmt.Errorf("Reconcile: duplicate VLAN/MAC %s has conflicting endpoint owners", vlanKey)
++		if old, ok := desiredVLAN[entries.vlanKey.String()]; ok && !reflect.DeepEqual(old.value, entries.vlanValue) {
++			return fmt.Errorf("Reconcile: duplicate VLAN/MAC %s has conflicting endpoint owners", entries.vlanKey)
 +		}
-+		desiredVLAN[vlanKey.String()] = mapEntry{key: vlanKey, value: vlanValue}
++		desiredVLAN[entries.vlanKey.String()] = mapEntry{key: entries.vlanKey, value: entries.vlanValue}
 +	}
 +
 +	m.mutex.Lock()
@@ -7710,13 +8241,33 @@ index ec52513bc..91712cc26 100644
  // OnEndpointReady upserts one entry in each BPF map for the given endpoint.
  // It is safe to call concurrently.
  func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
-+	if err := validateEndpoint(ep); err != nil {
-+		return fmt.Errorf("OnEndpointReady: %w", err)
-+	}
- 	addrBytes, err := parseIPv4(ep.GetIPv4Address())
+-	addrBytes, err := parseIPv4(ep.GetIPv4Address())
++	entries, err := mapEntriesForEndpoint(ep)
  	if err != nil {
  		return fmt.Errorf("OnEndpointReady: %w", err)
-@@ -159,9 +410,27 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+ 	}
+-
+-	mac := ep.GetMACAddress()
+-	var macArr [6]uint8
+-	copy(macArr[:], mac[:])
+-
+-	vlanID := uint16(ep.GetVLANID()) //nolint:gosec // vlan IDs fit in uint16
++	srcKey, srcVal := entries.srcKey, entries.srcValue
++	vlanKey, epVal := entries.vlanKey, entries.vlanValue
+ 
+ 	m.mutex.Lock()
+ 	defer m.mutex.Unlock()
+@@ -149,42 +401,74 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+ 	}
+ 
+ 	// --- Map 1: srcip → subeni info (egress) ---
+-	srcKey := &SrcIPKey4{Addr: addrBytes}
+-	srcVal := &SubENIInfo{
+-		VlanID: vlanID,
+-		MAC:    macArr,
+-		LxcID:  ep.GetID(),
+-	}
+ 	oldSrcVal, err := m.srcIPMap.Lookup(srcKey)
  	if err != nil && !errors.Is(err, unix.ENOENT) {
  		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", srcIPMapName, srcKey, err)
  	}
@@ -7743,24 +8294,19 @@ index ec52513bc..91712cc26 100644
 +	}
  
  	// --- Map 2: (vlan-id, dst-mac) → endpoint (ingress) ---
- 	vlanKey := &VLANMACKey{
-@@ -172,19 +441,47 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
- 		IfIndex: ep.GetIfIndex(),
- 		LxcID:   uint16(ep.GetID()), //nolint:gosec // LXC IDs fit in uint16
- 	}
--	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
--		var rollbackErr error
--		if oldSrcVal != nil {
--			rollbackErr = m.srcIPMap.Update(srcKey, oldSrcVal)
--		} else {
--			_, rollbackErr = m.srcIPMap.Delete(srcKey)
+-	vlanKey := &VLANMACKey{
+-		VlanID: vlanID,
+-		MAC:    macArr,
 +	oldEPVal, err := m.vlanMACMap.Lookup(vlanKey)
 +	if err != nil && !errors.Is(err, unix.ENOENT) {
 +		if rollbackErr := rollbackSrc(); rollbackErr != nil {
 +			return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w; rollback %s: %v", vlanMACMapName, vlanKey, err, srcIPMapName, rollbackErr)
 +		}
 +		return fmt.Errorf("OnEndpointReady: lookup %s key=%s: %w", vlanMACMapName, vlanKey, err)
-+	}
+ 	}
+-	epVal := &EPInfo{
+-		IfIndex: ep.GetIfIndex(),
+-		LxcID:   uint16(ep.GetID()), //nolint:gosec // LXC IDs fit in uint16
 +	if oldEPVal != nil {
 +		oldEP, ok := oldEPVal.(*EPInfo)
 +		if !ok || oldEP.IfIndex != epVal.IfIndex || oldEP.LxcID != epVal.LxcID {
@@ -7768,9 +8314,15 @@ index ec52513bc..91712cc26 100644
 +				return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by another endpoint; rollback %s: %v", vlanMACMapName, vlanKey, srcIPMapName, rollbackErr)
 +			}
 +			return fmt.Errorf("OnEndpointReady: %s key=%s is already owned by another endpoint", vlanMACMapName, vlanKey)
- 		}
-+	}
-+	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
++		}
+ 	}
+ 	if err := m.vlanMACMap.Update(vlanKey, epVal); err != nil {
+-		var rollbackErr error
+-		if oldSrcVal != nil {
+-			rollbackErr = m.srcIPMap.Update(srcKey, oldSrcVal)
+-		} else {
+-			_, rollbackErr = m.srcIPMap.Delete(srcKey)
+-		}
 +		rollbackErr := rollbackSrc()
  		if rollbackErr != nil {
  			return fmt.Errorf("OnEndpointReady: update %s key=%s: %w; rollback %s: %v", vlanMACMapName, vlanKey, err, srcIPMapName, rollbackErr)
@@ -7780,7 +8332,7 @@ index ec52513bc..91712cc26 100644
  
 +	// When the same endpoint is rebound to another SubENI, remove its old
 +	// ingress key only after both replacement entries are installed.
-+	if oldSrc != nil && (oldSrc.VlanID != vlanID || oldSrc.MAC != macArr) {
++	if oldSrc != nil && (oldSrc.VlanID != srcVal.VlanID || oldSrc.MAC != srcVal.MAC) {
 +		oldVLANKey := &VLANMACKey{VlanID: oldSrc.VlanID, MAC: oldSrc.MAC}
 +		if _, err := m.vlanMACMap.Delete(oldVLANKey); err != nil {
 +			var newKeyRollbackErr error
@@ -7798,17 +8350,26 @@ index ec52513bc..91712cc26 100644
  	return nil
  }
  
-@@ -192,6 +489,9 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
+@@ -192,17 +476,11 @@ func (m *SubENIMapManager) OnEndpointReady(ep EndpointInfo) error {
  // maps on a best-effort basis (individual delete errors are logged but not
  // returned).
  func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
-+	if err := validateEndpoint(ep); err != nil {
-+		return fmt.Errorf("OnEndpointDelete: %w", err)
-+	}
- 	addrBytes, err := parseIPv4(ep.GetIPv4Address())
+-	addrBytes, err := parseIPv4(ep.GetIPv4Address())
++	entries, err := mapEntriesForEndpoint(ep)
  	if err != nil {
  		return fmt.Errorf("OnEndpointDelete: %w", err)
-@@ -210,19 +510,52 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
+ 	}
+ 
+-	mac := ep.GetMACAddress()
+-	var macArr [6]uint8
+-	copy(macArr[:], mac[:])
+-
+-	vlanID := uint16(ep.GetVLANID()) //nolint:gosec
+-
+ 	m.mutex.Lock()
+ 	defer m.mutex.Unlock()
+ 
+@@ -210,19 +488,52 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
  		return fmt.Errorf("OnEndpointDelete: %w", err)
  	}
  
@@ -7819,12 +8380,12 @@ index ec52513bc..91712cc26 100644
 +	// for the same Pod IP. Remove an entry only when it still describes the
 +	// endpoint being deleted; otherwise a stale delete would tear down the new
 +	// endpoint's datapath state.
-+	srcKey := &SrcIPKey4{Addr: addrBytes}
++	srcKey := entries.srcKey
 +	srcValue, srcLookupErr := m.srcIPMap.Lookup(srcKey)
 +	deleteSrc := false
 +	if srcLookupErr == nil {
 +		if current, ok := srcValue.(*SubENIInfo); ok {
-+			deleteSrc = current.VlanID == vlanID && current.MAC == macArr && current.LxcID == ep.GetID()
++			deleteSrc = *current == *entries.srcValue
 +		}
 +	} else if !errors.Is(srcLookupErr, unix.ENOENT) {
 +		m.logger.WithError(srcLookupErr).WithFields(logrus.Fields{
@@ -7844,12 +8405,12 @@ index ec52513bc..91712cc26 100644
  
 -	if _, err := m.vlanMACMap.Delete(&VLANMACKey{VlanID: vlanID, MAC: macArr}); err != nil {
 -		m.logger.WithError(err).WithFields(logrus.Fields{
-+	vlanKey := &VLANMACKey{VlanID: vlanID, MAC: macArr}
++	vlanKey := entries.vlanKey
 +	vlanValue, vlanLookupErr := m.vlanMACMap.Lookup(vlanKey)
 +	deleteVLAN := false
 +	if vlanLookupErr == nil {
 +		if current, ok := vlanValue.(*EPInfo); ok {
-+			deleteVLAN = current.IfIndex == ep.GetIfIndex() && current.LxcID == uint16(ep.GetID()) //nolint:gosec
++			deleteVLAN = *current == *entries.vlanValue
 +		}
 +	} else if !errors.Is(vlanLookupErr, unix.ENOENT) {
 +		m.logger.WithError(vlanLookupErr).WithFields(logrus.Fields{
@@ -7868,7 +8429,7 @@ index ec52513bc..91712cc26 100644
  	}
  
  	return nil
-@@ -231,6 +564,12 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
+@@ -231,6 +542,12 @@ func (m *SubENIMapManager) OnEndpointDelete(ep EndpointInfo) error {
  // Close releases any resources held by the manager.
  // After Close the manager must not be used.
  func (m *SubENIMapManager) Close() {
@@ -8587,10 +9148,96 @@ index bddd0b86e..ed8a577d7 100644
  	if iface.Resource == nil {
  		return
 diff --git a/pkg/nodediscovery/huaweicloud_test.go b/pkg/nodediscovery/huaweicloud_test.go
-index 240d2ec8d..9ea76ddf2 100644
+index 240d2ec8d..326776191 100644
 --- a/pkg/nodediscovery/huaweicloud_test.go
 +++ b/pkg/nodediscovery/huaweicloud_test.go
-@@ -32,22 +32,38 @@ func TestApplyHuaweiCloudNetConf(t *testing.T) {
+@@ -4,13 +4,85 @@
+ package nodediscovery
+ 
+ import (
++	"context"
++	"errors"
+ 	"reflect"
+ 	"testing"
++	"time"
++
++	corev1 "k8s.io/api/core/v1"
++	k8serrors "k8s.io/apimachinery/pkg/api/errors"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime/schema"
++	"k8s.io/apimachinery/pkg/types"
+ 
+ 	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
++	"github.com/cilium/cilium/pkg/option"
+ )
+ 
++type fakeNodeGetters struct {
++	getK8sNode    func(context.Context, string) (*corev1.Node, error)
++	getCiliumNode func(context.Context, string) (*ciliumv2.CiliumNode, error)
++}
++
++func (f fakeNodeGetters) GetK8sNode(ctx context.Context, name string) (*corev1.Node, error) {
++	return f.getK8sNode(ctx, name)
++}
++
++func (f fakeNodeGetters) GetCiliumNode(ctx context.Context, name string) (*ciliumv2.CiliumNode, error) {
++	return f.getCiliumNode(ctx, name)
++}
++
++type cancelingCiliumNodeClient struct {
++	cancel      context.CancelFunc
++	createCalls int
++}
++
++type recordingCiliumNodeClient struct {
++	createCalls int
++}
++
++func (f *recordingCiliumNodeClient) Create(context.Context, *ciliumv2.CiliumNode, metav1.CreateOptions) (*ciliumv2.CiliumNode, error) {
++	f.createCalls++
++	return nil, errors.New("unexpected create")
++}
++
++func (*recordingCiliumNodeClient) Update(context.Context, *ciliumv2.CiliumNode, metav1.UpdateOptions) (*ciliumv2.CiliumNode, error) {
++	return nil, errors.New("unexpected update")
++}
++
++func (f *cancelingCiliumNodeClient) Create(context.Context, *ciliumv2.CiliumNode, metav1.CreateOptions) (*ciliumv2.CiliumNode, error) {
++	f.createCalls++
++	f.cancel()
++	return nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "cilium.io", Resource: "ciliumnodes"}, "local")
++}
++
++func (*cancelingCiliumNodeClient) Update(context.Context, *ciliumv2.CiliumNode, metav1.UpdateOptions) (*ciliumv2.CiliumNode, error) {
++	return nil, errors.New("unexpected update")
++}
++
++type contextKey struct{}
++
++type failingHuaweiMetadata struct {
++	err             error
++	sawContextValue bool
++}
++
++func (f *failingHuaweiMetadata) GetInstanceID(ctx context.Context) (string, error) {
++	f.sawContextValue = ctx.Value(contextKey{}) == "expected"
++	return "", f.err
++}
++
++func (*failingHuaweiMetadata) GetInstanceType(context.Context) (string, error) { return "", nil }
++func (*failingHuaweiMetadata) GetVPCID(context.Context) (string, error)        { return "", nil }
++func (*failingHuaweiMetadata) GetZoneID(context.Context) (string, error)       { return "", nil }
++func (*failingHuaweiMetadata) GetTrunkInterfaceID(context.Context, string) (string, error) {
++	return "", nil
++}
++
+ func TestApplyHuaweiCloudIPAMNetConf(t *testing.T) {
+ 	dst := &ipamTypes.IPAMSpec{MinAllocate: 2, PreAllocate: 1}
+ 	applyHuaweiCloudIPAMNetConf(dst, ipamTypes.IPAMSpec{MinAllocate: 10, PreAllocate: 4})
+@@ -32,22 +104,124 @@ func TestApplyHuaweiCloudNetConf(t *testing.T) {
  		SecurityGroups: []string{"sg-from-agent"},
  	}
  	src := huaweiCloudTypes.Spec{
@@ -8632,11 +9279,106 @@ index 240d2ec8d..9ea76ddf2 100644
 +	if !reflect.DeepEqual(*dst, before) {
 +		t.Fatalf("empty CNI HuaweiCloud configuration overwrote existing values: before=%+v after=%+v", before, *dst)
 +	}
++}
++
++func TestUpdateCiliumNodeResourceStopsDuringConflictBackoff(t *testing.T) {
++	oldAutoCreate, oldIPAM := option.Config.AutoCreateCiliumNodeResource, option.Config.IPAM
++	option.Config.AutoCreateCiliumNodeResource = true
++	option.Config.IPAM = "test"
++	t.Cleanup(func() {
++		option.Config.AutoCreateCiliumNodeResource = oldAutoCreate
++		option.Config.IPAM = oldIPAM
++	})
++
++	ctx, cancel := context.WithCancel(context.Background())
++	client := &cancelingCiliumNodeClient{cancel: cancel}
++	n := &NodeDiscovery{
++		k8sGetters: fakeNodeGetters{
++			getK8sNode: func(context.Context, string) (*corev1.Node, error) {
++				return &corev1.Node{ObjectMeta: metav1.ObjectMeta{UID: types.UID("node-uid")}}, nil
++			},
++			getCiliumNode: func(context.Context, string) (*ciliumv2.CiliumNode, error) {
++				return nil, k8serrors.NewNotFound(schema.GroupResource{Group: "cilium.io", Resource: "ciliumnodes"}, "local")
++			},
++		},
++		ciliumNodes: func() ciliumNodeResourceClient { return client },
++	}
++
++	started := time.Now()
++	err := n.updateCiliumNodeResource(ctx)
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("update returned %v, want context cancellation", err)
++	}
++	if time.Since(started) >= 400*time.Millisecond {
++		t.Fatalf("canceled update waited for the full retry backoff")
++	}
++	if client.createCalls != 1 {
++		t.Fatalf("create calls=%d, want 1", client.createCalls)
++	}
++}
++
++func TestUpdateCiliumNodeResourceReturnsGetErrorWithoutCreate(t *testing.T) {
++	oldAutoCreate := option.Config.AutoCreateCiliumNodeResource
++	option.Config.AutoCreateCiliumNodeResource = true
++	t.Cleanup(func() { option.Config.AutoCreateCiliumNodeResource = oldAutoCreate })
++
++	wantErr := errors.New("API server unavailable")
++	client := &recordingCiliumNodeClient{}
++	n := &NodeDiscovery{
++		k8sGetters: fakeNodeGetters{
++			getCiliumNode: func(context.Context, string) (*ciliumv2.CiliumNode, error) {
++				return nil, wantErr
++			},
++		},
++		ciliumNodes: func() ciliumNodeResourceClient { return client },
++	}
++
++	err := n.updateCiliumNodeResource(context.Background())
++	if !errors.Is(err, wantErr) {
++		t.Fatalf("update returned %v, want wrapped GET error", err)
++	}
++	if client.createCalls != 0 {
++		t.Fatalf("create calls=%d, want 0", client.createCalls)
++	}
++}
++
++func TestMutateHuaweiCloudNodeReturnsMetadataError(t *testing.T) {
++	oldIPAM := option.Config.IPAM
++	option.Config.IPAM = ipamOption.IPAMHuaweiCloud
++	t.Cleanup(func() { option.Config.IPAM = oldIPAM })
++
++	wantErr := errors.New("metadata unavailable")
++	metadata := &failingHuaweiMetadata{err: wantErr}
++	n := &NodeDiscovery{
++		k8sGetters: fakeNodeGetters{
++			getK8sNode: func(context.Context, string) (*corev1.Node, error) {
++				return &corev1.Node{ObjectMeta: metav1.ObjectMeta{UID: types.UID("node-uid")}}, nil
++			},
++		},
++		huaweiCloudMetadata: metadata,
++	}
++	ctx := context.WithValue(context.Background(), contextKey{}, "expected")
++	err := n.mutateNodeResource(ctx, &ciliumv2.CiliumNode{})
++	if !errors.Is(err, wantErr) {
++		t.Fatalf("mutate returned %v, want wrapped metadata error", err)
++	}
++	if !metadata.sawContextValue {
++		t.Fatal("mutate did not pass its context to the metadata getter")
++	}
  }
 diff --git a/pkg/nodediscovery/nodediscovery.go b/pkg/nodediscovery/nodediscovery.go
-index 8a9880de8..90901af02 100644
+index 8a9880de8..c19539788 100644
 --- a/pkg/nodediscovery/nodediscovery.go
 +++ b/pkg/nodediscovery/nodediscovery.go
+@@ -27,7 +27,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath"
+ 	"github.com/cilium/cilium/pkg/defaults"
+ 	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
+-	huaweiCloudMetadata "github.com/cilium/cilium/pkg/huaweicloud/metadata"
++	huaweiCloudMetadataAPI "github.com/cilium/cilium/pkg/huaweicloud/metadata"
+ 	"github.com/cilium/cilium/pkg/identity"
+ 	"github.com/cilium/cilium/pkg/ipam"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 @@ -55,8 +55,9 @@ const (
  	// AutoCIDR indicates that a CIDR should be allocated
  	AutoCIDR = "auto"
@@ -8649,25 +9391,73 @@ index 8a9880de8..90901af02 100644
  )
  
  var log = logging.DefaultLogger.WithField(logfields.LogSubsys, nodeDiscoverySubsys)
-@@ -75,6 +76,7 @@ type NodeDiscovery struct {
+@@ -66,6 +67,41 @@ type k8sGetters interface {
+ 	GetCiliumNode(ctx context.Context, nodeName string) (*ciliumv2.CiliumNode, error)
+ }
+ 
++type ciliumNodeResourceClient interface {
++	Create(ctx context.Context, node *ciliumv2.CiliumNode, opts metav1.CreateOptions) (*ciliumv2.CiliumNode, error)
++	Update(ctx context.Context, node *ciliumv2.CiliumNode, opts metav1.UpdateOptions) (*ciliumv2.CiliumNode, error)
++}
++
++type huaweiCloudMetadataGetter interface {
++	GetInstanceID(context.Context) (string, error)
++	GetInstanceType(context.Context) (string, error)
++	GetVPCID(context.Context) (string, error)
++	GetZoneID(context.Context) (string, error)
++	GetTrunkInterfaceID(context.Context, string) (string, error)
++}
++
++type defaultHuaweiCloudMetadataGetter struct{}
++
++func (defaultHuaweiCloudMetadataGetter) GetInstanceID(ctx context.Context) (string, error) {
++	return huaweiCloudMetadataAPI.GetInstanceID(ctx)
++}
++
++func (defaultHuaweiCloudMetadataGetter) GetInstanceType(ctx context.Context) (string, error) {
++	return huaweiCloudMetadataAPI.GetInstanceType(ctx)
++}
++
++func (defaultHuaweiCloudMetadataGetter) GetVPCID(ctx context.Context) (string, error) {
++	return huaweiCloudMetadataAPI.GetVPCID(ctx)
++}
++
++func (defaultHuaweiCloudMetadataGetter) GetZoneID(ctx context.Context) (string, error) {
++	return huaweiCloudMetadataAPI.GetZoneID(ctx)
++}
++
++func (defaultHuaweiCloudMetadataGetter) GetTrunkInterfaceID(ctx context.Context, interfaceName string) (string, error) {
++	return huaweiCloudMetadataAPI.GetTrunkInterfaceID(ctx, interfaceName)
++}
++
+ // NodeDiscovery represents a node discovery action
+ type NodeDiscovery struct {
+ 	Manager               *nodemanager.Manager
+@@ -75,6 +111,9 @@ type NodeDiscovery struct {
  	localStateInitialized chan struct{}
  	NetConf               *cnitypes.NetConf
  	k8sGetters            k8sGetters
 +	ciliumNodeControllers *controller.Manager
++	ciliumNodes           func() ciliumNodeResourceClient
++	huaweiCloudMetadata   huaweiCloudMetadataGetter
  	localNodeLock         lock.Mutex
  	localNode             nodeTypes.Node
  }
-@@ -110,7 +112,8 @@ func NewNodeDiscovery(manager *nodemanager.Manager, mtuConfig mtu.Configuration,
+@@ -110,7 +149,12 @@ func NewNodeDiscovery(manager *nodemanager.Manager, mtuConfig mtu.Configuration,
  	}
  
  	return &NodeDiscovery{
 -		Manager: manager,
 +		Manager:               manager,
 +		ciliumNodeControllers: controller.NewManager(),
++		ciliumNodes: func() ciliumNodeResourceClient {
++			return k8s.CiliumClient().CiliumV2().CiliumNodes()
++		},
++		huaweiCloudMetadata: defaultHuaweiCloudMetadataGetter{},
  		LocalConfig: datapath.LocalNodeConfiguration{
  			MtuConfig:               mtuConfig,
  			UseSingleClusterRoute:   option.Config.UseSingleClusterRoute,
-@@ -315,6 +318,20 @@ func (n *NodeDiscovery) updateLocalNode() {
+@@ -315,6 +359,20 @@ func (n *NodeDiscovery) updateLocalNode() {
  		// CRD IPAM endpoint restoration depends on the completion of this
  		// to avoid custom resource update conflicts.
  		n.UpdateCiliumNodeResource()
@@ -8682,13 +9472,13 @@ index 8a9880de8..90901af02 100644
 +					return fmt.Errorf("check local CiliumNode resource: %w", err)
 +				}
 +				log.WithField(logfields.Node, nodeTypes.GetName()).Warn("Local CiliumNode resource was deleted; recreating it")
-+				return n.updateCiliumNodeResource()
++				return n.updateCiliumNodeResource(ctx)
 +			},
 +		})
  	}
  }
  
-@@ -341,6 +358,9 @@ func (n *NodeDiscovery) LocalNode() *types.Node {
+@@ -341,6 +399,9 @@ func (n *NodeDiscovery) LocalNode() *types.Node {
  
  // Close shuts down the node discovery engine
  func (n *NodeDiscovery) Close() {
@@ -8698,23 +9488,79 @@ index 8a9880de8..90901af02 100644
  	n.Manager.Close()
  }
  
-@@ -350,6 +370,15 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+@@ -350,19 +411,43 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
  	if !option.Config.AutoCreateCiliumNodeResource {
  		return
  	}
-+	if err := n.updateCiliumNodeResource(); err != nil {
++	if err := n.updateCiliumNodeResource(context.Background()); err != nil {
 +		log.WithError(err).Fatal("Could not create or update CiliumNode resource, despite retries")
 +	}
 +}
 +
-+func (n *NodeDiscovery) updateCiliumNodeResource() error {
++func (n *NodeDiscovery) updateCiliumNodeResource(ctx context.Context) error {
 +	if !option.Config.AutoCreateCiliumNodeResource {
 +		return nil
++	}
++	if err := ctx.Err(); err != nil {
++		return err
 +	}
  
  	log.WithField(logfields.Node, nodeTypes.GetName()).Info("Creating or updating CiliumNode resource")
  
-@@ -390,9 +419,9 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+-	ciliumClient := k8s.CiliumClient()
++	if n.ciliumNodes == nil {
++		return errors.New("CiliumNode client is not configured")
++	}
++	ciliumNodes := n.ciliumNodes()
++	if ciliumNodes == nil {
++		return errors.New("CiliumNode client is not available")
++	}
+ 
+ 	performGet := true
+ 	var nodeResource *ciliumv2.CiliumNode
+ 	for retryCount := 0; retryCount < maxRetryCount; retryCount++ {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
+ 		performUpdate := true
+ 		if performGet {
+ 			var err error
+-			nodeResource, err = n.k8sGetters.GetCiliumNode(context.TODO(), nodeTypes.GetName())
++			nodeResource, err = n.k8sGetters.GetCiliumNode(ctx, nodeTypes.GetName())
+ 			if err != nil {
++				if !k8serrors.IsNotFound(err) {
++					return fmt.Errorf("get CiliumNode resource: %w", err)
++				}
+ 				log.WithError(err).Warning("Unable to get node resource")
+ 				performUpdate = false
+ 				nodeResource = &ciliumv2.CiliumNode{
+@@ -370,13 +455,18 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+ 						Name: nodeTypes.GetName(),
+ 					},
+ 				}
++			} else if nodeResource == nil {
++				return errors.New("CiliumNode getter returned nil without an error")
+ 			} else {
+ 				performGet = false
+ 			}
+ 		}
+ 
+-		if err := n.mutateNodeResource(nodeResource); err != nil {
++		if err := n.mutateNodeResource(ctx, nodeResource); err != nil {
+ 			log.WithError(err).WithField("retryCount", retryCount).Warning("Unable to mutate nodeResource")
++			if waitErr := waitForRetry(ctx, 500*time.Millisecond); waitErr != nil {
++				return waitErr
++			}
+ 			continue
+ 		}
+ 
+@@ -385,65 +475,67 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+ 		// updating.
+ 		performGet = true
+ 		if performUpdate {
+-			if _, err := ciliumClient.CiliumV2().CiliumNodes().Update(context.TODO(), nodeResource, metav1.UpdateOptions{}); err != nil {
++			if _, err := ciliumNodes.Update(ctx, nodeResource, metav1.UpdateOptions{}); err != nil {
+ 				if k8serrors.IsConflict(err) {
  					log.WithError(err).Warn("Unable to update CiliumNode resource, will retry")
  					continue
  				}
@@ -8725,9 +9571,15 @@ index 8a9880de8..90901af02 100644
 +				return nil
  			}
  		} else {
- 			if _, err := ciliumClient.CiliumV2().CiliumNodes().Create(context.TODO(), nodeResource, metav1.CreateOptions{}); err != nil {
-@@ -402,14 +431,14 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
- 					time.Sleep(500 * time.Millisecond)
+-			if _, err := ciliumClient.CiliumV2().CiliumNodes().Create(context.TODO(), nodeResource, metav1.CreateOptions{}); err != nil {
++			if _, err := ciliumNodes.Create(ctx, nodeResource, metav1.CreateOptions{}); err != nil {
+ 				if k8serrors.IsConflict(err) || k8serrors.IsAlreadyExists(err) {
+ 					log.WithError(err).Warn("Unable to create CiliumNode resource, will retry")
+-					// Backoff before retrying
+-					time.Sleep(500 * time.Millisecond)
++					if waitErr := waitForRetry(ctx, 500*time.Millisecond); waitErr != nil {
++						return waitErr
++					}
  					continue
  				}
 -				log.WithError(err).Fatal("Unable to create CiliumNode resource")
@@ -8743,17 +9595,175 @@ index 8a9880de8..90901af02 100644
 +	return errors.New("could not create or update CiliumNode resource, despite retries")
  }
  
- func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) error {
-@@ -759,7 +788,7 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+-func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) error {
++func waitForRetry(ctx context.Context, delay time.Duration) error {
++	timer := time.NewTimer(delay)
++	defer timer.Stop()
++	select {
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-timer.C:
++		return nil
++	}
++}
++
++func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ciliumv2.CiliumNode) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
+ 	var (
+ 		providerID       string
+ 		k8sNodeAddresses []nodeTypes.Address
+ 	)
+ 
+-	// If we are unable to fetch the K8s Node resource and the CiliumNode does
+-	// not have an OwnerReference set, then somehow we are running in an
+-	// environment where only the CiliumNode exists. Do not proceed as this is
+-	// unexpected.
+-	//
+-	// Note that we can rely on the OwnerReference to be set on the CiliumNode
+-	// as this was added in sufficiently earlier versions of Cilium (v1.6).
+-	// Source:
+-	// https://github.com/cilium/cilium/commit/5c365f2c6d7930dcda0b8f0d5e6b826a64022a4f
+-	k8sNode, err := n.k8sGetters.GetK8sNode(
+-		context.TODO(),
+-		nodeTypes.GetName(),
+-	)
+-	switch {
+-	case err != nil && k8serrors.IsNotFound(err) && len(nodeResource.ObjectMeta.OwnerReferences) == 0:
+-		log.WithError(err).WithField(
+-			logfields.NodeName, nodeTypes.GetName(),
+-		).Fatal(
+-			"Kubernetes Node resource does not exist, setting OwnerReference on " +
+-				"CiliumNode is impossible. This is unexpected. Please investigate " +
+-				"why Cilium is running on a Node that supposedly does not exist " +
+-				"according to Kubernetes.",
+-		)
+-	case err != nil && !k8serrors.IsNotFound(err):
++	if n.k8sGetters == nil {
++		return errors.New("Kubernetes node getter is not configured")
++	}
++	k8sNode, err := n.k8sGetters.GetK8sNode(ctx, nodeTypes.GetName())
++	if err != nil {
++		if k8serrors.IsNotFound(err) && len(nodeResource.ObjectMeta.OwnerReferences) == 0 {
++			return fmt.Errorf("Kubernetes Node resource %s does not exist; cannot set the CiliumNode owner reference: %w", nodeTypes.GetName(), err)
++		}
+ 		return fmt.Errorf("failed to fetch Kubernetes Node resource: %w", err)
+ 	}
++	if k8sNode == nil {
++		return errors.New("Kubernetes node getter returned nil without an error")
++	}
+ 
+ 	nodeResource.ObjectMeta.OwnerReferences = []metav1.OwnerReference{{
+ 		APIVersion: "v1",
+@@ -576,7 +668,7 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+ 		nodeResource.Spec.ENI = eniTypes.ENISpec{}
+ 		instanceID, instanceType, availabilityZone, vpcID, err := metadata.GetInstanceMetadata()
  		if err != nil {
- 			log.WithError(err).Fatal("Unable to retrieve Zone ID of own ECS instance")
+-			log.WithError(err).Fatal("Unable to retrieve InstanceID of own EC2 instance")
++			return fmt.Errorf("retrieve metadata of own EC2 instance: %w", err)
+ 		}
+ 
+ 		if instanceID == "" {
+@@ -649,10 +741,10 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+ 
+ 	case ipamOption.IPAMAzure:
+ 		if providerID == "" {
+-			log.Fatal("Spec.ProviderID in k8s node resource must be set for Azure IPAM")
++			return errors.New("Spec.ProviderID in k8s node resource must be set for Azure IPAM")
+ 		}
+ 		if !strings.HasPrefix(providerID, azureTypes.ProviderPrefix) {
+-			log.Fatalf("Spec.ProviderID in k8s node resource must have prefix %s", azureTypes.ProviderPrefix)
++			return fmt.Errorf("Spec.ProviderID in k8s node resource must have prefix %s", azureTypes.ProviderPrefix)
+ 		}
+ 		// The Azure controller in Kubernetes creates a mix of upper
+ 		// and lower case when filling in the ProviderID and is
+@@ -676,30 +768,30 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+ 	case ipamOption.IPAMAlibabaCloud:
+ 		nodeResource.Spec.AlibabaCloud = alibabaCloudTypes.Spec{}
+ 
+-		instanceID, err := alibabaCloudMetadata.GetInstanceID(context.TODO())
++		instanceID, err := alibabaCloudMetadata.GetInstanceID(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve InstanceID of own ECS instance")
++			return fmt.Errorf("retrieve InstanceID of own AlibabaCloud ECS instance: %w", err)
+ 		}
+ 
+ 		if instanceID == "" {
+ 			return errors.New("InstanceID of own ECS instance is empty")
+ 		}
+ 
+-		instanceType, err := alibabaCloudMetadata.GetInstanceType(context.TODO())
++		instanceType, err := alibabaCloudMetadata.GetInstanceType(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve InstanceType of own ECS instance")
++			return fmt.Errorf("retrieve InstanceType of own AlibabaCloud ECS instance: %w", err)
+ 		}
+-		vpcID, err := alibabaCloudMetadata.GetVPCID(context.TODO())
++		vpcID, err := alibabaCloudMetadata.GetVPCID(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve VPC ID of own ECS instance")
++			return fmt.Errorf("retrieve VPC ID of own AlibabaCloud ECS instance: %w", err)
+ 		}
+-		vpcCidrBlock, err := alibabaCloudMetadata.GetVPCCIDRBlock(context.TODO())
++		vpcCidrBlock, err := alibabaCloudMetadata.GetVPCCIDRBlock(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve VPC CIDR block of own ECS instance")
++			return fmt.Errorf("retrieve VPC CIDR block of own AlibabaCloud ECS instance: %w", err)
+ 		}
+-		zoneID, err := alibabaCloudMetadata.GetZoneID(context.TODO())
++		zoneID, err := alibabaCloudMetadata.GetZoneID(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve Zone ID of own ECS instance")
++			return fmt.Errorf("retrieve Zone ID of own AlibabaCloud ECS instance: %w", err)
+ 		}
+ 		nodeResource.Spec.InstanceID = instanceID
+ 		nodeResource.Spec.AlibabaCloud.InstanceType = instanceType
+@@ -738,30 +830,33 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
+ 
+ 	case ipamOption.IPAMHuaweiCloud:
+ 		nodeResource.Spec.HuaweiCloud = &huaweiCloudTypes.Spec{}
++		if n.huaweiCloudMetadata == nil {
++			return errors.New("HuaweiCloud metadata getter is not configured")
++		}
+ 
+-		huaweiInstanceID, err := huaweiCloudMetadata.GetInstanceID(context.TODO())
++		huaweiInstanceID, err := n.huaweiCloudMetadata.GetInstanceID(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve InstanceID of own ECS instance")
++			return fmt.Errorf("retrieve InstanceID of own HuaweiCloud ECS instance: %w", err)
+ 		}
+ 		if huaweiInstanceID == "" {
+ 			return errors.New("InstanceID of own ECS instance is empty")
+ 		}
+ 
+-		huaweiInstanceType, err := huaweiCloudMetadata.GetInstanceType(context.TODO())
++		huaweiInstanceType, err := n.huaweiCloudMetadata.GetInstanceType(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve InstanceType of own ECS instance")
++			return fmt.Errorf("retrieve InstanceType of own HuaweiCloud ECS instance: %w", err)
+ 		}
+-		huaweiVPCID, err := huaweiCloudMetadata.GetVPCID(context.TODO())
++		huaweiVPCID, err := n.huaweiCloudMetadata.GetVPCID(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve VPC ID of own ECS instance")
++			return fmt.Errorf("retrieve VPC ID of own HuaweiCloud ECS instance: %w", err)
+ 		}
+-		huaweiZoneID, err := huaweiCloudMetadata.GetZoneID(context.TODO())
++		huaweiZoneID, err := n.huaweiCloudMetadata.GetZoneID(ctx)
+ 		if err != nil {
+-			log.WithError(err).Fatal("Unable to retrieve Zone ID of own ECS instance")
++			return fmt.Errorf("retrieve Zone ID of own HuaweiCloud ECS instance: %w", err)
  		}
 -		trunkInterfaceID, err := huaweiCloudMetadata.GetTrunkInterfaceID(context.TODO())
-+		trunkInterfaceID, err := huaweiCloudMetadata.GetTrunkInterfaceID(context.TODO(), option.Config.HuaweiCloudTrunkInterface)
++		trunkInterfaceID, err := n.huaweiCloudMetadata.GetTrunkInterfaceID(ctx, option.Config.HuaweiCloudTrunkInterface)
  		if err != nil {
- 			log.WithError(err).Fatal("Unable to retrieve TrunkInterfaceID from instance metadata")
+-			log.WithError(err).Fatal("Unable to retrieve TrunkInterfaceID from instance metadata")
++			return fmt.Errorf("retrieve TrunkInterfaceID from HuaweiCloud instance metadata: %w", err)
  		}
-@@ -808,17 +837,25 @@ func applyHuaweiCloudNetConf(dst *huaweiCloudTypes.Spec, src huaweiCloudTypes.Sp
+ 
+ 		nodeResource.Spec.InstanceID = huaweiInstanceID
+@@ -808,17 +903,25 @@ func applyHuaweiCloudNetConf(dst *huaweiCloudTypes.Spec, src huaweiCloudTypes.Sp
  		return
  	}
  	if len(src.Subnets) > 0 {
@@ -8883,7 +9893,7 @@ index c80aef764..269dd5792 100644
  	type args struct {
  		option string
 diff --git a/plugins/cilium-cni/types/types.go b/plugins/cilium-cni/types/types.go
-index e7f3b2f0f..ea98ccac8 100644
+index e7f3b2f0f..1fb75dbee 100644
 --- a/plugins/cilium-cni/types/types.go
 +++ b/plugins/cilium-cni/types/types.go
 @@ -4,8 +4,10 @@
@@ -8897,29 +9907,32 @@ index e7f3b2f0f..ea98ccac8 100644
  	"net"
  	"os"
  
-@@ -20,6 +22,8 @@ import (
+@@ -20,6 +22,11 @@ import (
  	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
  )
  
-+const maxCNIConfigSize = 1 << 20
++const (
++	maxCNIConfigSize  = 1 << 20
++	maxCNIConfigDepth = 100
++)
 +
  // NetConf is the Cilium specific CNI network configuration
  type NetConf struct {
  	cniTypes.NetConf
-@@ -68,18 +72,45 @@ func parsePrevResult(n *NetConf) (*NetConf, error) {
+@@ -68,34 +75,145 @@ func parsePrevResult(n *NetConf) (*NetConf, error) {
  // ReadNetConf reads a CNI configuration file and returns the corresponding
  // NetConf structure
  func ReadNetConf(path string) (*NetConf, error) {
 -	b, err := os.ReadFile(path)
 +	f, err := os.Open(path)
- 	if err != nil {
- 		return nil, fmt.Errorf("Unable to read CNI configuration '%s': %s", path, err)
- 	}
-+	defer f.Close()
-+	b, err := io.ReadAll(io.LimitReader(f, maxCNIConfigSize+1))
 +	if err != nil {
 +		return nil, fmt.Errorf("Unable to read CNI configuration '%s': %s", path, err)
 +	}
++	defer f.Close()
++	b, err := io.ReadAll(io.LimitReader(f, maxCNIConfigSize+1))
+ 	if err != nil {
+ 		return nil, fmt.Errorf("Unable to read CNI configuration '%s': %s", path, err)
+ 	}
 +	if len(b) > maxCNIConfigSize {
 +		return nil, fmt.Errorf("CNI configuration '%s' exceeds %d bytes", path, maxCNIConfigSize)
 +	}
@@ -8956,19 +9969,27 @@ index e7f3b2f0f..ea98ccac8 100644
 +		return validateNetConf(selected)
  	}
  
- 	return LoadNetConf(b)
-@@ -88,14 +119,91 @@ func ReadNetConf(path string) (*NetConf, error) {
+-	return LoadNetConf(b)
++	return decodeNetConf(b)
+ }
+ 
  // LoadNetConf unmarshals a Cilium network configuration from JSON and returns
  // a NetConf together with the CNI version
- func LoadNetConf(bytes []byte) (*NetConf, error) {
-+	if len(bytes) > maxCNIConfigSize {
+-func LoadNetConf(bytes []byte) (*NetConf, error) {
++func LoadNetConf(data []byte) (*NetConf, error) {
++	if len(data) > maxCNIConfigSize {
 +		return nil, fmt.Errorf("CNI configuration exceeds %d bytes", maxCNIConfigSize)
 +	}
-+	if err := rejectDuplicateJSONKeys(bytes); err != nil {
++	if err := rejectDuplicateJSONKeys(data); err != nil {
 +		return nil, fmt.Errorf("failed to load netconf: %s", err)
 +	}
++	return decodeNetConf(data)
++}
++
++func decodeNetConf(data []byte) (*NetConf, error) {
  	n := &NetConf{}
- 	if err := json.Unmarshal(bytes, n); err != nil {
+-	if err := json.Unmarshal(bytes, n); err != nil {
++	if err := json.Unmarshal(data, n); err != nil {
  		return nil, fmt.Errorf("failed to load netconf: %s", err)
  	}
  
@@ -8990,7 +10011,7 @@ index e7f3b2f0f..ea98ccac8 100644
  
 +func rejectDuplicateJSONKeys(data []byte) error {
 +	decoder := json.NewDecoder(bytes.NewReader(data))
-+	if err := checkJSONValue(decoder); err != nil {
++	if err := checkJSONValue(decoder, 0); err != nil {
 +		return err
 +	}
 +	if token, err := decoder.Token(); err != io.EOF {
@@ -9002,7 +10023,10 @@ index e7f3b2f0f..ea98ccac8 100644
 +	return nil
 +}
 +
-+func checkJSONValue(decoder *json.Decoder) error {
++func checkJSONValue(decoder *json.Decoder, depth int) error {
++	if depth > maxCNIConfigDepth {
++		return fmt.Errorf("JSON nesting exceeds maximum depth %d", maxCNIConfigDepth)
++	}
 +	token, err := decoder.Token()
 +	if err != nil {
 +		return err
@@ -9027,7 +10051,7 @@ index e7f3b2f0f..ea98ccac8 100644
 +				return fmt.Errorf("duplicate JSON key %q", key)
 +			}
 +			seen[key] = struct{}{}
-+			if err := checkJSONValue(decoder); err != nil {
++			if err := checkJSONValue(decoder, depth+1); err != nil {
 +				return err
 +			}
 +		}
@@ -9035,7 +10059,7 @@ index e7f3b2f0f..ea98ccac8 100644
 +		return err
 +	case '[':
 +		for decoder.More() {
-+			if err := checkJSONValue(decoder); err != nil {
++			if err := checkJSONValue(decoder, depth+1); err != nil {
 +				return err
 +			}
 +		}
@@ -9050,10 +10074,18 @@ index e7f3b2f0f..ea98ccac8 100644
  type ArgsSpec struct {
  	cniTypes.CommonArgs
 diff --git a/plugins/cilium-cni/types/types_test.go b/plugins/cilium-cni/types/types_test.go
-index 0702a7689..adfa7a157 100644
+index 0702a7689..420b35901 100644
 --- a/plugins/cilium-cni/types/types_test.go
 +++ b/plugins/cilium-cni/types/types_test.go
-@@ -43,6 +43,55 @@ func testConfRead(c *check.C, confContent string, netconf *NetConf) {
+@@ -8,6 +8,7 @@ package types
+ import (
+ 	"os"
+ 	"path"
++	"strings"
+ 	"testing"
+ 
+ 	cnitypes "github.com/containernetworking/cni/pkg/types"
+@@ -43,6 +44,60 @@ func testConfRead(c *check.C, confContent string, netconf *NetConf) {
  	c.Assert(netConf, checker.DeepEquals, netconf)
  }
  
@@ -9104,6 +10136,11 @@ index 0702a7689..adfa7a157 100644
 +	c.Assert(err, check.IsNil)
 +	_, err = ReadNetConf(p)
 +	c.Assert(err, check.NotNil)
++
++	nested := strings.Repeat("[", maxCNIConfigDepth+1) + "0" + strings.Repeat("]", maxCNIConfigDepth+1)
++	err = testConfReadError(c, `{"cniVersion":"0.3.1","type":"cilium-cni","nested":`+nested+`}`)
++	c.Assert(err, check.NotNil)
++	c.Assert(strings.Contains(err.Error(), "nesting exceeds maximum depth"), check.Equals, true)
 +}
 +
  func (t *CNITypesSuite) TestReadCNIConf(c *check.C) {
