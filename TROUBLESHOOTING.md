@@ -1,138 +1,279 @@
-# HuaweiCloud Cilium v1.12.19 适配审核与问题记录
+# HuaweiCloud Cilium v1.12.19 故障排查
 
-本文记录从已完成的 v1.19.1 实际环境测试中筛选问题、审核其是否适用于 v1.12.19，
-以及本分支的处理结果。不能因为新版本出现过问题就直接复制修复；每一项都先核对
-v1.12.19 的实现和接口。
+本文按部署阶段整理常见问题。命令中的资源名和地址均为占位符；输出对外提供前必须删除
+AK/SK、Token、认证头、私钥、真实密码和不必要的云资源标识。
 
-## 适配结论
+## 1. Patch 无法应用
 
-| 问题 | v1.12.19 结论 | 处理 |
-| --- | --- | --- |
-| 入口只识别 skb VLAN 元数据 | 存在；原代码先检查 `ctx->vlan_present` | 0008 支持线内 802.1Q/802.1ad |
-| 元数据与线内 VLAN 同时存在 | 存在风险；一次 pop 可能只清除一种表示 | 0008 线内优先并按实际表示执行一或两次 pop |
-| helper 后仍被通用 VLAN 过滤 | 存在风险；同一程序后续可能读取旧的 `vlan_present` | 0008 返回 handled 状态并跳过重复过滤 |
-| 数据路径使用错误 ifindex | 不存在；v1.12.19 已从 `trunkInterface` 解析 `HWC_TRUNK_IFINDEX` | 不移植 v1.19.1 的 ifindex 改动 |
-| 缺少 endpoint route | 不存在；华为云 Helm 模板已设置 `enable-endpoint-routes: true` | 不修改 |
-| used-IP 状态合并后残留 | 不存在；本版本使用整对象 `UpdateStatus()` | 不移植对应修复 |
-| NetConf 无法设置 `SubnetTags` | 已由 0006 修复，支持 `.conf`、`.conflist` 和字段合并 | 保留 0006，不重复修改 |
-| AK/SK 进入 Helm values 和 release | 存在；原 Chart 从 values 生成 Secret | 0009 改为引用预创建 Secret |
-| 子网 `AvailableAddresses` 始终为 0 | 存在；V3 Virsubnet 转换遗漏真实容量 | 0010 从 V1/V2 子网接口同步可用地址数 |
+### 基线不匹配
 
-## VLAN 入方向问题
+`apply.sh` 只接受以下 upstream commit：
 
-### 现象与根因
-
-云侧可能把 SubENI VLAN 以线内 Ethernet 头交付，也可能通过 skb 元数据表示；部分
-驱动上下文还能同时观察到两种表示。v1.12.19 原实现只接受元数据，因此线内报文不会
-命中 `(VLAN ID, MAC)` 映射。即使命中并调用 helper，同一 BPF 程序中的通用 VLAN
-过滤仍可能依据旧上下文再次丢包。
-
-### 修复
-
-0008 仅使用本版本已有的 TC API：
-
-1. 只在 `HWC_TRUNK_IFINDEX` 上处理；
-2. 优先解析线内 802.1Q/802.1ad，没有线内头时再读取 skb 元数据；
-3. 命中 SubENI map 后设置 handled；
-4. 两种表示共存时执行两阶段剥离，只有一种时执行一次；
-5. 调用方依据 handled 跳过通用 VLAN 过滤。
-
-### 验证状态
-
-- v1.19.1 中的同类修复：已在实际华为云环境验证跨节点 Pod、DNS 和 Service 恢复。
-- v1.12.19 适配代码：已通过本版本 `bpf_host` 全编译排列，其中包括
-  `ENABLE_IPV4 + ENABLE_HUAWEICLOUD_VLAN + HWC_TRUNK_IFINDEX`。
-- v1.12.19 实际云环境：尚待部署验证，不能标记为“已实际验证”。
-
-现场验证至少执行：
-
-```bash
-tcpdump -eni <trunk 网卡> 'vlan and host <目标 Pod IP>'
-kubectl exec <源 Pod> -- ping -c 3 <其他节点 Pod IP>
-kubectl exec <源 Pod> -- nslookup kubernetes.default.svc.cluster.local
+```text
+a1d7fbd43b563c809330b1c3e28165a3e7ff43aa
 ```
 
-## Operator 凭据问题
+检查：
 
-### 根因与版本差异
+```bash
+git rev-parse HEAD
+git status --short
+```
 
-原 v1.12.19 Chart 接受 `huaweicloud.accessKey` 和 `huaweicloud.secretKey`，再生成
-Kubernetes Secret。这样凭据会进入 values 和 Helm release。v1.12.19 Operator 已原生
-绑定 `CILIUM_HUAWEI_CLOUD_ACCESS_KEY` 和 `CILIUM_HUAWEI_CLOUD_SECRET_KEY`，所以无需
-移植 v1.19.1 的环境变量兼容代码。
+工作区必须干净。不要用 `--no-base-check` 绕过普通安装错误；该选项只用于明确的 patch
+移植工作。
 
-### 修复与验证
+### `git am` 中断
 
-0009 删除 Chart 管理的华为云 Secret，新增 `huaweicloud.existingSecret`，并把两个
-`secretKeyRef` 设为必需。验证结果：
+```bash
+git status
+git am --abort
+```
 
-- `helm lint` 通过；
-- 启用华为云后，Deployment 渲染为两个必需的 Secret 引用；
-- 渲染结果不包含名为 `cilium-huaweicloud` 的 Secret 对象；
-- `existingSecret` 为空时 Helm 明确失败。
+确认 HEAD 回到固定基线、工作区干净后，再重新运行 `apply.sh`。不要在部分应用状态继续
+构建。
 
-实际创建 Secret 的安全命令见 `INSTALL-DEPLOY.md` 第 8 节。
+## 2. 构建失败
 
-## 本轮遇到的构建与验证错误
+### 工作目录或 Docker data-root 在系统盘
 
-### 本机缺少 clang
+```bash
+findmnt -T "$WORKDIR" -o SOURCE,TARGET,FSTYPE
+docker info --format 'DockerRoot={{.DockerRootDir}}'
+findmnt -T "$(docker info --format '{{.DockerRootDir}}')" \
+  -o SOURCE,TARGET,FSTYPE
+```
 
-- 现象：直接运行 `make -C bpf` 报 `/bin/bash: clang: command not found`。
-- 原因：宿主机没有 Cilium v1.12.19 所需的 LLVM 工具链。
-- 处理：使用该版本固定 digest 的官方 builder 容器编译，并限制为 2 CPU、4 GiB；
-  Docker data-root、源码和产物均位于挂载盘。
-- 状态：已验证修复，BPF 编译成功。
+两处必须位于同一块非系统盘。迁移 Docker data-root 后要重启 Docker，并再次核对实际
+路径。
 
-### builder 容器提示 dubious ownership
+### 编译或测试报错
 
-- 现象：挂载源码后 Git 提示仓库所有者与容器用户不一致。
-- 影响：版本信息探测警告；本次 BPF 编译未因此失败。
-- 建议：完整镜像构建时在临时容器配置中加入该源码目录为 safe.directory，不要修改
-  宿主机仓库所有权。
-- 状态：本次编译不受影响；完整镜像构建时仍需复核版本元数据。
+查看 `$WORKDIR/logs/` 中对应日志：
 
-### 对空模板使用 Helm `--show-only`
+```bash
+ls -lh "$WORKDIR/logs"
+tail -n 100 "$WORKDIR/logs/test-huaweicloud.log"
+tail -n 100 "$WORKDIR/logs/test-ipam-operator.log"
+tail -n 100 "$WORKDIR/logs/build-agent.log"
+tail -n 100 "$WORKDIR/logs/build-operator.log"
+```
 
-- 现象：删除华为云 Secret 对象后，`--show-only templates/cilium-operator/secret.yaml`
-  在当前条件下提示找不到可输出的模板。
-- 原因：该模板只剩其他云厂商的条件对象，华为云场景渲染为空。
-- 处理：改为完整渲染，并同时断言 Deployment 的 `secretKeyRef` 与 Secret 对象集合。
-- 状态：已验证检查方法，代码无需修改。
+`build.status` 不是 `SUCCESS` 时，不得部署旧 tar 或旧镜像。构建脚本会清理旧缓存和
+BuildKit 未使用缓存，建议在专用构建机运行。
 
-### patch 应用身份和中断状态
+## 3. 镜像问题
 
-- 现象：未配置 Git 身份时 `git am` 失败；一次重试进入部分应用状态。
-- 处理：先 `git am --abort`，配置明确的提交身份后从干净基线重放。`apply.sh` 也提供
-  非自动化名称的安全回退身份。
-- 状态：已从 upstream `v1.12.19` 固定提交重放全部 14 个 patch，重放及相关 Go 测试通过。
+### Agent 或 Operator `ImagePullBackOff`
 
-## 子网容量未赋值
+```bash
+kubectl -n kube-system describe pod <POD_NAME>
+kubectl -n kube-system get ds/cilium deploy/cilium-operator -o yaml |
+  grep -n 'image:'
+```
 
-### 客户反馈
+检查镜像 tag、仓库认证，以及离线镜像是否已导入每个节点的 `k8s.io` containerd
+namespace。
 
-`InstancesManager.FindOneSubnet()` 使用 `Subnet.AvailableAddresses` 判断容量，但生产
-`GetSubnets()` 原先构造 `ipamTypes.Subnet` 时没有给该字段赋值，因此所有真实子网均为
-Go 默认值 `0`。原判断又把 `0` 解释为“容量未知但可使用”，导致容量不足过滤和按剩余
-地址择优实际失效。
+### Operator 镜像出现双后缀
 
-### 为什么原测试没有发现
+错误示例：
 
-- mock 测试直接手工设置 `AvailableAddresses: 10/20`，没有经过生产 API 转换；
-- 缺陷用例 `TestFindOneSubnetAcceptsUnknownCapacity` 明确要求容量为 0 时仍选择子网；
-- 真实环境使用了尚有容量的明确子网，未执行容量耗尽和多子网容量择优场景。
+```text
+registry.example.com/network/operator-huaweicloud-huaweicloud:<TAG>
+```
 
-### 修复
+`operator.image.repository` 应填写基础名：
 
-0010 使用同一已鉴权 VPC 客户端调用 `/v1/{project_id}/subnets`，读取华为云返回的
-`available_ip_address_count`，再按子网 ID 与 V3 Virsubnet 数据合并。没有容量记录、
-容量为负或接口失败时本轮同步失败，不使用猜测值继续分配。容量为 0 或小于
-`toAllocate` 的子网不再参与选择。
+```yaml
+operator:
+  image:
+    repository: registry.example.com/network/operator
+```
 
-### 测试状态
+Chart 会自动追加 `-huaweicloud`。
 
-- 已删除 `TestFindOneSubnetAcceptsUnknownCapacity`；
-- 已验证 HTTP 请求路径、Project ID、VPC 过滤参数和容量字段反序列化；
-- 已直接调用完整 `GetSubnets()` 验证容量进入生产 `Subnet` 对象；
-- 已验证零容量、容量不足、多子网择优和显式子网容量不足；
-- `go test ./pkg/huaweicloud/api ./pkg/huaweicloud/eni` 已通过；
-- 尚未在真实华为云环境制造子网耗尽场景，不能标记为“已实际验证”。
+### Operator 默认命令错误
+
+```bash
+docker image inspect <OPERATOR_IMAGE> --format '{{json .Config.Cmd}}'
+docker run --rm <OPERATOR_IMAGE> /usr/bin/cilium-operator --help
+docker run --rm <OPERATOR_IMAGE> /usr/bin/cilium-operator-huaweicloud --help
+```
+
+默认命令必须是 `/usr/bin/cilium-operator`，两个二进制都必须存在。若输出包含字面量
+`${OPERATOR_VARIANT}`，说明镜像不是从完整 patch 源码构建。
+
+## 4. Helm 和 Secret
+
+### `existingSecret` 校验失败
+
+```bash
+kubectl -n kube-system get secret <SECRET_NAME>
+kubectl -n kube-system get secret <SECRET_NAME> \
+  -o go-template='{{range $k, $_ := .data}}{{printf "%s\n" $k}}{{end}}' | sort
+```
+
+必须包含以下键名，但不要打印值：
+
+```text
+CILIUM_HUAWEI_CLOUD_ACCESS_KEY
+CILIUM_HUAWEI_CLOUD_SECRET_KEY
+```
+
+Secret 必须与 Operator 位于同一 namespace。名称需要满足 Kubernetes DNS-1123 规则。
+
+### 更新 Secret 后 Operator 仍使用旧凭据
+
+Pod 环境变量不会随 Secret 更新自动刷新：
+
+```bash
+kubectl -n kube-system rollout restart deploy/cilium-operator
+kubectl -n kube-system rollout status deploy/cilium-operator --timeout=5m
+```
+
+### 缺少 CiliumNode 或 CRD
+
+```bash
+kubectl get crd | grep cilium.io
+kubectl get ciliumnodes
+```
+
+从应用 patch 后的源码树重新应用 CRD：
+
+```bash
+kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2/
+kubectl apply -f pkg/k8s/apis/cilium.io/client/crds/v2alpha1/
+```
+
+## 5. Metadata 和 trunk 网卡
+
+### Agent 找不到实例、VPC、可用区或 port
+
+在故障节点本地检查 metadata，不要把完整响应直接贴到工单：
+
+```bash
+curl -fsS http://169.254.169.254/openstack/latest/meta_data.json
+curl -fsS http://169.254.169.254/openstack/latest/network_data.json
+```
+
+核对实例 ID、VPC、可用区、port ID 和 MAC 是否存在。metadata 超时、空字段或 MAC
+不匹配时应先修复云主机网络，不能手工编造 ID 绕过检查。
+
+### trunkInterface 配错
+
+```bash
+ip -4 route show default
+ip -br link
+for dev in /sys/class/net/*; do
+  printf '%s ' "$(basename "$dev")"
+  cat "$dev/address"
+done
+```
+
+多网卡节点不能按接口顺序猜测 trunk。必须把系统 MAC 与 metadata port 对应后再修改
+values，并滚动重启 Agent。
+
+## 6. Pod 无法分配 SubENI 地址
+
+```bash
+kubectl get ciliumnodes -o yaml
+kubectl -n kube-system logs deploy/cilium-operator --tail=300
+kubectl describe pod <POD_NAME>
+```
+
+按顺序检查：
+
+1. HuaweiCloud project、region、VPC 是否与节点一致；
+2. 显式 `subnetIDs` 是否属于同一 VPC 和可用区；
+3. `subnetTags` 是否确实匹配，且未被非空 `subnetIDs` 覆盖；
+4. 子网是否有可用 IPv4 地址；
+5. ECS 规格的 SubENI 上限和项目配额是否已满；
+6. 安全组是否存在且属于同一 VPC；
+7. 云账号是否具备查询、创建、更新和删除权限。
+
+不要通过扩大云权限或改用全开放安全组来掩盖具体错误。
+
+## 7. Pod 网络不通
+
+### 先区分故障范围
+
+```bash
+kubectl get pods -A -o wide
+kubectl -n kube-system exec ds/cilium -- cilium status --verbose
+kubectl -n kube-system exec ds/cilium -- cilium endpoint list
+```
+
+分别测试同节点、跨节点、ClusterIP、NodePort、DNS、VPC 内网和公网。只检查 Pod
+`Running` 不足以证明数据面正常。
+
+### 检查策略路由
+
+在 Pod 所在节点执行：
+
+```bash
+ip -4 rule show
+ip -4 route show table all
+ip neigh show
+```
+
+每个 SubENI 应使用 `10000 + VLAN ID` 的独立路由表。不要手工把多个网关写回同一共享
+trunk 表。
+
+### 检查 VLAN 和 BPF map
+
+```bash
+tcpdump -eni <TRUNK_IF> 'vlan and host <POD_IP>'
+kubectl -n kube-system exec ds/cilium -- cilium bpf map list
+```
+
+抓包前先确认目标 Pod、节点和流量方向。对外共享抓包时应替换节点、Pod 和公网地址。
+
+## 8. DNS 或公网不通
+
+```bash
+kubectl exec <POD_NAME> -- nslookup kubernetes.default.svc.cluster.local
+kubectl get pod <POD_NAME> -o wide
+```
+
+登录该 Pod 所在的 Kubernetes 节点后执行：
+
+```bash
+iptables-save -t nat | grep 'cilium masquerade non-cluster'
+```
+
+检查 `ipv4NativeRoutingCIDR` 是否为 VPC CIDR，`egressMasqueradeInterfaces` 是否与
+trunk 网卡一致。若 values 明确关闭 IPv4 masquerade，公网不通可能是配置结果，不应
+直接判断为 Cilium 故障。
+
+## 9. 升级或回滚后异常
+
+```bash
+helm history cilium -n kube-system
+helm get values cilium -n kube-system -o yaml
+kubectl -n kube-system rollout status ds/cilium --timeout=5m
+kubectl -n kube-system rollout status deploy/cilium-operator --timeout=5m
+```
+
+确认 Agent 和 Operator 使用同一发布批次的镜像，Agent 镜像内的 BPF 文件与二进制匹配。
+回滚 Chart 不会回滚外部 Secret，也不应删除 CRD 或云端 SubENI。
+
+## 10. 安全地收集信息
+
+建议收集：
+
+- `kubectl get nodes -o wide` 和脱敏后的 `kubectl get pods -A -o wide`；
+- Cilium status、CiliumNode 摘要和相关事件；
+- Cilium/Operator 最近 300 行脱敏日志；
+- 相关节点的路由、邻居、网卡和 BPF map 摘要；
+- Helm revision、镜像 tag/digest 和无密 values 摘要。
+
+禁止收集或提交：
+
+- Secret `.data` / `.stringData`；
+- AK/SK、密码、Token、私钥、registry auth；
+- 未脱敏的认证头、签名请求、完整抓包；
+- 与问题无关的真实项目、VPC、子网、安全组和公网地址。
+
+部署和回滚流程见 [INSTALL-DEPLOY.md](INSTALL-DEPLOY.md)，完整测试项见
+[TEST-CASES.md](TEST-CASES.md)。
