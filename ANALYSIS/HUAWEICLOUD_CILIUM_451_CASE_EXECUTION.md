@@ -238,7 +238,7 @@
 | REC-21 | P1/C | 节点 NotReady 超过回收窗口 | Pending | 待执行 |
 | REC-22 | P1/O | Operator 多副本 leader 切换 | Pass | audit69 删除Lease holder所在Operator，holder从node0003身份切到node0004 standby，2副本重新Ready；缩回1副本又安全切至node0002身份，Operator错误扫描0、Nodes 5/5、mesh 56/56 |
 | REC-23 | P2/C | 节点时间跳变 | Pending | 待执行 |
-| REC-24 | P2/C | 大量 Kubernetes 事件积压 | Pending | 待执行 |
+| REC-24 | P2/C | 大量 Kubernetes 事件积压 | Pass | audit96 在独立namespace一次创建1000个core/v1 Event并以50页分页读取，完整List用2110ms；积压窗口内Agent/Operator Pod UID与restart组合完全不变、CiliumNode池哈希不变、mesh56/56，删除namespace后5 Node、5/5 Agent、1/1 Operator、pool40、error0且无残留 |
 | SCALE-01 | P1/R | 40 Pod burst 均匀分布 | Pending | 待执行 |
 | SCALE-02 | P1/R | 单节点 burst | Pending | 待执行 |
 | SCALE-03 | P1/R | 五节点并发扩容 | Pass | audit73 单次并发创建10个Pod，通过强制hostname拓扑约束在五节点精确均分为每节点2个，2540 ms全部Ready；删除后五个CiliumNode的IPAM used计数均回到逐节点基线，未发生泄漏 |
