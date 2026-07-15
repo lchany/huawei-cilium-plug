@@ -23,6 +23,12 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
   Source: user instruction.
   Status: active
 
+- [2026-07-15] Long-duration stability tests are not required
+  Rule: Do not spend the current validation cycle waiting for 24-hour, 72-hour, or equivalent long-idle stability runs. Record STAB-01 through STAB-04 and BRACE-12 as user-approved Skip, while continuing bounded functional, recovery, concurrency, and regression testing.
+  Scope: HuaweiCloud Cilium five-node validation and the 451-case ledger.
+  Source: user instruction.
+  Status: active
+
 - [2026-07-13] Incremental validation workflow
   Rule: During live validation, test continuously; whenever a problem is found, modify the code immediately, compile the affected components, and rerun the failed case plus relevant regression cases before proceeding. Do not defer fixes, builds, or retests until the end.
   Scope: HuaweiCloud Cilium live-test and repair workflow.
@@ -102,10 +108,10 @@ This file records durable facts for the HuaweiCloud Cilium v1.12.19 patch valida
 ## Current Task State
 
 - Current goal: Execute and independently audit all 451 catalogued cases, fixing, rebuilding, deploying, and retesting until no executable case remains Pending or Fail.
-- Last verified: The ledger contains 398 Pass, 48 Pending, 5 approved Skip, and 0 recorded Fail. Audit90 Operator remains live 1/1. Audit95 fixed the unsupported HuaweiCloud IPv6 boundary, rolled deterministic Agent+BPF images to all five nodes, and passed complete customer regression. Audit96 proved isolation under a 1000-Event backlog. Audit97 added real kernel BPF coverage for metadata-only IPv4, correct-VLAN/wrong-MAC, and correct-MAC/wrong-VLAN; focused 20-repeat, full eight-object, clean replay, and post-test mesh passed. Runtime product/BPF code was unchanged by audit97, so audit95 Agents and audit90 Operator remain authoritative; audit64 Agent is retained as rollback. Physically truncated skb remains Pending rather than overclaimed. Literal 40-Pod cases remain Pending rather than being folded into the approved min-allocate environment Skip.
+- Last verified: The ledger contains 398 Pass, 43 Pending, 10 user-approved Skip, and 0 recorded Fail. Audit90 Operator remains live 1/1. Audit95 fixed the unsupported HuaweiCloud IPv6 boundary, rolled deterministic Agent+BPF images to all five nodes, and passed complete customer regression. Audit96 proved isolation under a 1000-Event backlog. Audit97 added real kernel BPF coverage for metadata-only IPv4, correct-VLAN/wrong-MAC, and correct-MAC/wrong-VLAN; focused 20-repeat, full eight-object, clean replay, and post-test mesh passed. Runtime product/BPF code was unchanged by audit97, so audit95 Agents and audit90 Operator remain authoritative; audit64 Agent is retained as rollback. The user approved skipping STAB-01 through STAB-04 and BRACE-12 rather than waiting for 24/72-hour or equivalent long-idle stability runs. Physically truncated skb remains Pending rather than overclaimed. Literal 40-Pod cases remain Pending rather than being folded into the approved min-allocate environment Skip.
 - Next likely step: continue executing the remaining P0/P1 recovery, failure-injection, upgrade, capacity, observability, and stability rows, repairing and repeating the complete regression/audit cycle after any defect.
 - Immediate live step: continue with the remaining executable permission, Secret delivery, IPAM failure/recovery, route/BPF boundary, capacity, stability, upgrade, and observability rows; keep literal 40-Pod and unsupported L7/physical packet cases Pending until their exact prerequisites are satisfied.
-- Blockers: Only the two user-approved environment-limit classes may be recorded as Skip: cross-AZ cases and physical `min-allocate=10` attainment. Full L7 Envoy coverage requires an image containing the Envoy layer and remains Pending, not implicitly passed.
+- Blockers: User-approved Skips are limited to cross-AZ cases, physical `min-allocate=10` attainment, and the explicitly waived 24/72-hour or equivalent long-idle stability cases STAB-01 through STAB-04 and BRACE-12. Full L7 Envoy coverage requires an image containing the Envoy layer and remains Pending, not implicitly passed.
 
 ## Evidence Pointers
 

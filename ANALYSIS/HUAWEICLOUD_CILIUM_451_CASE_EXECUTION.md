@@ -251,10 +251,10 @@
 | PERF-05 | P1/R | Pod 创建到 Ready 时延 | Pass | audit70 在node0004连续删除/重建20个DaemonSet Pod：P50/P95/P99=3998/4039/4084 ms；Scheduled到Cilium Create endpoint请求P50/P95=344/354 ms，20次镜像均为本机缓存命中；末尾mesh 56/56 |
 | PERF-06 | P1/R | Agent/Operator CPU、内存 | Pass | audit70以crictl累计CPU时钟和working set记录空闲、两轮mesh burst、60秒settled三阶段各6个Agent/Operator样本；CPU 1.707–2.799 mcore，working set 35.08–239.98 MiB，阶段内最大绝对内存变化2.04 MiB，无重启/严重日志且mesh 56/56 |
 | PERF-07 | P1/R | 云 API 调用率 | Pending | 待执行 |
-| STAB-01 | P1/R | 24 小时持续探测 | Pending | 待执行 |
-| STAB-02 | P1/R | 24 小时 Pod churn | Pending | 待执行 |
-| STAB-03 | P2/R | 72 小时发布候选 | Pending | 待执行 |
-| STAB-04 | P2/R | 长时间无变更空闲 | Pending | 待执行 |
+| STAB-01 | P1/R | 24 小时持续探测 | Skip | 用户明确批准不执行24/72小时稳定性类长耗时测试 |
+| STAB-02 | P1/R | 24 小时 Pod churn | Skip | 用户明确批准不执行24/72小时稳定性类长耗时测试 |
+| STAB-03 | P2/R | 72 小时发布候选 | Skip | 用户明确批准不执行24/72小时稳定性类长耗时测试 |
+| STAB-04 | P2/R | 长时间无变更空闲 | Skip | 用户明确批准不执行同类长时间稳定性测试 |
 | UPG-01 | P0/C | 旧候选→当前 15 patch 候选滚动升级 | Pass | audit90 从 audit81 滚动到最新 Operator：1/1 Ready、restart0、severe0，pool 映射哈希 `0202559d...` 不变，matrix 56/56；客户 HTTP 21项各100/100、TCP 4项各5/5、源IP 19/19 全通过 |
 | UPG-02 | P0/C | `0007` 前共享表→独立表 | Pass | audit83 真实模拟旧 Agent 留存的 trunk-ifindex 共享表规则；新 Agent 启动后收敛到 per-VLAN 独立表，清除 stale 规则且数据面/pool 无回归，最终更换为 restart0 新 Pod |
 | UPG-03 | P0/C | `0008` 前→支持线内 VLAN | Pending | 待执行 |
@@ -454,4 +454,4 @@
 | BRACE-09 | P1/S | 配置从 subnet IDs 切到 tags 的调谐边界 | Pass | 同一 Node 首次以显式 subnet-old 创建，UpdatedNode 后清空 IDs 并切到 role=new 标签，下一次创建精确选择 subnet-new；无旧配置残留。100轮普通、50轮race及单patch干净重放复测通过 |
 | BRACE-10 | P1/S | 配置从 SG A 切到 SG B | Pass | 与 subnet transition 同步验证：首次云请求仅含 sg-a，UpdatedNode 后下一请求仅含 sg-b；记录型 fake API 精确断言请求序列。100轮普通、50轮race及干净重放通过 |
 | BRACE-11 | P1/S | context cancel 发生在 limiter 等待后、API 调用前 | Pass | patch0043：limiter 改为单次 reservation、可取消 timer，并返回 context error；所有 HuaweiCloud API 在限流后检查错误。20ms deadline 测试确认 HTTP 请求数为0；10轮普通及 race 测试通过 |
-| BRACE-12 | P1/S | 24 小时并发 churn + resync | Pending | 待执行 |
+| BRACE-12 | P1/S | 24 小时并发 churn + resync | Skip | 用户明确批准不执行24/72小时稳定性类长耗时测试 |
