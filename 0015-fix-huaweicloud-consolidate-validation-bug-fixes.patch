@@ -1,11 +1,11 @@
-From 0a18e5bd1cb0204be403af389d167e681431d831 Mon Sep 17 00:00:00 2001
+From b6f03b494412ef218b0a110a0af43e89fcbf2c12 Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 10:35:29 +0800
+Date: Wed, 15 Jul 2026 11:43:47 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
  bpf/lib/huaweicloud.h                         |   69 +-
- bpf/tests/huaweicloud_test.c                  |  398 +++++++
+ bpf/tests/huaweicloud_test.c                  |  424 +++++++
  daemon/cmd/kube_proxy_replacement.go          |   19 +
  daemon/cmd/kube_proxy_replacement_test.go     |   35 +
  .../templates/cilium-operator/_helpers.tpl    |   15 +
@@ -46,7 +46,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/option/config_test.go                     |   51 +
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 42 files changed, 6814 insertions(+), 276 deletions(-)
+ 42 files changed, 6840 insertions(+), 276 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -176,10 +176,10 @@ index 187df88e7..b060344de 100644
  	if (skb_vlan_pop(ctx) < 0)
 diff --git a/bpf/tests/huaweicloud_test.c b/bpf/tests/huaweicloud_test.c
 new file mode 100644
-index 000000000..3b9dc84b6
+index 000000000..fc9728fb2
 --- /dev/null
 +++ b/bpf/tests/huaweicloud_test.c
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,424 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 +/* Copyright Authors of Cilium */
 +
@@ -253,6 +253,32 @@ index 000000000..3b9dc84b6
 +	vlan->encapsulated_proto = bpf_htons(ETH_P_IP);
 +	assert(hwc_from_netdev(ctx, &handled) == DROP_INVALID);
 +	assert(!handled);
++	test_finish();
++}
++
++CHECK("tc", "huaweicloud_truncated_packets")
++int test_huaweicloud_truncated_packets(struct __ctx_buff *ctx)
++{
++	void *data;
++	void *data_end;
++	struct ethhdr *eth;
++	bool handled;
++
++	test_init();
++	TEST("truncated_inline_vlan_packet_is_rejected", {
++		handled = true;
++		assert(test_skb_change_tail(ctx,
++					    sizeof(struct ethhdr) +
++					    sizeof(struct hwc_vlan_hdr) - 1,
++					    0) == 0);
++		data = (void *)(long)ctx->data;
++		data_end = (void *)(long)ctx->data_end;
++		eth = data;
++		assert((void *)(eth + 1) <= data_end);
++		eth->h_proto = bpf_htons(ETH_P_8021Q);
++		assert(hwc_from_netdev(ctx, &handled) == DROP_INVALID);
++		assert(!handled);
++	});
 +	test_finish();
 +}
 +

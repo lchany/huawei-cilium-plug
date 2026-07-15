@@ -165,7 +165,7 @@
 | VLAN-08 | P0/R | 入方向目标 MAC+VLAN 命中 | Pass | audit61 物理入口分别抓到目标 MAC+VLAN `fa:16:3e:ba:13:19+1443`、`fa:16:3e:ba:13:d9+662`；实时 pinned map 精确存在相同 key 并映射到 pod2/pod3 endpoint，流量成功投递 |
 | VLAN-09 | P1/C | VLAN 正确但 MAC 不匹配 | Pass | audit97 metadata-only IPv4包使用与map相同VLAN但不同目的MAC，内核BPF实执证明不命中错误endpoint：CTX_ACT_OK、`handled=false`且metadata保留给通用VLAN策略路径 |
 | VLAN-10 | P1/C | MAC 正确但 VLAN 不匹配 | Pass | audit97 metadata-only IPv4包使用与map相同目的MAC但不同VLAN，内核BPF实执证明不命中错误endpoint：CTX_ACT_OK、`handled=false`且metadata保留给通用VLAN策略路径 |
-| VLAN-11 | P1/C | 截断/非法 VLAN header | Pending | 待执行 |
+| VLAN-11 | P1/C | 截断/非法 VLAN header | Pass | audit98 在真实特权内核BPF ProgTestRun中构造仅17字节的skb：完整Ethernet header声明802.1Q，但VLAN header缺1字节；`hwc_from_netdev`稳定返回DROP_INVALID且`handled=false`，定向20轮、全8对象及干净补丁回放20轮/全对象均通过 |
 | VLAN-12 | P1/C | VLAN pop helper 失败 | Pending | 待执行 |
 | VLAN-13 | P1/O | 双层 QinQ | Pass | audit59 真实内核 BPF 包级测试分别构造 802.1ad→802.1Q 双标签与三标签，两者均稳定 `DROP_INVALID`/handled=false；20/20 完整迭代通过 |
 | VLAN-14 | P1/R | 非 trunk 接口 VLAN 流量 | Pending | 待执行 |
