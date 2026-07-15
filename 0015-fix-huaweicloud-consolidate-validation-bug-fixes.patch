@@ -1,6 +1,6 @@
-From cecd65a10ecba97c47f8705f8dda839e8daf62a5 Mon Sep 17 00:00:00 2001
-From: lchany <lchany@users.noreply.github.com>
-Date: Wed, 15 Jul 2026 09:04:55 +0800
+From 2017fefe578973c2cad58de8c0c62cf834d137d9 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-8564-1.novalocal>
+Date: Wed, 15 Jul 2026 09:31:30 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
@@ -42,9 +42,11 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/ipam/types/types.go                       |   13 +
  pkg/nodediscovery/huaweicloud_test.go         |   24 +-
  pkg/nodediscovery/nodediscovery.go            |   63 +-
+ pkg/option/config.go                          |   19 +-
+ pkg/option/config_test.go                     |   51 +
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 40 files changed, 6670 insertions(+), 274 deletions(-)
+ 42 files changed, 6738 insertions(+), 276 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -8539,6 +8541,105 @@ index 8a9880de8..90901af02 100644
  }
  
  func (n *NodeDiscovery) RegisterK8sGetters(k8sGetters k8sGetters) {
+diff --git a/pkg/option/config.go b/pkg/option/config.go
+index 926811946..e8ff4c573 100644
+--- a/pkg/option/config.go
++++ b/pkg/option/config.go
+@@ -2657,6 +2657,21 @@ func (c *DaemonConfig) validateIPv6ClusterAllocCIDR() error {
+ 	return nil
+ }
+ 
++func (c *DaemonConfig) validateIPv6IPAMMode() error {
++	if !c.EnableIPv6 {
++		return nil
++	}
++
++	switch c.IPAM {
++	case ipamOption.IPAMENI:
++		return fmt.Errorf("IPv6 cannot be enabled in ENI IPAM mode")
++	case ipamOption.IPAMHuaweiCloud:
++		return fmt.Errorf("IPv6 cannot be enabled in HuaweiCloud IPAM mode")
++	default:
++		return nil
++	}
++}
++
+ // Validate validates the daemon configuration
+ func (c *DaemonConfig) Validate() error {
+ 	if err := c.validateIPv6ClusterAllocCIDR(); err != nil {
+@@ -2672,8 +2687,8 @@ func (c *DaemonConfig) Validate() error {
+ 		return fmt.Errorf("RouteMetric '%d' cannot be negative", c.RouteMetric)
+ 	}
+ 
+-	if c.IPAM == ipamOption.IPAMENI && c.EnableIPv6 {
+-		return fmt.Errorf("IPv6 cannot be enabled in ENI IPAM mode")
++	if err := c.validateIPv6IPAMMode(); err != nil {
++		return err
+ 	}
+ 
+ 	if c.EnableIPv6NDP {
+diff --git a/pkg/option/config_test.go b/pkg/option/config_test.go
+index c80aef764..269dd5792 100644
+--- a/pkg/option/config_test.go
++++ b/pkg/option/config_test.go
+@@ -45,6 +45,57 @@ func (s *OptionSuite) TestValidateIPv6ClusterAllocCIDR(c *C) {
+ 	c.Assert(invalid4.validateIPv6ClusterAllocCIDR(), Not(IsNil))
+ }
+ 
++func TestValidateIPv6IPAMMode(t *testing.T) {
++	tests := []struct {
++		name    string
++		config  *DaemonConfig
++		wantErr bool
++	}{
++		{
++			name: "HuaweiCloud rejects IPv6",
++			config: &DaemonConfig{
++				IPAM:       ipamOption.IPAMHuaweiCloud,
++				EnableIPv6: true,
++			},
++			wantErr: true,
++		},
++		{
++			name: "HuaweiCloud accepts IPv4 only",
++			config: &DaemonConfig{
++				IPAM:       ipamOption.IPAMHuaweiCloud,
++				EnableIPv6: false,
++			},
++		},
++		{
++			name: "ENI continues to reject IPv6",
++			config: &DaemonConfig{
++				IPAM:       ipamOption.IPAMENI,
++				EnableIPv6: true,
++			},
++			wantErr: true,
++		},
++		{
++			name: "cluster pool keeps IPv6 support",
++			config: &DaemonConfig{
++				IPAM:       ipamOption.IPAMClusterPool,
++				EnableIPv6: true,
++			},
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			err := tt.config.validateIPv6IPAMMode()
++			if tt.wantErr && err == nil {
++				t.Fatal("expected an error")
++			}
++			if !tt.wantErr && err != nil {
++				t.Fatalf("unexpected error: %v", err)
++			}
++		})
++	}
++}
++
+ func TestGetEnvName(t *testing.T) {
+ 	type args struct {
+ 		option string
 diff --git a/plugins/cilium-cni/types/types.go b/plugins/cilium-cni/types/types.go
 index e7f3b2f0f..ea98ccac8 100644
 --- a/plugins/cilium-cni/types/types.go

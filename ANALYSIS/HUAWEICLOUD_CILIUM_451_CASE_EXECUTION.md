@@ -202,7 +202,7 @@
 | CONN-01 | P1/R | TCP 长连接 30 分钟 | Pass | 跨节点 BusyBox 单 TCP echo 连接每 30 秒发送一帧，连续 tick-0～tick-60 共 61/61，首尾及数量断言通过、进程 rc=0；临时 namespace 清理，5/5 Node Ready |
 | CONN-02 | P1/R | 1000 并发短连接 | Pass | pod2 以 50 worker×20 HTTP 短连接并发访问双后端 ClusterIP，共 1000 请求，`FAIL_WORKERS=0` |
 | CONN-03 | P1/R | UDP 持续流 | Pass | 4 个 matrix source Pod 并发调用 agnhost netexec UDP dial，各 1000 次；总响应 4000/4000、覆盖 4 个后端、RC=0 |
-| IPV6-01 | P1/O | IPv6 配置边界 | Pending | 待执行 |
+| IPV6-01 | P1/O | IPv6 配置边界 | Pass | audit95 修复HuaweiCloud IPAM未显式拒绝IPv6的配置缺口；新增边界测试确认HuaweiCloud+IPv6与ENI+IPv6拒绝、HuaweiCloud IPv4-only与cluster-pool IPv6保持通过，定向100、option全包20、race10、vet及干净回放通过；隔离实机Agent精确报`IPv6 cannot be enabled in HuaweiCloud IPAM mode`，audit95五节点滚动后客户HTTP21×100、TCP4×5、源IP19/19、matrix10×56/56全通过 |
 | NP-01 | P0/R | 无策略基线 | Pass | 同节点/跨节点 HTTP+UDP 4/4；清理策略后恢复 |
 | NP-02 | P0/R | namespace 默认 deny ingress/egress | Pass | enforcement 模式下同/跨节点 HTTP+UDP 4/4 阻断；audit 模式语义另行验证 |
 | NP-03 | P0/R | label L3 allow | Pass | set=a→set=b 同/跨节点允许，错误 label 保持阻断 |
