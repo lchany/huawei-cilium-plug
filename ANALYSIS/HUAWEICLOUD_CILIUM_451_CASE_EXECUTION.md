@@ -195,8 +195,8 @@
 | DNS-04 | P1/R | CoreDNS 单 Pod 重启 | Pass | 实机删除一个 CoreDNS Pod 前后解析均返回 2 个 Address；替换期间 pod2 连续 30/30 次 Service FQDN 查询成功，最终 CoreDNS 2/2 Ready |
 | EGR-01 | P0/R | Pod→同 VPC 内网 | Pass | 8 Pod mesh 56/56、Pod→Node 与客户 VPC 路径均通过 |
 | EGR-02 | P0/R | Pod→公网 | Pass | 明确配置 VPC 外出口 SNAT 前置后，公网 HTTPS 8/8 通过 |
-| EGR-03 | P1/R | 多目标并发出口 | Pending | 待执行 |
-| EGR-04 | P1/R | 公网失败但 VPC 内网正常 | Pending | 待执行 |
+| EGR-03 | P1/R | 多目标并发出口 | Pass | audit89 从客户 pod2 在每轮同一时间窗并发访问跨节点 pod3、ClusterIP 和另一节点 NodePort，20/20 轮三目标全部成功，Agent5/5、pool40、used-outside0 |
+| EGR-04 | P1/R | 公网失败但 VPC 内网正常 | Pass | 当前客户配置 `enable-ipv4-masquerade=false`，pod2 到公网 1.1.1.1 稳定超时；audit89 每轮将该失败与三条 VPC/服务路径并发，20/20 轮均证明公网失败不影响内网数据面 |
 | MTU-01 | P0/R | 小包、MTU-1、MTU、MTU+1 | Pass | MTU=1500；小包至 1472 payload 通过，1473 明确触发边界拒绝 |
 | MTU-02 | P1/R | DF ping/PMTUD | Pass | DF 1472 通过，1473 返回 `message too long, mtu=1500` |
 | CONN-01 | P1/R | TCP 长连接 30 分钟 | Pass | 跨节点 BusyBox 单 TCP echo 连接每 30 秒发送一帧，连续 tick-0～tick-60 共 61/61，首尾及数量断言通过、进程 rc=0；临时 namespace 清理，5/5 Node Ready |
