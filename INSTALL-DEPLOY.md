@@ -507,4 +507,4 @@ helm status cilium -n kube-system
 ```
 
 不要提交 Secret、认证头、AK/SK、私钥、真实密码或未经脱敏的完整云资源清单。
-按症状定位的方法见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+排查时按照 patch 重放、构建、镜像、Helm、Operator、IPAM 和数据面顺序逐层缩小范围。
