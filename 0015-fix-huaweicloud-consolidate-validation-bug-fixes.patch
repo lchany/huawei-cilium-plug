@@ -1,12 +1,13 @@
-From eee1675ac6b7a2a29698eeb2b99498f2c4699ff2 Mon Sep 17 00:00:00 2001
+From 323d2e1685246e6f56d12092e17a0c2b1570708d Mon Sep 17 00:00:00 2001
 From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 11:55:30 +0800
+Date: Wed, 15 Jul 2026 12:02:55 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
  bpf/lib/huaweicloud.h                         |   69 +-
  bpf/tests/huaweicloud_non_trunk_test.c        |   60 +
  bpf/tests/huaweicloud_test.c                  |  424 +++++++
+ bpf/tests/huaweicloud_vlan_pop_failure_test.c |   62 +
  daemon/cmd/kube_proxy_replacement.go          |   19 +
  daemon/cmd/kube_proxy_replacement_test.go     |   35 +
  .../templates/cilium-operator/_helpers.tpl    |   15 +
@@ -47,9 +48,10 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/option/config_test.go                     |   51 +
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 43 files changed, 6900 insertions(+), 276 deletions(-)
+ 44 files changed, 6962 insertions(+), 276 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_non_trunk_test.c
  create mode 100644 bpf/tests/huaweicloud_test.c
+ create mode 100644 bpf/tests/huaweicloud_vlan_pop_failure_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_test.go
@@ -672,6 +674,74 @@ index 000000000..fc9728fb2
 +}
 +
 +BPF_LICENSE("Dual BSD/GPL");
+diff --git a/bpf/tests/huaweicloud_vlan_pop_failure_test.c b/bpf/tests/huaweicloud_vlan_pop_failure_test.c
+new file mode 100644
+index 000000000..2c5007cea
+--- /dev/null
++++ b/bpf/tests/huaweicloud_vlan_pop_failure_test.c
+@@ -0,0 +1,62 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++/* Copyright Authors of Cilium */
++
++#include "common.h"
++
++#include "bpf/ctx/skb.h"
++#include "node_config.h"
++
++static __always_inline int test_skb_vlan_pop(struct __ctx_buff *ctx __maybe_unused)
++{
++	return -1;
++}
++
++#define ENABLE_HUAWEICLOUD_VLAN
++#define HWC_TRUNK_IFINDEX 1
++#define skb_vlan_pop test_skb_vlan_pop
++#include "lib/huaweicloud.h"
++#undef skb_vlan_pop
++
++static long (*test_skb_change_tail)(struct __ctx_buff *ctx, __u32 len,
++				    __u64 flags) = (void *)BPF_FUNC_skb_change_tail;
++
++CHECK("tc", "huaweicloud_vlan_pop_failure")
++int test_huaweicloud_vlan_pop_failure(struct __ctx_buff *ctx)
++{
++	__u64 vlan_key_storage = 0;
++	struct hwc_vlan_mac_key *vlan_key = (void *)&vlan_key_storage;
++	struct hwc_ep_info ep __align_stack_8 = {
++		.ifindex = 1,
++		.lxc_id = 1,
++	};
++	void *data;
++	void *data_end;
++	struct ethhdr *eth;
++	bool handled = false;
++
++	test_init();
++	vlan_key->vlan_id = 101;
++	vlan_key->mac[0] = 0x02;
++	vlan_key->mac[5] = 1;
++	assert(ctx->ifindex == HWC_TRUNK_IFINDEX);
++	assert(test_skb_change_tail(ctx,
++				    sizeof(struct ethhdr) + sizeof(struct iphdr),
++				    0) == 0);
++	data = (void *)(long)ctx->data;
++	data_end = (void *)(long)ctx->data_end;
++	eth = data;
++	assert((void *)(eth + 1) <= data_end);
++	memset(eth, 0, sizeof(*eth));
++	eth->h_dest[0] = 0x02;
++	eth->h_dest[5] = 1;
++	eth->h_proto = bpf_htons(ETH_P_IP);
++	assert(map_update_elem(&cilium_hwc_vlan_mac, vlan_key, &ep, BPF_ANY) == 0);
++	assert(skb_vlan_push(ctx, bpf_htons(ETH_P_8021Q), vlan_key->vlan_id) == 0);
++	assert(ctx->vlan_present);
++
++	assert(hwc_from_netdev(ctx, &handled) == DROP_HWC_VLAN_POP_FAIL);
++	assert(handled);
++	assert(ctx->vlan_present);
++	assert(map_delete_elem(&cilium_hwc_vlan_mac, vlan_key) == 0);
++	test_finish();
++}
 diff --git a/daemon/cmd/kube_proxy_replacement.go b/daemon/cmd/kube_proxy_replacement.go
 index aaf3abd48..5b2e924c2 100644
 --- a/daemon/cmd/kube_proxy_replacement.go
