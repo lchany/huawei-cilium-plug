@@ -1,6 +1,6 @@
-From bdc179e3cdf3b5bf3f58d29c2e6525cf52776129 Mon Sep 17 00:00:00 2001
+From cecd65a10ecba97c47f8705f8dda839e8daf62a5 Mon Sep 17 00:00:00 2001
 From: lchany <lchany@users.noreply.github.com>
-Date: Wed, 15 Jul 2026 08:54:23 +0800
+Date: Wed, 15 Jul 2026 09:04:55 +0800
 Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
 
 ---
@@ -24,7 +24,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  .../huaweicloud_subeni_test.go                |  221 ++++
  pkg/huaweicloud/api/api.go                    |  564 +++++++--
  pkg/huaweicloud/api/api_boundary_test.go      |  818 +++++++++++++
- pkg/huaweicloud/api/error_test.go             |   58 +
+ pkg/huaweicloud/api/error_test.go             |   96 ++
  pkg/huaweicloud/api/subnet_capacity.go        |   42 +-
  pkg/huaweicloud/api/subnet_capacity_test.go   |  217 +++-
  pkg/huaweicloud/eni/instances.go              |   36 +-
@@ -44,7 +44,7 @@ Subject: [PATCH] fix(huaweicloud): consolidate validation bug fixes
  pkg/nodediscovery/nodediscovery.go            |   63 +-
  plugins/cilium-cni/types/types.go             |  118 +-
  plugins/cilium-cni/types/types_test.go        |   49 +
- 40 files changed, 6632 insertions(+), 274 deletions(-)
+ 40 files changed, 6670 insertions(+), 274 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 daemon/cmd/kube_proxy_replacement_test.go
  create mode 100644 pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
@@ -4686,10 +4686,10 @@ index 000000000..f639c5c5c
 +}
 diff --git a/pkg/huaweicloud/api/error_test.go b/pkg/huaweicloud/api/error_test.go
 new file mode 100644
-index 000000000..05a174fc3
+index 000000000..5902d2b93
 --- /dev/null
 +++ b/pkg/huaweicloud/api/error_test.go
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,96 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -4701,6 +4701,7 @@ index 000000000..05a174fc3
 +	"fmt"
 +	"net/http"
 +	"net/http/httptest"
++	"strings"
 +	"testing"
 +)
 +
@@ -4746,6 +4747,43 @@ index 000000000..05a174fc3
 +	client := newTestClient(t, endpoint)
 +	if _, err := client.GetPortSecurityGroups(context.Background(), "port-1"); err == nil {
 +		t.Fatal("expected network disconnect error")
++	}
++}
++
++func TestAPIErrorIncludesRequestIDWithoutCredentials(t *testing.T) {
++	for _, status := range []int{
++		http.StatusBadRequest,
++		http.StatusUnauthorized,
++		http.StatusForbidden,
++		http.StatusNotFound,
++		http.StatusTooManyRequests,
++		http.StatusInternalServerError,
++	} {
++		t.Run(http.StatusText(status), func(t *testing.T) {
++			requestID := fmt.Sprintf("audit92-request-%d", status)
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				w.Header().Set("Content-Type", "application/json")
++				w.Header().Set("X-Request-Id", requestID)
++				w.WriteHeader(status)
++				_, _ = fmt.Fprint(w, `{"error_code":"VPC.TEST","error_msg":"fixture failure"}`)
++			}))
++			defer server.Close()
++
++			client := newTestClient(t, server.URL)
++			_, err := client.GetPortSecurityGroups(context.Background(), "port-1")
++			if err == nil {
++				t.Fatal("expected API error")
++			}
++			message := err.Error()
++			if !strings.Contains(message, requestID) {
++				t.Fatalf("request ID is missing from error: %v", err)
++			}
++			for _, sensitive := range []string{"test-ak", "test-sk", "Authorization"} {
++				if strings.Contains(message, sensitive) {
++					t.Fatalf("error leaked sensitive request data %q: %v", sensitive, err)
++				}
++			}
++		})
 +	}
 +}
 diff --git a/pkg/huaweicloud/api/subnet_capacity.go b/pkg/huaweicloud/api/subnet_capacity.go

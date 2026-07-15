@@ -7,7 +7,7 @@
 | BASE-01 | P0/S | 固定 upstream commit 应用全部 patch | Pass | 2026-07-14 audit60：从 upstream `a1d7fbd43` 顺序应用 15/15 成功，干净回放提交 `6fab161f8`、tree `e1d395fc4`，与权威源码树完全一致 |
 | BASE-02 | P0/S | 错误 upstream tag/commit | Pass | 错误 HEAD 被 `apply.sh` 以 rc=1 拒绝，HEAD 未变化；见 20260714 evidence |
 | BASE-03 | P1/S | patch 中断后恢复 | Pass | 强制 `git am` 失败后 abort，工作树干净，随后 15/15 完整重放 |
-| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix/验证测试统一为 0015；`series` 与目录均为 15 项，audit90 0015 SHA256 `a75efce0...`，干净重放 tree 与最终源码 `c95f0c0b...` 完全一致 |
+| BASE-04 | P0/S | patch 完整性 | Pass | 保留 14 个功能 patch，后续 bugfix/验证测试统一为 0015；`series` 与目录均为 15 项，audit92 0015 SHA256 `2436c960...`，干净重放 tree 与最终源码 `591aa02e...` 完全一致 |
 | BASE-05 | P0/S | Go 单元/组件定向测试 | Pass | audit60 干净回放：受影响 endpointmanager/metadata 普通、race、privileged 定向测试通过；endpointmanager 全包普通/race 单轮通过 |
 | BASE-06 | P0/S | privileged routing 测试 | Pass | 2026-07-14：`go test -mod=vendor -tags=privileged_tests ./pkg/datapath/linux/routing` 通过 |
 | BASE-07 | P0/S | BPF 全排列编译 | Pass | audit59 严格构建全部 8 个 `bpf/tests/*.o`，随后逐对象内核加载执行通过；HuaweiCloud 对象另连续执行20次 |
@@ -110,7 +110,7 @@
 | IPAM-16 | P0/R | 显式安全组 ID | Pass | `TestSecurityGroupPrecedenceValidationAndNormalization` 验证显式 SG 优先、去空/去重/稳定排序；连续 10 轮通过 |
 | IPAM-17 | P1/R | 安全组标签选择 | Pass | 同一测试验证标签选择优先于 trunk，`TestSecurityGroupTagSelectionIsScopedToVPC` 验证 VPC 约束；连续 10 轮通过 |
 | IPAM-18 | P0/R | 未配置 SG 时继承 trunk | Pass | `TestSecurityGroupsInheritedFromTrunkPort` 及 precedence 测试验证从 trunk 继承并规范化；连续 10 轮通过 |
-| IPAM-19 | P1/C | SG ID 无效/跨 VPC | Pending | 待执行 |
+| IPAM-19 | P1/C | SG ID 无效/跨 VPC | Pass | audit92 首次满池请求被VPC.9905配额先拒绝并明确排除；最终 cordon 单节点、暂停Operator、仅删除1个确认未使用SubENI腾出槽位后，无效SG Create被云端以安全组错误和request ID明确拒绝，父网卡7项集合哈希不变。恢复Operator后旧ID消失、精确云端集合=新pool8、总pool40、used-outside0、error0、mesh56/56 |
 | IPAM-20 | P1/R | 多安全组 | Pass | 显式、标签、trunk 三条路径均验证多 SG、去重和稳定排序，且 101 个超过云上限会 fail closed；连续 10 轮通过 |
 | IPAM-21 | P1/R | SubENI 资源标签 | Pass | audit81 修复为 Create/BatchCreate 请求内联 tags，生产 Client 在 cn-south-1 真实单建和批建后 Show 精确返回两项预期资源标签，清理/恢复后无残留 |
 | IPAM-22 | P1/R | Agent-only 配置 | Pass | `TestApplyHuaweiCloudIPAMNetConf/NetConf` 验证空 CNI 字段不覆盖 Agent 已有水位、子网和 SG；连续 10 轮通过 |
@@ -276,7 +276,7 @@
 | OBS-05 | P0/R | trunk 双端抓包 | Pass | audit61 在 node0005/node0002 的 trunk 物理口双端并发抓包，仅过滤测试 Pod IP 与 ICMP/TCP/UDP；分别记录185/208帧、VLAN1443/662、双向分片和校验信息，内核丢包均为0 |
 | OBS-06 | P0/R | Cilium monitor/drop counters | Pass | 五节点 `cilium status --brief` 全 OK 并读取 forward/drop 指标；在 pod2 连续 30 次 ClusterIP 请求期间抓取其本节点 monitor：385 events、357 含 pod2 IP、0 drop，双向 Service NAT trace 完整 |
 | OBS-07 | P1/R | Kubernetes Event | Pass | 2026-07-14 全 namespace 按 lastTimestamp 审计：5/5 Node Ready、Agent 5/5 Running/0 restart；仅见 rollout 启动窗口的瞬时 startup-probe connection-refused，随后全部健康，无持续 Warning |
-| OBS-08 | P1/R | 云 API request ID | Pending | 待执行 |
+| OBS-08 | P1/R | 云 API request ID | Pass | audit92 对400/401/403/404/429/500逐项注入`X-Request-Id`，归一化错误均保留精确ID且不含AK/SK/Authorization；定向100、race20、API全包20+race20、HuaweiCloud全域10+race10及vet通过。真实无效SG错误也确认request ID存在 |
 | OBS-09 | P1/R | 资源变化审计 | Pending | 待执行 |
 | OBS-10 | P0/R | 敏感信息二次扫描 | Pass | rendered resources、Pod spec、Operator logs 均无凭据值 |
 | OBS-11 | P1/R | 证据目录权限 | Pass | 本地 `ANALYSIS` 为 root:root 0755，核心台账/证据为 root:root 0644；递归检查无 group/other-writable 目录或文件 |
