@@ -9,6 +9,7 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 | --- | --- |
 | upstream tag | `v1.12.19` |
 | upstream commit | `a1d7fbd43b563c809330b1c3e28165a3e7ff43aa` |
+| archive tag | `v1.1.1` |
 | patch 数量 | 4 |
 | 控制面 patch | `0001-huaweicloud-control-plane.patch` |
 | 数据面 patch | `0002-huaweicloud-data-plane.patch` |
@@ -18,6 +19,12 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 前 3 个 patch 分别承载云 API、IPAM 和 Operator 等控制面实现，BPF、路由和 Endpoint
 运行时数据面实现，以及配套测试。`0004` 预留给后续 bug 修复和需求优化。按 `series`
 顺序应用，不能跳过或交换顺序。
+
+## 更新记录
+
+- 2026-07-29：新增 `0004-huaweicloud-fixes.patch`，把 HuaweiCloud Sub-ENI 启动阶段
+  的 gateway 查询改成批量查询；`series` 扩展为 4 个 patch；archive tag 升级到
+  `v1.1.1`。
 
 ## 快速开始
 
