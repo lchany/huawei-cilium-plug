@@ -9,13 +9,15 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 | --- | --- |
 | upstream tag | `v1.12.19` |
 | upstream commit | `a1d7fbd43b563c809330b1c3e28165a3e7ff43aa` |
-| patch 数量 | 3 |
+| patch 数量 | 4 |
 | 控制面 patch | `0001-huaweicloud-control-plane.patch` |
 | 数据面 patch | `0002-huaweicloud-data-plane.patch` |
 | 测试 patch | `0003-huaweicloud-tests.patch` |
+| 修复 patch | `0004-huaweicloud-fixes.patch` |
 
-三个 patch 分别承载云 API、IPAM 和 Operator 等控制面实现，BPF、路由和 Endpoint
-运行时数据面实现，以及配套测试。按 `series` 顺序应用，不能跳过或交换顺序。
+前 3 个 patch 分别承载云 API、IPAM 和 Operator 等控制面实现，BPF、路由和 Endpoint
+运行时数据面实现，以及配套测试。`0004` 预留给后续 bug 修复和需求优化。按 `series`
+顺序应用，不能跳过或交换顺序。
 
 ## 快速开始
 
@@ -37,7 +39,7 @@ test "$(git rev-parse HEAD)" = \
 "$WORKDIR/huawei-cilium-patches/apply.sh"
 ```
 
-应用成功后应新增 3 个提交，工作区保持干净：
+应用成功后应新增 4 个提交，工作区保持干净：
 
 ```bash
 test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 3
@@ -65,6 +67,7 @@ datapath 后，连接跟踪、Service 和 NetworkPolicy 仍由 Cilium 负责。
 ├── 0001-huaweicloud-control-plane.patch
 ├── 0002-huaweicloud-data-plane.patch
 ├── 0003-huaweicloud-tests.patch
+├── 0004-huaweicloud-fixes.patch
 ├── series                 # patch 应用顺序
 ├── apply.sh               # 基线检查和 patch 重放
 ├── build-local.sh         # 测试、镜像构建和离线导出

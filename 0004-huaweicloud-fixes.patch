@@ -1,0 +1,545 @@
+From 814a2b0d4c7cc03550762c1ff164d85be75ec7f3 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-8564-1.novalocal>
+Date: Wed, 29 Jul 2026 14:19:19 +0800
+Subject: [PATCH 4/4] huaweicloud: batch sub-eni gateway lookups
+
+---
+ pkg/huaweicloud/api/api.go                    | 257 +++++++++++++++---
+ pkg/huaweicloud/api/api_boundary_test.go      | 118 +++++++-
+ .../api/api_integration_mock_test.go          |  53 ++++
+ 3 files changed, 389 insertions(+), 39 deletions(-)
+ create mode 100644 pkg/huaweicloud/api/api_integration_mock_test.go
+
+diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
+index b9ed4f0ef..a59a09f26 100644
+--- a/pkg/huaweicloud/api/api.go
++++ b/pkg/huaweicloud/api/api.go
+@@ -606,59 +606,235 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
+ }
+ 
+ func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
+-	if subENI == nil {
+-		return fmt.Errorf("cannot resolve gateway for nil sub-ENI")
++	return c.fillSubENIsGatewayInfo(ctx, []*eniTypes.SubENI{subENI}, cachedSubnets)
++}
++
++type subENIGatewayKey struct {
++	subnetID  string
++	gatewayIP string
++}
++
++const gatewayLookupBatchSize = 50
++
++func (c *Client) fillSubENIsGatewayInfo(ctx context.Context, subENIs []*eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
++	if len(subENIs) == 0 {
++		return nil
+ 	}
+-	if subENI.SubnetID == "" {
+-		return fmt.Errorf("cannot resolve gateway for sub-ENI %s without subnet ID", subENI.ID)
++
++	missingSubnetIDs := map[string]struct{}{}
++	for _, subENI := range subENIs {
++		if subENI == nil {
++			return fmt.Errorf("cannot resolve gateway for nil sub-ENI")
++		}
++		if subENI.SubnetID == "" {
++			return fmt.Errorf("cannot resolve gateway for sub-ENI %s without subnet ID", subENI.ID)
++		}
++		if subENI.GatewayIP != "" && subENI.SubnetCIDR != "" {
++			continue
++		}
++		gatewayIP, subnetCIDR, ok := resolveSubENIMetadataFromCache(subENI.SubnetID, subENI.PrivateIPAddress, cachedSubnets)
++		if ok {
++			if subENI.GatewayIP == "" {
++				subENI.GatewayIP = gatewayIP
++			}
++			if subENI.SubnetCIDR == "" {
++				subENI.SubnetCIDR = subnetCIDR
++			}
++			continue
++		}
++		missingSubnetIDs[subENI.SubnetID] = struct{}{}
+ 	}
+-	if subENI.GatewayIP == "" || subENI.SubnetCIDR == "" {
+-		gatewayIP, subnetCIDR, err := c.resolveSubENISubnetMetadata(ctx, subENI.SubnetID, subENI.PrivateIPAddress, cachedSubnets)
++
++	if len(missingSubnetIDs) != 0 {
++		virsubnets, err := c.listVirsubnetsByID(ctx, sortedKeys(missingSubnetIDs))
+ 		if err != nil {
+ 			return err
+ 		}
+-		if subENI.GatewayIP == "" {
+-			subENI.GatewayIP = gatewayIP
++		for _, subENI := range subENIs {
++			if subENI.GatewayIP != "" && subENI.SubnetCIDR != "" {
++				continue
++			}
++			virsubnet, ok := virsubnets[subENI.SubnetID]
++			if !ok {
++				return fmt.Errorf("subnet %s not found", subENI.SubnetID)
++			}
++			gatewayIP, subnetCIDR, err := selectIPv4SubnetCIDRAndGateway(virsubnet.SubnetCidrs, subENI.PrivateIPAddress)
++			if err != nil {
++				return err
++			}
++			if subENI.GatewayIP == "" {
++				subENI.GatewayIP = gatewayIP
++			}
++			if subENI.SubnetCIDR == "" {
++				subENI.SubnetCIDR = subnetCIDR
++			}
+ 		}
+-		if subENI.SubnetCIDR == "" {
+-			subENI.SubnetCIDR = subnetCIDR
++	}
++
++	gatewayKeys := make(map[subENIGatewayKey]struct{})
++	for _, subENI := range subENIs {
++		if subENI.GatewayIP == "" || subENI.GatewayMAC != "" {
++			continue
+ 		}
++		gatewayKeys[subENIGatewayKey{subnetID: subENI.SubnetID, gatewayIP: subENI.GatewayIP}] = struct{}{}
+ 	}
+-	if subENI.GatewayIP == "" || subENI.GatewayMAC != "" {
++
++	if len(gatewayKeys) == 0 {
+ 		return nil
+ 	}
+-
+-	deviceOwners := []string{"network:router_interface_distributed"}
+-	privateIPs := []string{fmt.Sprintf("ip_address=%s", subENI.GatewayIP)}
+-	virsubnetIDs := []string{subENI.SubnetID}
+-	request := &vpcmodel.ListPortsRequest{
+-		DeviceOwner: &deviceOwners,
+-		PrivateIps:  &privateIPs,
+-		VirsubnetId: &virsubnetIDs,
++	gatewayMACs, err := c.listGatewayMACs(ctx, sortedGatewayKeys(gatewayKeys))
++	if err != nil {
++		return err
++	}
++	for _, subENI := range subENIs {
++		if subENI.GatewayIP == "" || subENI.GatewayMAC != "" {
++			continue
++		}
++		key := subENIGatewayKey{subnetID: subENI.SubnetID, gatewayIP: subENI.GatewayIP}
++		gatewayMAC, ok := gatewayMACs[key]
++		if !ok {
++			return fmt.Errorf("router port not found for subnet %s gateway %s", subENI.SubnetID, subENI.GatewayIP)
++		}
++		subENI.GatewayMAC = gatewayMAC
+ 	}
+ 
+-	if err := c.limiter.Limit(ctx, "ListPorts"); err != nil {
+-		return err
++	return nil
++}
++
++func resolveSubENIMetadataFromCache(subnetID, privateIP string, cachedSubnets ipamTypes.SubnetMap) (gatewayIP, subnetCIDR string, ok bool) {
++	if subnetID == "" {
++		return "", "", false
+ 	}
+-	response, err := c.vpcClient.ListPorts(request)
+-	if err != nil {
+-		return normalizeAPIError(err)
++	if subnet := cachedSubnets[subnetID]; subnet != nil {
++		cidr := ""
++		if subnet.CIDR != nil {
++			cidr = subnet.CIDR.String()
++		}
++		if subnet.GatewayIP != "" && cidr != "" && (privateIP == "" || belongsToCIDR(privateIP, cidr)) {
++			return subnet.GatewayIP, cidr, true
++		}
+ 	}
+-	if response.Ports == nil || len(*response.Ports) == 0 {
+-		return fmt.Errorf("router port not found for subnet %s gateway %s", subENI.SubnetID, subENI.GatewayIP)
++	return "", "", false
++}
++
++func sortedKeys(items map[string]struct{}) []string {
++	keys := make([]string, 0, len(items))
++	for key := range items {
++		keys = append(keys, key)
+ 	}
++	sort.Strings(keys)
++	return keys
++}
+ 
+-	gatewayMAC := (*response.Ports)[0].MacAddress
+-	if strings.TrimSpace(gatewayMAC) == "" {
+-		return fmt.Errorf("router port has empty MAC for subnet %s gateway %s", subENI.SubnetID, subENI.GatewayIP)
++func sortedGatewayKeys(items map[subENIGatewayKey]struct{}) []subENIGatewayKey {
++	keys := make([]subENIGatewayKey, 0, len(items))
++	for key := range items {
++		keys = append(keys, key)
+ 	}
+-	for _, port := range (*response.Ports)[1:] {
+-		if !strings.EqualFold(port.MacAddress, gatewayMAC) {
+-			return fmt.Errorf("multiple router ports have conflicting MACs for subnet %s gateway %s", subENI.SubnetID, subENI.GatewayIP)
++	sort.Slice(keys, func(i, j int) bool {
++		if keys[i].subnetID == keys[j].subnetID {
++			return keys[i].gatewayIP < keys[j].gatewayIP
++		}
++		return keys[i].subnetID < keys[j].subnetID
++	})
++	return keys
++}
++
++func (c *Client) listVirsubnetsByID(ctx context.Context, subnetIDs []string) (map[string]vpcmodel.Virsubnet, error) {
++	result := make(map[string]vpcmodel.Virsubnet, len(subnetIDs))
++	for start := 0; start < len(subnetIDs); start += 2000 {
++		end := start + 2000
++		if end > len(subnetIDs) {
++			end = len(subnetIDs)
++		}
++		ids := append([]string(nil), subnetIDs[start:end]...)
++		limit := int32(2000)
++		request := &vpcmodel.ListVirsubnetsRequest{Limit: &limit, Id: &ids}
++		seenMarkers := map[string]struct{}{}
++		for {
++			if err := ctx.Err(); err != nil {
++				return nil, err
++			}
++			if err := c.limiter.Limit(ctx, "ListVirsubnets"); err != nil {
++				return nil, err
++			}
++			response, err := c.vpcClient.ListVirsubnets(request)
++			if err != nil {
++				return nil, normalizeAPIError(err)
++			}
++			if response.Virsubnets != nil {
++				for _, item := range *response.Virsubnets {
++					result[item.Id] = item
++				}
++			}
++			marker, err := nextUniqueMarker(response.PageInfo, seenMarkers, "ListVirsubnets")
++			if err != nil {
++				return nil, err
++			}
++			request.Marker = marker
++			if marker == nil {
++				break
++			}
+ 		}
+ 	}
+-	subENI.GatewayMAC = gatewayMAC
+-	return nil
++	return result, nil
++}
++
++func (c *Client) listGatewayMACs(ctx context.Context, keys []subENIGatewayKey) (map[subENIGatewayKey]string, error) {
++	result := make(map[subENIGatewayKey]string, len(keys))
++	deviceOwners := []string{"network:router_interface_distributed"}
++
++	for start := 0; start < len(keys); start += gatewayLookupBatchSize {
++		end := start + gatewayLookupBatchSize
++		if end > len(keys) {
++			end = len(keys)
++		}
++		batch := keys[start:end]
++		expected := make(map[subENIGatewayKey]struct{}, len(batch))
++		virsubnetSet := map[string]struct{}{}
++		privateIPSet := map[string]struct{}{}
++		for _, key := range batch {
++			expected[key] = struct{}{}
++			virsubnetSet[key.subnetID] = struct{}{}
++			privateIPSet[fmt.Sprintf("ip_address=%s", key.gatewayIP)] = struct{}{}
++		}
++		virsubnetIDs := sortedKeys(virsubnetSet)
++		privateIPs := sortedKeys(privateIPSet)
++		request := &vpcmodel.ListPortsRequest{
++			DeviceOwner: &deviceOwners,
++			PrivateIps:  &privateIPs,
++			VirsubnetId: &virsubnetIDs,
++		}
++
++		if err := c.limiter.Limit(ctx, "ListPorts"); err != nil {
++			return nil, err
++		}
++		response, err := c.vpcClient.ListPorts(request)
++		if err != nil {
++			return nil, normalizeAPIError(err)
++		}
++		if response.Ports == nil {
++			continue
++		}
++		for _, port := range *response.Ports {
++			for _, privateIP := range port.PrivateIps {
++				key := subENIGatewayKey{subnetID: port.VirsubnetId, gatewayIP: privateIP.IpAddress}
++				if _, ok := expected[key]; !ok {
++					continue
++				}
++				gatewayMAC := strings.TrimSpace(port.MacAddress)
++				if gatewayMAC == "" {
++					return nil, fmt.Errorf("router port has empty MAC for subnet %s gateway %s", key.subnetID, key.gatewayIP)
++				}
++				if existing, ok := result[key]; ok && !strings.EqualFold(existing, gatewayMAC) {
++					return nil, fmt.Errorf("multiple router ports have conflicting MACs for subnet %s gateway %s", key.subnetID, key.gatewayIP)
++				}
++				result[key] = gatewayMAC
++			}
++		}
++	}
++
++	return result, nil
+ }
+ 
+ func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, privateIP string, cachedSubnets ipamTypes.SubnetMap) (string, string, error) {
+@@ -883,14 +1059,13 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+ 	}
+ 
+ 	instances := ipamTypes.NewInstanceMap()
++	subENIs := make([]*eniTypes.SubENI, 0, len(items))
++	subENIToInstance := map[string]string{}
+ 	for _, item := range items {
+ 		subENI := parseSubENI(&item)
+ 		if err := validateSubENI(subENI); err != nil {
+ 			return nil, err
+ 		}
+-		if err := c.fillSubENIGatewayInfo(ctx, subENI, subnets); err != nil {
+-			return nil, err
+-		}
+ 		instanceID := parentToInstance[subENI.ParentID]
+ 		if instanceID == "" {
+ 			instanceID = item.InstanceId
+@@ -898,6 +1073,14 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+ 		if instanceID == "" {
+ 			continue
+ 		}
++		subENIs = append(subENIs, subENI)
++		subENIToInstance[subENI.ID] = instanceID
++	}
++	if err := c.fillSubENIsGatewayInfo(ctx, subENIs, subnets); err != nil {
++		return nil, err
++	}
++	for _, subENI := range subENIs {
++		instanceID := subENIToInstance[subENI.ID]
+ 		instances.Update(instanceID, ipamTypes.InterfaceRevision{Resource: subENI})
+ 	}
+ 
+diff --git a/pkg/huaweicloud/api/api_boundary_test.go b/pkg/huaweicloud/api/api_boundary_test.go
+index 61c733f51..1d2c3fb31 100644
+--- a/pkg/huaweicloud/api/api_boundary_test.go
++++ b/pkg/huaweicloud/api/api_boundary_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"net"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"strings"
+@@ -19,7 +20,9 @@ import (
+ 	vpcmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/model"
+ 
+ 	"github.com/cilium/cilium/pkg/api/helpers"
++	"github.com/cilium/cilium/pkg/cidr"
+ 	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+ )
+ 
+ type rateLimitRecorder struct {
+@@ -180,7 +183,7 @@ func TestBatchCreateCountBoundaries(t *testing.T) {
+ 					return
+ 				}
+ 				if r.Method == http.MethodGet {
+-					_, _ = fmt.Fprint(w, `{"ports":[{"mac_address":"fa:16:3e:00:00:fe"}]}`)
++					_, _ = fmt.Fprint(w, `{"ports":[{"virsubnet_id":"subnet-1","mac_address":"fa:16:3e:00:00:fe","private_ips":[{"ip_address":"10.0.0.1"}]}]}`)
+ 					return
+ 				}
+ 				items := make([]map[string]interface{}, count)
+@@ -285,7 +288,7 @@ func TestCreateRequestsSendTagsInline(t *testing.T) {
+ 					_, _ = fmt.Fprint(w, `{"virsubnets":[{"id":"subnet-1","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.0.0/24","gateway_ip":"10.0.0.1"}]}]}`)
+ 					return
+ 				}
+-				_, _ = fmt.Fprint(w, `{"ports":[{"mac_address":"fa:16:3e:00:00:fe"}]}`)
++				_, _ = fmt.Fprint(w, `{"ports":[{"virsubnet_id":"subnet-1","mac_address":"fa:16:3e:00:00:fe","private_ips":[{"ip_address":"10.0.0.1"}]}]}`)
+ 			}))
+ 			defer server.Close()
+ 
+@@ -735,6 +738,102 @@ func TestFillSubENIGatewayInfoRejectsMissingOrAmbiguousRouterPort(t *testing.T)
+ 	}
+ }
+ 
++func TestFillSubENIsGatewayInfoBatchesListPortsWithSDKFields(t *testing.T) {
++	portRequests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		if !strings.Contains(r.URL.Path, "ports") {
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++		portRequests++
++		query := r.URL.Query()
++		if query.Get("limit") != "" || query.Get("marker") != "" {
++			t.Fatalf("ListPorts request used unsupported pagination fields: %s", r.URL.RawQuery)
++		}
++		if got := query["device_owner"]; len(got) != 1 || got[0] != "network:router_interface_distributed" {
++			t.Fatalf("unexpected device_owner query: %v", got)
++		}
++		if got := query["virsubnet_id"]; len(got) != 1 || got[0] != "subnet-1" {
++			t.Fatalf("unexpected virsubnet_id query: %v", got)
++		}
++		if got := query["private_ips"]; len(got) != 1 || got[0] != "ip_address=10.0.0.1" {
++			t.Fatalf("unexpected private_ips query: %v", got)
++		}
++		_, _ = fmt.Fprint(w, `{"ports":[{"virsubnet_id":"subnet-1","mac_address":"fa:16:3e:00:00:fe","private_ips":[{"ip_address":"10.0.0.1"}]}]}`)
++	}))
++	defer server.Close()
++
++	client := newTestClient(t, server.URL)
++	subENIs := []*eniTypes.SubENI{
++		{ID: "eni-1", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.2", MACAddress: "fa:16:3e:00:00:01", VlanID: 1, ParentID: "port-1"},
++		{ID: "eni-2", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.3", MACAddress: "fa:16:3e:00:00:02", VlanID: 2, ParentID: "port-1"},
++		{ID: "eni-3", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.4", MACAddress: "fa:16:3e:00:00:03", VlanID: 3, ParentID: "port-1"},
++	}
++	if err := client.fillSubENIsGatewayInfo(context.Background(), subENIs, testSubnetMap(t, "subnet-1", "10.0.0.1", "10.0.0.0/24")); err != nil {
++		t.Fatal(err)
++	}
++	if portRequests != 1 {
++		t.Fatalf("ListPorts requests=%d, want 1", portRequests)
++	}
++	for _, subENI := range subENIs {
++		if subENI.GatewayMAC != "fa:16:3e:00:00:fe" || subENI.GatewayIP != "10.0.0.1" || subENI.SubnetCIDR != "10.0.0.0/24" {
++			t.Fatalf("subENI gateway was not filled from batch lookup: %#v", subENI)
++		}
++	}
++}
++
++func TestFillSubENIsGatewayInfoBatchesVirsubnetFallback(t *testing.T) {
++	virsubnetRequests := 0
++	portRequests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch {
++		case strings.Contains(r.URL.Path, "virsubnets"):
++			virsubnetRequests++
++			query := r.URL.Query()
++			if got := query.Get("limit"); got != "2000" {
++				t.Fatalf("unexpected ListVirsubnets limit %q", got)
++			}
++			ids := strings.Join(query["id"], ",")
++			if !strings.Contains(ids, "subnet-1") || !strings.Contains(ids, "subnet-2") {
++				t.Fatalf("unexpected ListVirsubnets id query: %v", query["id"])
++			}
++			_, _ = fmt.Fprint(w, `{"virsubnets":[
++				{"id":"subnet-1","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.0.0/24","gateway_ip":"10.0.0.1"}]},
++				{"id":"subnet-2","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.1.0/24","gateway_ip":"10.0.1.1"}]}
++			]}`)
++		case strings.Contains(r.URL.Path, "ports"):
++			portRequests++
++			query := r.URL.Query()
++			if query.Get("limit") != "" || query.Get("marker") != "" {
++				t.Fatalf("ListPorts request used unsupported pagination fields: %s", r.URL.RawQuery)
++			}
++			_, _ = fmt.Fprint(w, `{"ports":[
++				{"virsubnet_id":"subnet-1","mac_address":"fa:16:3e:00:00:01","private_ips":[{"ip_address":"10.0.0.1"}]},
++				{"virsubnet_id":"subnet-2","mac_address":"fa:16:3e:00:00:02","private_ips":[{"ip_address":"10.0.1.1"}]}
++			]}`)
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++	defer server.Close()
++
++	client := newTestClient(t, server.URL)
++	subENIs := []*eniTypes.SubENI{
++		{ID: "eni-1", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.2", MACAddress: "fa:16:3e:00:00:11", VlanID: 1, ParentID: "port-1"},
++		{ID: "eni-2", SubnetID: "subnet-2", PrivateIPAddress: "10.0.1.2", MACAddress: "fa:16:3e:00:00:12", VlanID: 2, ParentID: "port-2"},
++	}
++	if err := client.fillSubENIsGatewayInfo(context.Background(), subENIs, nil); err != nil {
++		t.Fatal(err)
++	}
++	if virsubnetRequests != 1 || portRequests != 1 {
++		t.Fatalf("virsubnetRequests=%d portRequests=%d, want 1/1", virsubnetRequests, portRequests)
++	}
++	if subENIs[0].GatewayMAC != "fa:16:3e:00:00:01" || subENIs[1].GatewayMAC != "fa:16:3e:00:00:02" {
++		t.Fatalf("unexpected gateway MACs: %#v", subENIs)
++	}
++}
++
+ func TestFinalizeRollsBackAllCreatedSubENIsOnGatewayFailure(t *testing.T) {
+ 	deletes := 0
+ 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+@@ -761,6 +860,21 @@ func TestFinalizeRollsBackAllCreatedSubENIsOnGatewayFailure(t *testing.T) {
+ 	}
+ }
+ 
++func testSubnetMap(t *testing.T, id, gatewayIP, cidrString string) ipamTypes.SubnetMap {
++	t.Helper()
++	_, ipnet, err := net.ParseCIDR(cidrString)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return ipamTypes.SubnetMap{
++		id: &ipamTypes.Subnet{
++			ID:        id,
++			GatewayIP: gatewayIP,
++			CIDR:      cidr.NewCIDR(ipnet),
++		},
++	}
++}
++
+ func TestHuaweiCloudAPIRateLimitBoundaries(t *testing.T) {
+ 	metrics := &rateLimitRecorder{delays: make(chan time.Duration, 64)}
+ 	limiter := helpers.NewApiLimiter(metrics, 20, 40)
+diff --git a/pkg/huaweicloud/api/api_integration_mock_test.go b/pkg/huaweicloud/api/api_integration_mock_test.go
+new file mode 100644
+index 000000000..7e9308021
+--- /dev/null
++++ b/pkg/huaweicloud/api/api_integration_mock_test.go
+@@ -0,0 +1,53 @@
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"os"
++	"testing"
++
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++)
++
++func TestFillSubENIsGatewayInfo_BatchesGatewayQueriesAgainstMockEndpoint(t *testing.T) {
++	endpoint := os.Getenv("HUAWEICLOUD_MOCK_ENDPOINT")
++	statsEndpoint := os.Getenv("HUAWEICLOUD_MOCK_STATS_ENDPOINT")
++	if endpoint == "" || statsEndpoint == "" {
++		t.Skip("mock endpoint not configured")
++	}
++
++	client, err := NewClient("ak", "sk", "project-1", "", endpoint)
++	if err != nil {
++		t.Fatalf("new client: %v", err)
++	}
++
++	subENIs := []*eniTypes.SubENI{
++		{ID: "subeni-0", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.10", MACAddress: "fa:16:3e:00:00:00", VlanID: 100, ParentID: "port-parent-1"},
++		{ID: "subeni-1", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.11", MACAddress: "fa:16:3e:00:00:01", VlanID: 101, ParentID: "port-parent-1"},
++		{ID: "subeni-2", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.12", MACAddress: "fa:16:3e:00:00:02", VlanID: 102, ParentID: "port-parent-1"},
++		{ID: "subeni-3", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.13", MACAddress: "fa:16:3e:00:00:03", VlanID: 103, ParentID: "port-parent-1"},
++	}
++
++	if err := client.fillSubENIsGatewayInfo(context.Background(), subENIs, nil); err != nil {
++		t.Fatalf("fill gateway info: %v", err)
++	}
++
++	resp, err := http.Get(statsEndpoint)
++	if err != nil {
++		t.Fatalf("get stats: %v", err)
++	}
++	defer resp.Body.Close()
++
++	counts := map[string]int{}
++	if err := json.NewDecoder(resp.Body).Decode(&counts); err != nil {
++		t.Fatalf("decode stats: %v", err)
++	}
++
++	if got := counts["/v3/project-1/vpc/virsubnets"]; got != 1 {
++		t.Fatalf("unexpected list virsubnets count: %d", got)
++	}
++	if got := counts["/v3/project-1/ports"]; got != 1 {
++		t.Fatalf("unexpected list ports count: %d", got)
++	}
++}
+-- 
+2.33.0
+
