@@ -1,15 +1,525 @@
-From 814a2b0d4c7cc03550762c1ff164d85be75ec7f3 Mon Sep 17 00:00:00 2001
-From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 29 Jul 2026 14:19:19 +0800
-Subject: [PATCH 4/4] huaweicloud: batch sub-eni gateway lookups
+From 505988f002e3e34a7be66475974ed07df3da099b Mon Sep 17 00:00:00 2001
+From: HuaweiCloudDeveloper <huaweicloud-developer@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 18:35:20 +0800
+Subject: [PATCH 4/4] huaweicloud: batch lookups and preserve gateway neighbors
 
 ---
+ pkg/datapath/linux/node.go                    |  13 +
+ pkg/datapath/linux/node_linux_test.go         | 122 +++++++++
+ pkg/endpointmanager/huaweicloud_subeni.go     |  85 +++++-
+ .../huaweicloud_subeni_privileged_test.go     |  80 ++++++
+ .../huaweicloud_subeni_test.go                |  32 +++
  pkg/huaweicloud/api/api.go                    | 257 +++++++++++++++---
  pkg/huaweicloud/api/api_boundary_test.go      | 118 +++++++-
  .../api/api_integration_mock_test.go          |  53 ++++
- 3 files changed, 389 insertions(+), 39 deletions(-)
+ pkg/huaweicloud/neighbor/registry.go          | 137 ++++++++++
+ pkg/huaweicloud/neighbor/registry_test.go     |  76 ++++++
+ 10 files changed, 933 insertions(+), 40 deletions(-)
  create mode 100644 pkg/huaweicloud/api/api_integration_mock_test.go
+ create mode 100644 pkg/huaweicloud/neighbor/registry.go
+ create mode 100644 pkg/huaweicloud/neighbor/registry_test.go
 
+diff --git a/pkg/datapath/linux/node.go b/pkg/datapath/linux/node.go
+index 277d5f113..1405ff5b5 100644
+--- a/pkg/datapath/linux/node.go
++++ b/pkg/datapath/linux/node.go
+@@ -25,6 +25,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+ 	"github.com/cilium/cilium/pkg/datapath/linux/route"
+ 	"github.com/cilium/cilium/pkg/datapath/types"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
+ 	"github.com/cilium/cilium/pkg/idpool"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/lock"
+@@ -1257,6 +1258,14 @@ func (n *linuxNodeHandler) NodeCleanNeighborsLink(l netlink.Link, migrateOnly bo
+ 	var which string
+ 	for _, neigh := range neighList {
+ 		var err error
++		// HuaweiCloud gateway neighbors share the trunk link with Cilium's
++		// neighbor discovery entries. Preserve only exact entries published by
++		// the Sub-ENI endpoint manager; NTF_EXT_LEARNED alone is also used by
++		// Cilium and therefore cannot identify ownership.
++		if neigh.State&netlink.NUD_PERMANENT != 0 &&
++			huaweiCloudNeighbor.Default.Contains(l.Attrs().Name, neigh.IP, neigh.HardwareAddr) {
++			continue
++		}
+ 		// If this is a non-static neighbor entry, it will be GC'ed by
+ 		// the kernel eventually. Older Cilium versions might have left-
+ 		// overs installed as NUD_PERMANENT.
+@@ -1361,6 +1370,10 @@ func (n *linuxNodeHandler) NodeCleanNeighbors(migrateOnly bool) {
+ 	if len(linkNames) == 0 {
+ 		return
+ 	}
++	if option.Config.IPAM == ipamOption.IPAMHuaweiCloud && !huaweiCloudNeighbor.Default.Ready() {
++		log.Error("Refusing to clean neighbor entries before HuaweiCloud gateway ownership is initialized")
++		return
++	}
+ 
+ 	// Delete the file after cleaning up neighbor list if we were able to clean
+ 	// up all neighbors.
+diff --git a/pkg/datapath/linux/node_linux_test.go b/pkg/datapath/linux/node_linux_test.go
+index 40403b6dc..3363df00d 100644
+--- a/pkg/datapath/linux/node_linux_test.go
++++ b/pkg/datapath/linux/node_linux_test.go
+@@ -11,6 +11,8 @@ import (
+ 	"crypto/rand"
+ 	"fmt"
+ 	"net"
++	"os"
++	"path/filepath"
+ 	"runtime"
+ 	"sync"
+ 	"testing"
+@@ -28,6 +30,8 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
+ 	"github.com/cilium/cilium/pkg/datapath/linux/route"
+ 	"github.com/cilium/cilium/pkg/datapath/types"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/maps/nodemap"
+ 	"github.com/cilium/cilium/pkg/maps/tunnel"
+ 	"github.com/cilium/cilium/pkg/mtu"
+@@ -68,6 +72,124 @@ type linuxPrivilegedIPv4AndIPv6TestSuite struct {
+ 
+ var _ = check.Suite(&linuxPrivilegedIPv4AndIPv6TestSuite{})
+ 
++func TestNodeCleanNeighborsLinkPreservesDesiredHuaweiCloudGateway(t *testing.T) {
++	attrs := netlink.NewLinkAttrs()
++	attrs.Name = "hwc-cleangw"
++	link := &netlink.Dummy{LinkAttrs: attrs}
++	if err := netlink.LinkAdd(link); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = netlink.LinkDel(link) })
++	if err := netlink.LinkSetUp(link); err != nil {
++		t.Fatal(err)
++	}
++	huaweiCloudNeighbor.Default.Clear()
++	t.Cleanup(huaweiCloudNeighbor.Default.Clear)
++
++	desiredIP := net.ParseIP("10.43.0.1").To4()
++	desiredMAC, _ := net.ParseMAC("02:00:00:00:43:01")
++	key, _ := huaweiCloudNeighbor.NewKey(attrs.Name, desiredIP, desiredMAC)
++	huaweiCloudNeighbor.Default.Replace([]huaweiCloudNeighbor.Key{key})
++	if err := netlink.NeighSet(&netlink.Neigh{
++		LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4,
++		State: netlink.NUD_PERMANENT, Flags: netlink.NTF_EXT_LEARNED,
++		IP: desiredIP, HardwareAddr: desiredMAC,
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	handler := &linuxNodeHandler{}
++	for _, migrateOnly := range []bool{false, true} {
++		staleIP := net.ParseIP("10.43.0.2").To4()
++		staleMAC, _ := net.ParseMAC("02:00:00:00:43:02")
++		if err := netlink.NeighSet(&netlink.Neigh{
++			LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4,
++			State: netlink.NUD_PERMANENT, IP: staleIP, HardwareAddr: staleMAC,
++		}); err != nil {
++			t.Fatal(err)
++		}
++		if !handler.NodeCleanNeighborsLink(link, migrateOnly) {
++			t.Fatalf("neighbor cleanup failed, migrateOnly=%v", migrateOnly)
++		}
++		neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++		if err != nil {
++			t.Fatal(err)
++		}
++		foundDesired := false
++		for _, neighbor := range neighbors {
++			if neighbor.IP.Equal(desiredIP) && bytes.Equal(neighbor.HardwareAddr, desiredMAC) {
++				foundDesired = true
++			}
++			if neighbor.IP.Equal(staleIP) {
++				t.Fatalf("ordinary stale neighbor was protected, migrateOnly=%v: %+v", migrateOnly, neighbor)
++			}
++		}
++		if !foundDesired {
++			t.Fatalf("desired HuaweiCloud gateway was removed, migrateOnly=%v", migrateOnly)
++		}
++	}
++}
++
++func TestNodeCleanNeighborsWaitsForHuaweiCloudOwnership(t *testing.T) {
++	attrs := netlink.NewLinkAttrs()
++	attrs.Name = "hwc-readygc"
++	link := &netlink.Dummy{LinkAttrs: attrs}
++	if err := netlink.LinkAdd(link); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = netlink.LinkDel(link) })
++	if err := netlink.LinkSetUp(link); err != nil {
++		t.Fatal(err)
++	}
++
++	previousIPAM := option.Config.IPAM
++	previousStateDir := option.Config.StateDir
++	option.Config.IPAM = ipamOption.IPAMHuaweiCloud
++	option.Config.StateDir = t.TempDir()
++	t.Cleanup(func() {
++		option.Config.IPAM = previousIPAM
++		option.Config.StateDir = previousStateDir
++	})
++	huaweiCloudNeighbor.Default.Clear()
++	t.Cleanup(huaweiCloudNeighbor.Default.Clear)
++	if err := storeNeighLink(option.Config.StateDir, []string{attrs.Name}); err != nil {
++		t.Fatal(err)
++	}
++
++	ip := net.ParseIP("10.44.0.1").To4()
++	mac, _ := net.ParseMAC("02:00:00:00:44:01")
++	if err := netlink.NeighSet(&netlink.Neigh{
++		LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4,
++		State: netlink.NUD_PERMANENT, IP: ip, HardwareAddr: mac,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	handler := &linuxNodeHandler{}
++	handler.NodeCleanNeighbors(false)
++	if _, err := os.Stat(filepath.Join(option.Config.StateDir, neighFileName)); err != nil {
++		t.Fatalf("neighbor state file was removed before ownership initialization: %v", err)
++	}
++	neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(neighbors) != 1 || !neighbors[0].IP.Equal(ip) {
++		t.Fatalf("neighbor was removed before ownership initialization: %+v", neighbors)
++	}
++
++	huaweiCloudNeighbor.Default.Replace(nil)
++	handler.NodeCleanNeighbors(false)
++	neighbors, err = netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, neighbor := range neighbors {
++		if neighbor.IP.Equal(ip) {
++			t.Fatalf("stale neighbor remained after ownership initialization: %+v", neighbor)
++		}
++	}
++}
++
+ const (
+ 	dummyHostDeviceName     = "dummy_host"
+ 	dummyExternalDeviceName = "dummy_external"
+diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
+index ced7ce18a..ae1230ce5 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni.go
++++ b/pkg/endpointmanager/huaweicloud_subeni.go
+@@ -11,6 +11,7 @@ import (
+ 	"net"
+ 	"reflect"
+ 	"strconv"
++	"strings"
+ 	"sync"
+ 	"time"
+ 
+@@ -20,6 +21,7 @@ import (
+ 
+ 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
+ 	"github.com/cilium/cilium/pkg/endpoint"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
+ 	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/k8s"
+@@ -122,6 +124,7 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
+ 	cleanupOnError := func(err error) (func(), error) {
+ 		mgr.Unsubscribe(subscriber)
+ 		mapMgr.Close()
++		huaweiCloudNeighbor.Default.Clear()
+ 		return nil, err
+ 	}
+ 	endpoints := mgr.GetEndpoints()
+@@ -149,6 +152,10 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
+ 	for _, info := range desired {
+ 		subscriber.cacheEndpointInfo(info)
+ 	}
++	subscriber.refreshGatewayNeighborOwnership()
++	if err := subscriber.reconcileGatewayNeighbors(); err != nil {
++		return cleanupOnError(fmt.Errorf("reconcile initial HuaweiCloud gateway neighbors: %w", err))
++	}
+ 	subscriber.finishInitialization()
+ 	subscriber.startRouteReconciler(huaweiCloudRouteReconcileInterval)
+ 
+@@ -156,6 +163,7 @@ func RegisterHuaweiCloudSubENIManager(mgr *EndpointManager) (func(), error) {
+ 		subscriber.stopRouteReconciler()
+ 		mgr.Unsubscribe(subscriber)
+ 		mapMgr.Close()
++		huaweiCloudNeighbor.Default.Clear()
+ 	}, nil
+ }
+ 
+@@ -234,6 +242,13 @@ func (s *huaweiCloudSubENISubscriber) deleteEndpoint(ep *endpoint.Endpoint) {
+ 		return
+ 	}
+ 	s.forgetEndpointInfo(ep)
++	s.refreshGatewayNeighborOwnership()
++	if err := s.reconcileGatewayNeighbors(); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: ep.GetID(),
++			logfields.IPv4:       ep.GetIPv4Address(),
++		}).Warn("Failed to reconcile HuaweiCloud gateway neighbors after endpoint deletion")
++	}
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
+@@ -284,6 +299,14 @@ func (s *huaweiCloudSubENISubscriber) upsertEndpointInfoLocked(info *huaweiCloud
+ 		return
+ 	}
+ 	s.cacheEndpointInfo(info)
++	s.refreshGatewayNeighborOwnership()
++	if err := s.reconcileGatewayNeighbors(); err != nil {
++		s.logger.WithError(err).WithFields(logrus.Fields{
++			logfields.EndpointID: endpointID,
++			logfields.IPv4:       ipv4,
++			"reason":             reason,
++		}).Warn("Failed to reconcile HuaweiCloud gateway neighbors")
++	}
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) ensureEndpointRouting(info *huaweiCloudEndpointInfo) error {
+@@ -348,6 +371,9 @@ func (s *huaweiCloudSubENISubscriber) reconcileCachedEndpointInfos(reason string
+ 			s.logger.WithError(err).WithFields(fields).Warn("Failed to reconcile HuaweiCloud endpoint routing")
+ 		}
+ 	}
++	if err := s.reconcileGatewayNeighbors(); err != nil {
++		s.logger.WithError(err).WithField("reason", reason).Warn("Failed to reconcile HuaweiCloud gateway neighbors")
++	}
+ 	if s.routerRouting != nil {
+ 		routingInfo, routerIP := s.routerRouting()
+ 		if routingInfo != nil && routerIP != nil {
+@@ -425,6 +451,59 @@ func (s *huaweiCloudSubENISubscriber) forgetEndpointInfo(ep *endpoint.Endpoint)
+ 	s.cacheMutex.Unlock()
+ }
+ 
++func (s *huaweiCloudSubENISubscriber) refreshGatewayNeighborOwnership() {
++	s.cacheMutex.RLock()
++	keys := make([]huaweiCloudNeighbor.Key, 0, len(s.cache))
++	for _, cached := range s.cache {
++		info, ok := cached.(*huaweiCloudEndpointInfo)
++		if !ok || info == nil || info.gatewayIP == nil || len(info.gatewayMAC) == 0 {
++			continue
++		}
++		if key, ok := huaweiCloudNeighbor.NewKey(info.trunkInterface, info.gatewayIP, info.gatewayMAC); ok {
++			keys = append(keys, key)
++		}
++	}
++	s.cacheMutex.RUnlock()
++	huaweiCloudNeighbor.Default.Replace(keys)
++}
++
++func (s *huaweiCloudSubENISubscriber) reconcileGatewayNeighbors() error {
++	stale := huaweiCloudNeighbor.Default.StaleSnapshot()
++	removed := make([]huaweiCloudNeighbor.Key, 0, len(stale))
++	for _, key := range stale {
++		link, err := netlink.LinkByName(key.LinkName)
++		if err != nil {
++			if _, ok := err.(netlink.LinkNotFoundError); ok {
++				removed = append(removed, key)
++				continue
++			}
++			return fmt.Errorf("resolve trunk interface %s: %w", key.LinkName, err)
++		}
++		neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++		if err != nil {
++			return fmt.Errorf("list gateway neighbors on trunk interface %s: %w", key.LinkName, err)
++		}
++		found := false
++		for _, neighbor := range neighbors {
++			if !huaweiCloudNeighbor.Default.Contains(key.LinkName, neighbor.IP, neighbor.HardwareAddr) &&
++				neighbor.IP.String() == key.IPv4 && strings.EqualFold(neighbor.HardwareAddr.String(), key.MAC) {
++				found = true
++				if neighbor.State&netlink.NUD_PERMANENT != 0 && neighbor.Flags&netlink.NTF_EXT_LEARNED != 0 {
++					if err := netlink.NeighDel(&neighbor); err != nil {
++						return fmt.Errorf("remove stale HuaweiCloud gateway neighbor %s on %s: %w", neighbor.IP, key.LinkName, err)
++					}
++				}
++				break
++			}
++		}
++		if !found {
++			removed = append(removed, key)
++		}
++	}
++	huaweiCloudNeighbor.Default.ForgetStale(removed)
++	return nil
++}
++
+ func endpointCanResolveSubENI(ep subENIEndpoint) bool {
+ 	if ep == nil {
+ 		return false
+@@ -596,13 +675,17 @@ func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEnd
+ 			return fmt.Errorf("permanent neighbor %s on trunk interface %s already uses MAC %s, conflicts with %s",
+ 				info.gatewayIP, info.trunkInterface, neighbor.HardwareAddr, info.gatewayMAC)
+ 		}
+-		return nil
++		if neighbor.Flags&netlink.NTF_EXT_LEARNED != 0 {
++			return nil
++		}
++		break
+ 	}
+ 
+ 	return netlink.NeighSet(&netlink.Neigh{
+ 		LinkIndex:    link.Attrs().Index,
+ 		Family:       netlink.FAMILY_V4,
+ 		State:        netlink.NUD_PERMANENT,
++		Flags:        netlink.NTF_EXT_LEARNED,
+ 		IP:           info.gatewayIP,
+ 		HardwareAddr: info.gatewayMAC,
+ 	})
+diff --git a/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go b/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
+index e4c8fe62b..ae5cfe68f 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
++++ b/pkg/endpointmanager/huaweicloud_subeni_privileged_test.go
+@@ -18,9 +18,11 @@ import (
+ 
+ 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+ 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
+ 	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/logging"
++	"github.com/cilium/cilium/pkg/option"
+ )
+ 
+ func testHuaweiCloudDummyLink(t *testing.T, name string) netlink.Link {
+@@ -53,6 +55,84 @@ func testHuaweiCloudNeighbor(t *testing.T, link netlink.Link, ip net.IP) *netlin
+ 	return nil
+ }
+ 
++func TestEnsureGatewayNeighborSetsAndRepairsExternLearned(t *testing.T) {
++	link := testHuaweiCloudDummyLink(t, "hwc-neighflag")
++	gateway := net.ParseIP("10.42.14.1").To4()
++	gatewayMAC, _ := net.ParseMAC("02:00:00:00:14:fe")
++	subscriber := &huaweiCloudSubENISubscriber{}
++	info := &huaweiCloudEndpointInfo{
++		gatewayIP: gateway, gatewayMAC: gatewayMAC, trunkInterface: link.Attrs().Name,
++	}
++
++	if err := subscriber.ensureGatewayNeighbor(info); err != nil {
++		t.Fatal(err)
++	}
++	got := testHuaweiCloudNeighbor(t, link, gateway)
++	if got.State&netlink.NUD_PERMANENT == 0 || got.Flags&netlink.NTF_EXT_LEARNED == 0 {
++		t.Fatalf("gateway neighbor flags: state=%#x flags=%#x", got.State, got.Flags)
++	}
++
++	if err := netlink.NeighSet(&netlink.Neigh{
++		LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4,
++		State: netlink.NUD_PERMANENT, IP: gateway, HardwareAddr: gatewayMAC,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if got := testHuaweiCloudNeighbor(t, link, gateway); got.Flags&netlink.NTF_EXT_LEARNED != 0 {
++		t.Fatalf("test setup retained extern-learned flag: %#x", got.Flags)
++	}
++	if err := subscriber.ensureGatewayNeighbor(info); err != nil {
++		t.Fatal(err)
++	}
++	if got := testHuaweiCloudNeighbor(t, link, gateway); got.Flags&netlink.NTF_EXT_LEARNED == 0 {
++		t.Fatalf("gateway neighbor extern-learned flag was not repaired: %#x", got.Flags)
++	}
++}
++
++func TestReconcileGatewayNeighborsRemovesOnlyStaleOwnedEntries(t *testing.T) {
++	link := testHuaweiCloudDummyLink(t, "hwc-neighgc")
++	previousTrunk := option.Config.HuaweiCloudTrunkInterface
++	option.Config.HuaweiCloudTrunkInterface = link.Attrs().Name
++	t.Cleanup(func() { option.Config.HuaweiCloudTrunkInterface = previousTrunk })
++	huaweiCloudNeighbor.Default.Clear()
++	t.Cleanup(huaweiCloudNeighbor.Default.Clear)
++
++	desiredIP := net.ParseIP("10.42.18.1").To4()
++	desiredMAC, _ := net.ParseMAC("02:00:00:00:18:01")
++	staleIP := net.ParseIP("10.42.18.2").To4()
++	staleMAC, _ := net.ParseMAC("02:00:00:00:18:02")
++	for _, neighbor := range []netlink.Neigh{
++		{LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4, State: netlink.NUD_PERMANENT,
++			Flags: netlink.NTF_EXT_LEARNED, IP: desiredIP, HardwareAddr: desiredMAC},
++		{LinkIndex: link.Attrs().Index, Family: netlink.FAMILY_V4, State: netlink.NUD_PERMANENT,
++			Flags: netlink.NTF_EXT_LEARNED, IP: staleIP, HardwareAddr: staleMAC},
++	} {
++		if err := netlink.NeighSet(&neighbor); err != nil {
++			t.Fatal(err)
++		}
++	}
++	desiredKey, _ := huaweiCloudNeighbor.NewKey(link.Attrs().Name, desiredIP, desiredMAC)
++	staleKey, _ := huaweiCloudNeighbor.NewKey(link.Attrs().Name, staleIP, staleMAC)
++	huaweiCloudNeighbor.Default.Replace([]huaweiCloudNeighbor.Key{desiredKey, staleKey})
++	huaweiCloudNeighbor.Default.Replace([]huaweiCloudNeighbor.Key{desiredKey})
++
++	if err := (&huaweiCloudSubENISubscriber{}).reconcileGatewayNeighbors(); err != nil {
++		t.Fatal(err)
++	}
++	if got := testHuaweiCloudNeighbor(t, link, desiredIP); !bytes.Equal(got.HardwareAddr, desiredMAC) {
++		t.Fatalf("desired gateway neighbor changed: %s", got.HardwareAddr)
++	}
++	neighbors, err := netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, neighbor := range neighbors {
++		if neighbor.IP.Equal(staleIP) {
++			t.Fatalf("stale gateway neighbor remained: %+v", neighbor)
++		}
++	}
++}
++
+ func TestEnsureGatewayNeighborRejectsPermanentMACConflict(t *testing.T) {
+ 	link := testHuaweiCloudDummyLink(t, "hwc-bmap15")
+ 	gateway := net.ParseIP("10.42.15.1").To4()
+diff --git a/pkg/endpointmanager/huaweicloud_subeni_test.go b/pkg/endpointmanager/huaweicloud_subeni_test.go
+index 36ef666bb..f6cd897d4 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni_test.go
++++ b/pkg/endpointmanager/huaweicloud_subeni_test.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/addressing"
+ 	"github.com/cilium/cilium/pkg/endpoint"
+ 	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
+ 	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
+ 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	"github.com/cilium/cilium/pkg/logging"
+@@ -77,6 +78,37 @@ func TestGatewayNeighborFailureBlocksBPFMapUpdate(t *testing.T) {
+ 	}
+ }
+ 
++func TestGatewayNeighborOwnershipFollowsEndpointCache(t *testing.T) {
++	huaweiCloudNeighbor.Default.Clear()
++	t.Cleanup(huaweiCloudNeighbor.Default.Clear)
++	subscriber := &huaweiCloudSubENISubscriber{cache: map[string]subenimap.EndpointInfo{}}
++	gateway := net.ParseIP("10.0.0.1").To4()
++	gatewayMAC, _ := net.ParseMAC("fa:16:3e:00:00:fe")
++	first := &huaweiCloudEndpointInfo{
++		id: 1, ipv4: "10.0.0.2", gatewayIP: gateway, gatewayMAC: gatewayMAC, trunkInterface: "eth0",
++	}
++	second := &huaweiCloudEndpointInfo{
++		id: 2, ipv4: "10.0.0.3", gatewayIP: gateway, gatewayMAC: gatewayMAC, trunkInterface: "eth0",
++	}
++	subscriber.cacheEndpointInfo(first)
++	subscriber.cacheEndpointInfo(second)
++	subscriber.refreshGatewayNeighborOwnership()
++	if got := len(huaweiCloudNeighbor.Default.Snapshot()); got != 1 {
++		t.Fatalf("shared gateway ownership entries=%d, want 1", got)
++	}
++
++	subscriber.forgetEndpointInfo(&endpoint.Endpoint{ID: 1, IPv4: addressing.DeriveCiliumIPv4(net.ParseIP(first.ipv4))})
++	subscriber.refreshGatewayNeighborOwnership()
++	if !huaweiCloudNeighbor.Default.Contains("eth0", gateway, gatewayMAC) {
++		t.Fatal("shared gateway ownership was removed while one endpoint remained")
++	}
++	subscriber.forgetEndpointInfo(&endpoint.Endpoint{ID: 2, IPv4: addressing.DeriveCiliumIPv4(net.ParseIP(second.ipv4))})
++	subscriber.refreshGatewayNeighborOwnership()
++	if huaweiCloudNeighbor.Default.Contains("eth0", gateway, gatewayMAC) {
++		t.Fatal("gateway ownership remained after the last endpoint was removed")
++	}
++}
++
+ func (e testSubENIEndpoint) GetIPv4Address() string { return e.ip }
+ func (e testSubENIEndpoint) GetID() uint64          { return e.id }
+ func (e testSubENIEndpoint) GetIfIndex() int        { return e.ifindex }
 diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
 index b9ed4f0ef..a59a09f26 100644
 --- a/pkg/huaweicloud/api/api.go
@@ -538,6 +1048,231 @@ index 000000000..7e9308021
 +	}
 +	if got := counts["/v3/project-1/ports"]; got != 1 {
 +		t.Fatalf("unexpected list ports count: %d", got)
++	}
++}
+diff --git a/pkg/huaweicloud/neighbor/registry.go b/pkg/huaweicloud/neighbor/registry.go
+new file mode 100644
+index 000000000..de4cef1c4
+--- /dev/null
++++ b/pkg/huaweicloud/neighbor/registry.go
+@@ -0,0 +1,137 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++// Package neighbor tracks HuaweiCloud gateway neighbors that are currently
++// owned by the Sub-ENI endpoint manager. The datapath cleanup code uses this
++// registry to distinguish current HuaweiCloud entries from stale Cilium
++// neighbors. The kernel extern-learned flag alone is not an ownership marker.
++package neighbor
++
++import (
++	"net"
++	"strings"
++	"sync"
++)
++
++// Key identifies one HuaweiCloud gateway neighbor on one link.
++type Key struct {
++	LinkName string
++	IPv4     string
++	MAC      string
++}
++
++// NewKey normalizes an IPv4/MAC pair and rejects incomplete entries.
++func NewKey(linkName string, ip net.IP, mac net.HardwareAddr) (Key, bool) {
++	ipv4 := ip.To4()
++	if linkName == "" || ipv4 == nil || len(mac) == 0 {
++		return Key{}, false
++	}
++	return Key{
++		LinkName: linkName,
++		IPv4:     ipv4.String(),
++		MAC:      strings.ToLower(mac.String()),
++	}, true
++}
++
++// Registry contains the current desired HuaweiCloud gateway neighbors.
++type Registry struct {
++	mu    sync.RWMutex
++	keys  map[Key]struct{}
++	stale map[Key]struct{}
++	ready bool
++}
++
++// NewRegistry creates an empty registry.
++func NewRegistry() *Registry {
++	return &Registry{keys: make(map[Key]struct{}), stale: make(map[Key]struct{})}
++}
++
++// Replace atomically replaces the desired set.
++func (r *Registry) Replace(keys []Key) {
++	next := make(map[Key]struct{}, len(keys))
++	for _, key := range keys {
++		if key.LinkName == "" || key.IPv4 == "" || key.MAC == "" {
++			continue
++		}
++		next[key] = struct{}{}
++	}
++	r.mu.Lock()
++	for key := range r.keys {
++		if _, stillDesired := next[key]; !stillDesired {
++			r.stale[key] = struct{}{}
++		}
++	}
++	r.keys = next
++	for key := range next {
++		delete(r.stale, key)
++	}
++	r.ready = true
++	r.mu.Unlock()
++}
++
++// Contains reports whether the exact link/IP/MAC tuple is desired.
++func (r *Registry) Contains(linkName string, ip net.IP, mac net.HardwareAddr) bool {
++	key, ok := NewKey(linkName, ip, mac)
++	if !ok {
++		return false
++	}
++	r.mu.RLock()
++	_, found := r.keys[key]
++	r.mu.RUnlock()
++	return found
++}
++
++// Snapshot returns a copy of the desired set.
++func (r *Registry) Snapshot() []Key {
++	r.mu.RLock()
++	keys := make([]Key, 0, len(r.keys))
++	for key := range r.keys {
++		keys = append(keys, key)
++	}
++	r.mu.RUnlock()
++	return keys
++}
++
++// StaleSnapshot returns exact entries that were previously desired but are no
++// longer associated with an endpoint. Callers should remove only these keys.
++func (r *Registry) StaleSnapshot() []Key {
++	r.mu.RLock()
++	keys := make([]Key, 0, len(r.stale))
++	for key := range r.stale {
++		keys = append(keys, key)
++	}
++	r.mu.RUnlock()
++	return keys
++}
++
++// ForgetStale acknowledges entries that have been removed or are no longer
++// present in the kernel.
++func (r *Registry) ForgetStale(keys []Key) {
++	r.mu.Lock()
++	for _, key := range keys {
++		delete(r.stale, key)
++	}
++	r.mu.Unlock()
++}
++
++// Clear removes all desired entries.
++func (r *Registry) Clear() {
++	r.mu.Lock()
++	r.keys = make(map[Key]struct{})
++	r.stale = make(map[Key]struct{})
++	r.ready = false
++	r.mu.Unlock()
++}
++
++// Ready reports whether the endpoint manager has published its initial
++// desired set. An empty but published set is ready.
++func (r *Registry) Ready() bool {
++	r.mu.RLock()
++	ready := r.ready
++	r.mu.RUnlock()
++	return ready
++}
++
++// Default is the process-wide registry shared by HuaweiCloud endpoint and
++// datapath cleanup code.
++var Default = NewRegistry()
+diff --git a/pkg/huaweicloud/neighbor/registry_test.go b/pkg/huaweicloud/neighbor/registry_test.go
+new file mode 100644
+index 000000000..d9155365a
+--- /dev/null
++++ b/pkg/huaweicloud/neighbor/registry_test.go
+@@ -0,0 +1,76 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package neighbor
++
++import (
++	"net"
++	"testing"
++)
++
++func TestRegistryMatchesExactGatewayNeighbor(t *testing.T) {
++	registry := NewRegistry()
++	if registry.Ready() {
++		t.Fatal("new registry was unexpectedly ready")
++	}
++	ip := net.ParseIP("10.0.0.1")
++	mac, _ := net.ParseMAC("fa:16:3e:00:00:fe")
++	key, ok := NewKey("eth0", ip, mac)
++	if !ok {
++		t.Fatal("valid gateway neighbor key was rejected")
++	}
++	registry.Replace([]Key{key, key})
++	if !registry.Ready() {
++		t.Fatal("published registry was not ready")
++	}
++
++	if !registry.Contains("eth0", ip, mac) {
++		t.Fatal("desired gateway neighbor was not found")
++	}
++	if registry.Contains("eth1", ip, mac) {
++		t.Fatal("same gateway on another link was matched")
++	}
++	otherMAC, _ := net.ParseMAC("fa:16:3e:00:00:ff")
++	if registry.Contains("eth0", ip, otherMAC) {
++		t.Fatal("same gateway with another MAC was matched")
++	}
++	if registry.Contains("eth0", net.ParseIP("2001:db8::1"), mac) {
++		t.Fatal("IPv6 gateway was matched")
++	}
++
++	if got := len(registry.Snapshot()); got != 1 {
++		t.Fatalf("registry size=%d, want 1", got)
++	}
++	registry.Clear()
++	if registry.Ready() {
++		t.Fatal("cleared registry remained ready")
++	}
++	if registry.Contains("eth0", ip, mac) {
++		t.Fatal("cleared gateway neighbor remained registered")
++	}
++}
++
++func TestRegistryReplaceIsAtomicAtSetLevel(t *testing.T) {
++	registry := NewRegistry()
++	firstMAC, _ := net.ParseMAC("fa:16:3e:00:00:01")
++	secondMAC, _ := net.ParseMAC("fa:16:3e:00:00:02")
++	first, _ := NewKey("eth0", net.ParseIP("10.0.0.1"), firstMAC)
++	second, _ := NewKey("eth0", net.ParseIP("10.0.1.1"), secondMAC)
++
++	registry.Replace([]Key{first})
++	registry.Replace([]Key{second})
++	if registry.Contains(first.LinkName, net.ParseIP(first.IPv4), firstMAC) {
++		t.Fatal("replaced gateway neighbor remained registered")
++	}
++	if !registry.Contains(second.LinkName, net.ParseIP(second.IPv4), secondMAC) {
++		t.Fatal("replacement gateway neighbor was not registered")
++	}
++	stale := registry.StaleSnapshot()
++	if len(stale) != 1 || stale[0] != first {
++		t.Fatalf("stale registry entries=%v, want [%v]", stale, first)
++	}
++	registry.ForgetStale(stale)
++	if got := registry.StaleSnapshot(); len(got) != 0 {
++		t.Fatalf("stale registry entries remained after acknowledgement: %v", got)
 +	}
 +}
 -- 

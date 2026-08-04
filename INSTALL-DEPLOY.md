@@ -452,6 +452,39 @@ kubectl delete namespace cilium-smoke
 
 完整的功能、故障、边界、升级和性能用例见 [TEST-CASES.md](TEST-CASES.md)。
 
+### 11.4 HuaweiCloud gateway 邻居和 Agent 重启
+
+先从 CiliumNode 的 HuaweiCloud SubENI 状态确认 trunk、GatewayIP 和 GatewayMAC，
+再登录对应工作节点检查邻居表。以下命令中的值必须来自当前节点状态，不要手工猜测：
+
+```bash
+ip -d neigh show dev <TRUNK_INTERFACE> to <GATEWAY_IP>
+```
+
+正常表项必须同时满足：
+
+- 网卡为当前 SubENI 的 trunk interface；
+- IP 和 MAC 与 CiliumNode 一致；
+- 状态包含 `PERMANENT`；
+- 标记包含 `extern_learn`。
+
+滚动重启 Agent 前，在被测节点持续记录邻居变化：
+
+```bash
+ip monitor neigh dev <TRUNK_INTERFACE>
+```
+
+随后只重启一个测试节点上的 Agent，并保持一条通过该 SubENI 的持续业务流量。通过标准：
+
+- 当前 gateway 没有删除事件；
+- 重启后 IP、MAC、trunk、`PERMANENT` 和 `extern_learn` 均不变；
+- 不再使用的旧 gateway 能由 HuaweiCloud reconciliation 回收；
+- 普通 Cilium stale neighbor 仍按原逻辑清理；
+- Agent 恢复后业务流量无持续中断。
+
+必须分别覆盖 `enable-l2-neigh-discovery=true` 和 `false` 两条启动清理路径。故障注入、
+SubENI 删除和 MAC 冲突仅在隔离测试节点执行。
+
 ## 12. 升级和回滚
 
 升级前记录当前 revision、values 和镜像：

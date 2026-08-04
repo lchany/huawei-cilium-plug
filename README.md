@@ -9,7 +9,7 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 | --- | --- |
 | upstream tag | `v1.12.19` |
 | upstream commit | `a1d7fbd43b563c809330b1c3e28165a3e7ff43aa` |
-| archive tag | `v1.1.1` |
+| archive tag | `v1.1.2` |
 | patch 数量 | 4 |
 | 控制面 patch | `0001-huaweicloud-control-plane.patch` |
 | 数据面 patch | `0002-huaweicloud-data-plane.patch` |
@@ -22,6 +22,10 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 
 ## 更新记录
 
+- 2026-08-04：HuaweiCloud gateway 静态邻居增加 `NUD_PERMANENT +
+  NTF_EXT_LEARNED`，并通过当前 endpoint 的精确 `(trunk, IP, MAC)` 归属集合与
+  Cilium 通用邻居清理隔离；补齐旧表项修复、stale 表项回收和启动顺序保护；archive
+  tag 升级到 `v1.1.2`。
 - 2026-07-29：新增 `0004-huaweicloud-fixes.patch`，把 HuaweiCloud Sub-ENI 启动阶段
   的 gateway 查询改成批量查询；`series` 扩展为 4 个 patch；archive tag 升级到
   `v1.1.1`。
@@ -49,7 +53,7 @@ test "$(git rev-parse HEAD)" = \
 应用成功后应新增 4 个提交，工作区保持干净：
 
 ```bash
-test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 3
+test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 4
 git status --short
 ```
 
@@ -63,6 +67,7 @@ git status --short
 | `0001` 控制面 | HuaweiCloud SDK/vendor、API、metadata、SubENI IPAM、Operator、CiliumNode、配置、Helm、镜像和构建接入 |
 | `0002` 数据面 | Daemon/CNI 运行时接线、BPF VLAN 处理、SubENI map、Endpoint 生命周期、策略路由、iptables 和 Service 源地址语义 |
 | `0003` 测试 | 控制面、数据面、边界、并发、故障注入、BPF、特权路由和实机辅助测试 |
+| `0004` 修复 | 批量 gateway 查询、静态邻居归属和 Agent 启动清理保护，以及对应回归测试 |
 
 HuaweiCloud 数据面只在配置的 trunk 网卡上处理 SubENI VLAN。报文回到 Cilium 原生
 datapath 后，连接跟踪、Service 和 NetworkPolicy 仍由 Cilium 负责。
@@ -100,7 +105,7 @@ datapath 后，连接跟踪、Service 和 NetworkPolicy 仍由 Cilium 负责。
 ## 文档
 
 - [安装与部署](INSTALL-DEPLOY.md)：前置条件、构建、镜像分发、Helm 安装、验收、升级和回滚。
-- [完整测试用例](TEST-CASES.md)：451 项脱敏测试内容和预期结果，不包含现场执行信息。
+- [完整测试用例](TEST-CASES.md)：460 项脱敏测试内容和预期结果，不包含现场执行信息。
 - [测试过程问题整理](测试过程问题整理.md)：按问题场景、根因和解决方案整理测试中发现的问题。
 - [示例 values](huaweicloud-values.example.yaml)：不含凭据，可复制后填写环境参数。
 

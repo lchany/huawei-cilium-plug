@@ -1,6 +1,6 @@
 # HuaweiCloud Cilium v1.12.19 测试用例
 
-本文给出 HuaweiCloud SubENI 适配的完整测试目录，共 451 项，仅包含测试条件、
+本文给出 HuaweiCloud SubENI 适配的完整测试目录，共 460 项，仅包含测试条件、
 测试操作和预期结果。
 
 适用基线：
@@ -557,6 +557,15 @@ netns、BPF 单测或隔离节点完成，再选择低风险子集上云复核�
 | BMAP-14 | P1/S | trunkInterface 为空/不存在 | NeighSet 不作用到错误链路，错误可诊断 |
 | BMAP-15 | P1/C | 已有同 gateway IP、不同 MAC 的 permanent neighbor | 更新策略可控，不污染其他子网/节点 |
 | BMAP-16 | P1/R | 两个子网 gateway IP 相同但 VLAN/MAC 不同 | 邻居和路由仍能正确返回；如不支持必须阻断配置 |
+| BMAP-17 | P0/S | 新建 HuaweiCloud gateway neighbor | 同时设置 `NUD_PERMANENT` 和 `NTF_EXT_LEARNED` |
+| BMAP-18 | P0/C | 相同 IP/MAC 的旧表项只有 `NUD_PERMANENT` | reconciliation 自动补齐 `extern_learn`，不改变 MAC |
+| BMAP-19 | P0/C | `NodeCleanNeighborsLink(true)` 扫描当前 gateway | 当前精确 `(trunk, IP, MAC)` 表项保留，普通 stale 表项继续处理 |
+| BMAP-20 | P0/C | `NodeCleanNeighborsLink(false)` 扫描当前 gateway | 当前 gateway 保留，未注册的 permanent 表项删除 |
+| BMAP-21 | P0/S | 两个 endpoint 共享同一 gateway | 归属集合去重；删除一个 endpoint 不移除 gateway |
+| BMAP-22 | P0/C | 删除共享 gateway 的最后一个 endpoint | 归属移除，旧的 HuaweiCloud 标记表项最终回收 |
+| BMAP-23 | P0/C | 相同 trunk/IP 但 MAC 不同 | 不匹配当前归属，不被静默保护或覆盖，返回冲突证据 |
+| BMAP-24 | P0/S | HuaweiCloud gateway 归属尚未完成初始发布 | 启动清理拒绝执行并保留重试状态，不误删已有静态邻居 |
+| BMAP-25 | P1/C | gateway IP 或 trunk 发生变化 | 新表项建立后替换归属集合，旧标记表项回收，不影响其他 link |
 
 ### 5.6 VLAN 报文和策略路由边界
 
