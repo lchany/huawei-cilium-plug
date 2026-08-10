@@ -30,6 +30,7 @@ huaweicloud:
   subnetTags: {}
   securityGroupIDs:
     - "<安全组 ID>"
+  # 可选，最多 20 个；创建后通过官方端口标签接口添加，失败时本批 SubENI 会回滚。
   subENITags: {}
   releaseExcessIPs: false
 
