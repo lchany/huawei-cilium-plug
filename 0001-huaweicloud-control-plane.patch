@@ -8140,9 +8140,9 @@ index 000000000..945234917
 +  c: hello
 +```
 +
-+Then, if `yaml.ReferenceDirs("testdata")` option is passed to `yaml.Decoder`, 
++Then, if `yaml.ReferenceDirs("testdata")` option is passed to `yaml.Decoder`,
 + `Decoder` tries to find the anchor definition from YAML files the under `testdata` directory.
-+ 
++
 +```go
 +buf := bytes.NewBufferString("a: *a\n")
 +dec := yaml.NewDecoder(buf, yaml.ReferenceDirs("testdata"))
@@ -8216,7 +8216,7 @@ index 000000000..945234917
 +if err != nil {
 +	//...
 +}
-+fmt.Println(string(bytes)) 
++fmt.Println(string(bytes))
 +/*
 +a: &a
 +  i: 1
@@ -72616,7 +72616,7 @@ index 000000000..20b2794a8
 +			c[96+i] ^= data[i]
 +		}
 +		switch mode{
-+	
++
 +		case C1C3C2:
 +			return append([]byte{0x04}, c...), nil
 +		case C1C2C3:
@@ -72631,7 +72631,7 @@ index 000000000..20b2794a8
 +			ciphertext = append(ciphertext, c2...)
 +			ciphertext = append(ciphertext, c3...)
 +			return append([]byte{0x04}, ciphertext...), nil
-+    	default:
++		default:
 +			return append([]byte{0x04}, c...), nil
 +	}
 +}
@@ -73005,7 +73005,7 @@ new file mode 100644
 index 000000000..03d92270b
 --- /dev/null
 +++ b/vendor/github.com/tjfoc/gmsm/sm2/utils.go
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,58 @@
 +package sm2
 +
 +import (
@@ -73064,7 +73064,6 @@ index 000000000..03d92270b
 +	}
 +	return sm2Sign.R, sm2Sign.S, nil
 +}
-+
 diff --git a/vendor/github.com/tjfoc/gmsm/sm3/ifile b/vendor/github.com/tjfoc/gmsm/sm3/ifile
 new file mode 100644
 index 000000000..30d74d258
@@ -80626,4 +80625,3 @@ index ce03027ed..930b1d2a4 100644
  # sigs.k8s.io/controller-tools => github.com/cilium/controller-tools v0.6.2
 -- 
 2.33.0
-
