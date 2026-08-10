@@ -22,6 +22,9 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 
 ## 更新记录
 
+- 2026-08-07：清理 `0001-huaweicloud-control-plane.patch` 中的行尾空格、空白行
+  Tab、混合缩进和 hunk 末尾多余空行；使用 `git apply --check
+  --whitespace=error-all` 验证 patch 不再产生 whitespace 告警。
 - 2026-08-04：HuaweiCloud gateway 静态邻居增加 `NUD_PERMANENT +
   NTF_EXT_LEARNED`，并通过当前 endpoint 的精确 `(trunk, IP, MAC)` 归属集合与
   Cilium 通用邻居清理隔离；补齐旧表项修复、stale 表项回收和启动顺序保护；archive

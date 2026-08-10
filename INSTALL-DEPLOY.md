@@ -101,7 +101,7 @@ git clone --branch v1.12.19 --depth 1 \
 ```bash
 cd "$WORKDIR/huawei-cilium-patches"
 test "$(grep -Ev '^($|#)' series | wc -l)" -eq 4
-test "$(find . -maxdepth 1 -type f -name '*.patch' | wc -l)" -eq 3
+test "$(find . -maxdepth 1 -type f -name '*.patch' | wc -l)" -eq 4
 
 cd "$WORKDIR/cilium"
 test "$(git rev-parse HEAD)" = \
@@ -119,9 +119,9 @@ cd "$WORKDIR/cilium"
 成功标准：
 
 ```bash
-test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 3
+test "$(git rev-list --count a1d7fbd43b563c809330b1c3e28165a3e7ff43aa..HEAD)" -eq 4
 test -z "$(git status --short)"
-git log --oneline --max-count=3
+git log --oneline --max-count=4
 ```
 
 若 `git am` 中断，先执行 `git am --abort`，重新确认 HEAD 和工作区，再从干净基线重放。
