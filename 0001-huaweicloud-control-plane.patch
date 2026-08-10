@@ -1,8 +1,11 @@
-From cfd4b4654ac79f7394eab3b8ec6e27b8129c8a01 Mon Sep 17 00:00:00 2001
-From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 17:22:20 +0800
-Subject: [PATCH 1/3] huaweicloud: add control plane support
+From c29806020ae48c9cec6c9887956b2ec2e840bfde Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-e178.novalocal>
+Date: Mon, 10 Aug 2026 18:12:32 +0800
+Subject: [PATCH] huaweicloud: add control plane support
 
+Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+
+Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 ---
  .github/workflows/build-images-beta.yaml      |    3 +
  .github/workflows/build-images-ci.yaml        |    3 +
@@ -16,36 +19,36 @@ Subject: [PATCH 1/3] huaweicloud: add control plane support
  go.sum                                        |   50 +-
  images/operator/Dockerfile                    |    3 +-
  install/kubernetes/Makefile.digests           |    1 +
- .../cilium/templates/cilium-configmap.yaml    |   28 +
+ .../cilium/templates/cilium-configmap.yaml    |   25 +
  .../templates/cilium-operator/_helpers.tpl    |   19 +
  .../templates/cilium-operator/deployment.yaml |   14 +
- install/kubernetes/cilium/values.yaml         |   21 +
- install/kubernetes/cilium/values.yaml.tmpl    |   21 +
+ install/kubernetes/cilium/values.yaml         |   20 +
+ install/kubernetes/cilium/values.yaml.tmpl    |   20 +
  operator/Makefile                             |    5 +-
  operator/flags.go                             |   10 +-
  operator/main.go                              |    2 +-
- operator/option/config.go                     |   50 +
- operator/provider_huaweicloud_flags.go        |   44 +
+ operator/option/config.go                     |   40 +
+ operator/provider_huaweicloud_flags.go        |   40 +
  operator/provider_huaweicloud_register.go     |   15 +
  pkg/alibabacloud/api/api.go                   |   24 +-
  pkg/api/helpers/rate_limit.go                 |   29 +-
  pkg/aws/ec2/ec2.go                            |   60 +-
  pkg/azure/api/api.go                          |   16 +-
- pkg/huaweicloud/api/api.go                    | 1225 +++++++++
+ pkg/huaweicloud/api/api.go                    | 1165 ++++++++
  pkg/huaweicloud/api/error.go                  |   71 +
  pkg/huaweicloud/api/subnet_capacity.go        |  129 +
- pkg/huaweicloud/api/types.go                  |   12 +
- pkg/huaweicloud/eni/instances.go              |  300 +++
+ pkg/huaweicloud/api/types.go                  |   11 +
+ pkg/huaweicloud/eni/instances.go              |  287 ++
  pkg/huaweicloud/eni/limits/limits.go          |  299 +++
  pkg/huaweicloud/eni/log.go                    |   17 +
- pkg/huaweicloud/eni/node.go                   |  649 +++++
+ pkg/huaweicloud/eni/node.go                   |  648 +++++
  pkg/huaweicloud/eni/types/doc.go              |    7 +
  pkg/huaweicloud/eni/types/types.go            |  184 ++
  .../eni/types/zz_generated.deepcopy.go        |   92 +
  pkg/huaweicloud/metadata/metadata.go          |  213 ++
  pkg/huaweicloud/types/types.go                |   17 +
  pkg/huaweicloud/utils/utils.go                |   36 +
- pkg/ipam/allocator/huaweicloud/huaweicloud.go |  104 +
+ pkg/ipam/allocator/huaweicloud/huaweicloud.go |  100 +
  pkg/ipam/ipam.go                              |    2 +-
  pkg/ipam/option/option.go                     |    3 +
  pkg/ipam/types/types.go                       |   37 +
@@ -957,7 +960,7 @@ Subject: [PATCH 1/3] huaweicloud: add control plane support
  vendor/github.com/tjfoc/gmsm/LICENSE          |  201 ++
  vendor/github.com/tjfoc/gmsm/sm2/p256.go      | 1182 +++++++++
  vendor/github.com/tjfoc/gmsm/sm2/sm2.go       |  674 +++++
- vendor/github.com/tjfoc/gmsm/sm2/utils.go     |   59 +
+ vendor/github.com/tjfoc/gmsm/sm2/utils.go     |   58 +
  vendor/github.com/tjfoc/gmsm/sm3/ifile        |    1 +
  vendor/github.com/tjfoc/gmsm/sm3/sm3.go       |  259 ++
  .../go.mongodb.org/mongo-driver/bson/bson.go  |    6 +-
@@ -1034,7 +1037,7 @@ Subject: [PATCH 1/3] huaweicloud: add control plane support
  vendor/gopkg.in/ini.v1/deprecated.go          |    5 +-
  vendor/gopkg.in/ini.v1/ini.go                 |    8 +-
  vendor/modules.txt                            |   60 +-
- 1030 files changed, 67502 insertions(+), 998 deletions(-)
+ 1030 files changed, 67403 insertions(+), 998 deletions(-)
  create mode 100644 operator/provider_huaweicloud_flags.go
  create mode 100644 operator/provider_huaweicloud_register.go
  create mode 100644 pkg/huaweicloud/api/api.go
@@ -2443,10 +2446,10 @@ index 7933852e3..25c4e9a97 100644
  export OPERATOR_AZURE_DIGEST := ""
  export OPERATOR_GENERIC_DIGEST := ""
 diff --git a/install/kubernetes/cilium/templates/cilium-configmap.yaml b/install/kubernetes/cilium/templates/cilium-configmap.yaml
-index e20574ef1..e8d2fc4a2 100644
+index e20574ef1..db469cf6f 100644
 --- a/install/kubernetes/cilium/templates/cilium-configmap.yaml
 +++ b/install/kubernetes/cilium/templates/cilium-configmap.yaml
-@@ -443,6 +443,32 @@ data:
+@@ -443,6 +443,29 @@ data:
    auto-create-cilium-node-resource: "true"
  {{- end }}
  
@@ -2470,16 +2473,13 @@ index e20574ef1..e8d2fc4a2 100644
 +{{- if .Values.huaweicloud.vpcID }}
 +  huawei-cloud-vpc-id: {{ .Values.huaweicloud.vpcID | quote }}
 +{{- end }}
-+{{- if .Values.huaweicloud.subENITags }}
-+  huawei-cloud-subeni-tags: {{ .Values.huaweicloud.subENITags | toRawJson | quote }}
-+{{- end }}
 +  huawei-cloud-release-excess-ips: {{ .Values.huaweicloud.releaseExcessIPs | quote }}
 +{{- end }}
 +
  {{- if hasKey .Values "l7Proxy" }}
    # Enables L7 proxy for L7 policy enforcement and visibility
    enable-l7-proxy: {{ .Values.l7Proxy | quote }}
-@@ -572,6 +598,8 @@ data:
+@@ -572,6 +595,8 @@ data:
    # List of devices used to attach bpf_host.o (implements BPF NodePort,
    # host-firewall and BPF masquerading)
    devices: {{ join " " .Values.devices | quote }}
@@ -2555,10 +2555,10 @@ index b0560f87e..09bd2643b 100644
          - name: KUBERNETES_SERVICE_HOST
            value: {{ .Values.k8sServiceHost | quote }}
 diff --git a/install/kubernetes/cilium/values.yaml b/install/kubernetes/cilium/values.yaml
-index 6f296bda4..863ed367f 100644
+index 6f296bda4..1938e8793 100644
 --- a/install/kubernetes/cilium/values.yaml
 +++ b/install/kubernetes/cilium/values.yaml
-@@ -256,6 +256,25 @@ alibabacloud:
+@@ -256,6 +256,24 @@ alibabacloud:
    # -- Enable AlibabaCloud ENI integration
    enabled: false
  
@@ -2578,13 +2578,12 @@ index 6f296bda4..863ed367f 100644
 +  # -- Select Sub-ENI allocation subnets by HuaweiCloud VPC subnet tags.
 +  subnetTags: {}
 +  securityGroupIDs: []
-+  subENITags: {}
 +  releaseExcessIPs: false
 +
  # -- Deprecated in favor of bandwidthManager.enabled. To be removed in 1.13.
  # Optimize TCP and UDP workloads and enable rate-limiting traffic from
  # individual Pods with EDT (Earliest Departure Time) through the
-@@ -1657,6 +1676,8 @@ operator:
+@@ -1657,6 +1675,8 @@ operator:
      awsDigest: ""
      # operator-alibabacloud-digest
      alibabacloudDigest: ""
@@ -2594,10 +2593,10 @@ index 6f296bda4..863ed367f 100644
      pullPolicy: "IfNotPresent"
      suffix: ""
 diff --git a/install/kubernetes/cilium/values.yaml.tmpl b/install/kubernetes/cilium/values.yaml.tmpl
-index 8f8faed25..6665c20a7 100644
+index 8f8faed25..65cd49edc 100644
 --- a/install/kubernetes/cilium/values.yaml.tmpl
 +++ b/install/kubernetes/cilium/values.yaml.tmpl
-@@ -253,6 +253,25 @@ alibabacloud:
+@@ -253,6 +253,24 @@ alibabacloud:
    # -- Enable AlibabaCloud ENI integration
    enabled: false
  
@@ -2617,13 +2616,12 @@ index 8f8faed25..6665c20a7 100644
 +  # -- Select Sub-ENI allocation subnets by HuaweiCloud VPC subnet tags.
 +  subnetTags: {}
 +  securityGroupIDs: []
-+  subENITags: {}
 +  releaseExcessIPs: false
 +
  # -- Deprecated in favor of bandwidthManager.enabled. To be removed in 1.13.
  # Optimize TCP and UDP workloads and enable rate-limiting traffic from
  # individual Pods with EDT (Earliest Departure Time) through the
-@@ -1654,6 +1673,8 @@ operator:
+@@ -1654,6 +1672,8 @@ operator:
      awsDigest: ${OPERATOR_AWS_DIGEST}
      # operator-alibabacloud-digest
      alibabacloudDigest: ${OPERATOR_ALIBABACLOUD_DIGEST}
@@ -2708,10 +2706,10 @@ index 8f7e931a0..06a4d8d43 100644
  		if !providerBuiltin {
  			log.Fatalf("%s allocator is not supported by this version of %s", ipamMode, binaryName)
 diff --git a/operator/option/config.go b/operator/option/config.go
-index 8ab17a88c..8a1ad910a 100644
+index 8ab17a88c..e11996947 100644
 --- a/operator/option/config.go
 +++ b/operator/option/config.go
-@@ -236,6 +236,30 @@ const (
+@@ -236,6 +236,27 @@ const (
  	// the number of API calls to AlibabaCloud ECS service.
  	AlibabaCloudReleaseExcessIPs = "alibaba-cloud-release-excess-ips"
  
@@ -2733,16 +2731,13 @@ index 8ab17a88c..8a1ad910a 100644
 +	// HuaweiCloudVPCID constrains resource discovery to a VPC.
 +	HuaweiCloudVPCID = "huawei-cloud-vpc-id"
 +
-+	// HuaweiCloudSubENITags are tags added to Sub-ENI port resources created by HuaweiCloud IPAM.
-+	HuaweiCloudSubENITags = "huawei-cloud-subeni-tags"
-+
 +	// HuaweiCloudReleaseExcessIPs enables releasing unused HuaweiCloud Sub-ENIs.
 +	HuaweiCloudReleaseExcessIPs = "huawei-cloud-release-excess-ips"
 +
  	// CiliumEndpointSlice options
  
  	// CESMaxCEPsInCES is the maximum number of cilium endpoints allowed in single
-@@ -474,6 +498,16 @@ type OperatorConfig struct {
+@@ -474,6 +495,15 @@ type OperatorConfig struct {
  	// the number of API calls to AlibabaCloud ECS service.
  	AlibabaCloudReleaseExcessIPs bool
  
@@ -2753,13 +2748,12 @@ index 8ab17a88c..8a1ad910a 100644
 +	HuaweiCloudRegion           string
 +	HuaweiCloudEndpoint         string
 +	HuaweiCloudVPCID            string
-+	HuaweiCloudSubENITags       map[string]string
 +	HuaweiCloudReleaseExcessIPs bool
 +
  	// CiliumEndpointSlice options
  
  	// CESMaxCEPsInCES is the maximum number of CiliumEndpoints allowed in single
-@@ -599,6 +633,15 @@ func (c *OperatorConfig) Populate() {
+@@ -599,6 +629,15 @@ func (c *OperatorConfig) Populate() {
  	c.AlibabaCloudVPCID = viper.GetString(AlibabaCloudVPCID)
  	c.AlibabaCloudReleaseExcessIPs = viper.GetBool(AlibabaCloudReleaseExcessIPs)
  
@@ -2775,31 +2769,20 @@ index 8ab17a88c..8a1ad910a 100644
  	// CiliumEndpointSlice options
  	c.CESMaxCEPsInCES = viper.GetInt(CESMaxCEPsInCES)
  	c.CESSlicingMode = viper.GetString(CESSlicingMode)
-@@ -632,6 +675,12 @@ func (c *OperatorConfig) Populate() {
+@@ -632,6 +671,7 @@ func (c *OperatorConfig) Populate() {
  	} else {
  		c.ENITags = m
  	}
 +
-+	if m, err := command.GetStringMapStringE(viper.GetViper(), HuaweiCloudSubENITags); err != nil {
-+		log.Fatalf("unable to parse %s: %s", HuaweiCloudSubENITags, err)
-+	} else {
-+		c.HuaweiCloudSubENITags = m
-+	}
  }
  
  // Config represents the operator configuration.
-@@ -641,4 +690,5 @@ var Config = &OperatorConfig{
- 	IPAMInstanceTags:        make(map[string]string),
- 	AWSInstanceLimitMapping: make(map[string]string),
- 	ENITags:                 make(map[string]string),
-+	HuaweiCloudSubENITags:   make(map[string]string),
- }
 diff --git a/operator/provider_huaweicloud_flags.go b/operator/provider_huaweicloud_flags.go
 new file mode 100644
-index 000000000..6d486e936
+index 000000000..92de9d0a1
 --- /dev/null
 +++ b/operator/provider_huaweicloud_flags.go
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,40 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -2834,10 +2817,6 @@ index 000000000..6d486e936
 +
 +	flags.String(operatorOption.HuaweiCloudVPCID, "", "Specific VPC ID for HuaweiCloud Sub-ENI discovery")
 +	option.BindEnv(operatorOption.HuaweiCloudVPCID)
-+
-+	flags.Var(option.NewNamedMapOptions(operatorOption.HuaweiCloudSubENITags, &operatorOption.Config.HuaweiCloudSubENITags, nil),
-+		operatorOption.HuaweiCloudSubENITags, "HuaweiCloud Sub-ENI port tags in the form of k1=v1,k2=v2")
-+	option.BindEnv(operatorOption.HuaweiCloudSubENITags)
 +
 +	flags.Bool(operatorOption.HuaweiCloudReleaseExcessIPs, false, "Release excess free HuaweiCloud Sub-ENIs")
 +	option.BindEnv(operatorOption.HuaweiCloudReleaseExcessIPs)
@@ -3194,10 +3173,10 @@ index 3e43e825e..9b37ae0d2 100644
  	result, err := c.virtualnetworks.ListAllComplete(ctx)
 diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
 new file mode 100644
-index 000000000..b9ed4f0ef
+index 000000000..64b03b4dd
 --- /dev/null
 +++ b/pkg/huaweicloud/api/api.go
-@@ -0,0 +1,1225 @@
+@@ -0,0 +1,1165 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -3216,7 +3195,6 @@ index 000000000..b9ed4f0ef
 +	"strconv"
 +	"strings"
 +	"time"
-+	"unicode/utf8"
 +
 +	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth"
 +	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/config"
@@ -3239,7 +3217,6 @@ index 000000000..b9ed4f0ef
 +type HuaweiCloudAPI interface {
 +	CreateSubNetworkInterface(ctx context.Context, req CreateSubENIRequest) (string, *eniTypes.SubENI, error)
 +	BatchCreateSubNetworkInterfaces(ctx context.Context, count int, req CreateSubENIRequest) ([]*eniTypes.SubENI, error)
-+	TagSubNetworkInterface(ctx context.Context, subENIID string, tags map[string]string) error
 +	DeleteSubNetworkInterface(ctx context.Context, subENIID string) error
 +	GetSubNetworkInterface(ctx context.Context, subENIID string) (*eniTypes.SubENI, error)
 +	ListSubNetworkInterfaces(ctx context.Context, parentID string) ([]*eniTypes.SubENI, error)
@@ -3265,10 +3242,9 @@ index 000000000..b9ed4f0ef
 +var _ HuaweiCloudAPI = &Client{}
 +
 +type createSubNetworkInterfaceOption struct {
-+	VirsubnetID    string                 `json:"virsubnet_id"`
-+	ParentID       string                 `json:"parent_id"`
-+	SecurityGroups *[]string              `json:"security_groups,omitempty"`
-+	Tags           []vpcmodel.ResourceTag `json:"tags,omitempty"`
++	VirsubnetID    string    `json:"virsubnet_id"`
++	ParentID       string    `json:"parent_id"`
++	SecurityGroups *[]string `json:"security_groups,omitempty"`
 +}
 +
 +type createSubNetworkInterfaceRequestBody struct {
@@ -3416,7 +3392,6 @@ index 000000000..b9ed4f0ef
 +	option := &createSubNetworkInterfaceOption{
 +		VirsubnetID: req.SubnetID,
 +		ParentID:    req.TrunkInterfaceID,
-+		Tags:        resourceTags(req.Tags),
 +	}
 +	if len(req.SecurityGroupIDs) > 0 {
 +		option.SecurityGroups = &req.SecurityGroupIDs
@@ -3462,7 +3437,6 @@ index 000000000..b9ed4f0ef
 +	option := &createSubNetworkInterfaceOption{
 +		VirsubnetID: req.SubnetID,
 +		ParentID:    req.TrunkInterfaceID,
-+		Tags:        resourceTags(req.Tags),
 +	}
 +	if len(req.SecurityGroupIDs) > 0 {
 +		option.SecurityGroups = &req.SecurityGroupIDs
@@ -3493,19 +3467,6 @@ index 000000000..b9ed4f0ef
 +	}
 +
 +	return result, nil
-+}
-+
-+func resourceTags(tags map[string]string) []vpcmodel.ResourceTag {
-+	keys := make([]string, 0, len(tags))
-+	for key := range tags {
-+		keys = append(keys, key)
-+	}
-+	sort.Strings(keys)
-+	result := make([]vpcmodel.ResourceTag, 0, len(keys))
-+	for _, key := range keys {
-+		result = append(result, vpcmodel.ResourceTag{Key: key, Value: tags[key]})
-+	}
-+	return result
 +}
 +
 +func createSubNetworkInterfaceRequestDef() *coredef.HttpRequestDef {
@@ -3547,27 +3508,6 @@ index 000000000..b9ed4f0ef
 +			return fmt.Errorf("duplicate security group ID %q", securityGroupID)
 +		}
 +		seenSecurityGroups[securityGroupID] = struct{}{}
-+	}
-+	if err := validateResourceTags(req.Tags); err != nil {
-+		return err
-+	}
-+	return nil
-+}
-+
-+func validateResourceTags(tags map[string]string) error {
-+	if len(tags) > 20 {
-+		return fmt.Errorf("tag count %d exceeds cloud limit 20", len(tags))
-+	}
-+	for key, value := range tags {
-+		if strings.TrimSpace(key) == "" {
-+			return fmt.Errorf("tag key must not be empty")
-+		}
-+		if utf8.RuneCountInString(key) > 128 {
-+			return fmt.Errorf("tag key %q exceeds cloud limit 128 characters", key)
-+		}
-+		if utf8.RuneCountInString(value) > 255 {
-+			return fmt.Errorf("tag value for key %q exceeds cloud limit 255 characters", key)
-+		}
 +	}
 +	return nil
 +}
@@ -3652,27 +3592,6 @@ index 000000000..b9ed4f0ef
 +		return fmt.Errorf("%w; %s", cause, strings.Join(rollbackErrors, "; "))
 +	}
 +	return cause
-+}
-+
-+func (c *Client) TagSubNetworkInterface(ctx context.Context, subENIID string, tags map[string]string) error {
-+	if err := ctx.Err(); err != nil {
-+		return err
-+	}
-+	if len(tags) == 0 {
-+		return nil
-+	}
-+	if err := validateResourceTags(tags); err != nil {
-+		return err
-+	}
-+	request := &vpcmodel.BatchCreatePortTagsRequest{
-+		PortId: subENIID,
-+		Body:   &vpcmodel.BatchCreatePortTagsRequestBody{Tags: resourceTags(tags)},
-+	}
-+	if err := c.limiter.Limit(ctx, "BatchCreatePortTags"); err != nil {
-+		return err
-+	}
-+	_, err := c.vpcClient.BatchCreatePortTags(request)
-+	return normalizeAPIError(err)
 +}
 +
 +func (c *Client) DeleteSubNetworkInterface(ctx context.Context, subENIID string) error {
@@ -4637,10 +4556,10 @@ index 000000000..e429894c0
 +func stringPtr(value string) *string { return &value }
 diff --git a/pkg/huaweicloud/api/types.go b/pkg/huaweicloud/api/types.go
 new file mode 100644
-index 000000000..87637c86c
+index 000000000..5780ff4fa
 --- /dev/null
 +++ b/pkg/huaweicloud/api/types.go
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,11 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -4651,14 +4570,13 @@ index 000000000..87637c86c
 +	TrunkInterfaceID string
 +	SubnetID         string
 +	SecurityGroupIDs []string
-+	Tags             map[string]string
 +}
 diff --git a/pkg/huaweicloud/eni/instances.go b/pkg/huaweicloud/eni/instances.go
 new file mode 100644
-index 000000000..47a7a708f
+index 000000000..e07ff785c
 --- /dev/null
 +++ b/pkg/huaweicloud/eni/instances.go
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,287 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -4703,16 +4621,14 @@ index 000000000..47a7a708f
 +	securityGroups hwTypes.SecurityGroupMap
 +	api            cloudAPI
 +	vpcID          string
-+	subENITags     map[string]string
 +}
 +
-+func NewInstancesManager(api hwAPI.HuaweiCloudAPI, vpcID string, subENITags map[string]string) *InstancesManager {
++func NewInstancesManager(api hwAPI.HuaweiCloudAPI, vpcID string) *InstancesManager {
 +	return &InstancesManager{
-+		logger:     log,
-+		instances:  ipamTypes.NewInstanceMap(),
-+		api:        api,
-+		vpcID:      vpcID,
-+		subENITags: cloneTags(subENITags),
++		logger:    log,
++		instances: ipamTypes.NewInstanceMap(),
++		api:       api,
++		vpcID:     vpcID,
 +	}
 +}
 +
@@ -4725,17 +4641,6 @@ index 000000000..47a7a708f
 +		instanceID: node.InstanceID(),
 +		subENIs:    map[string]eniTypes.SubENI{},
 +	}
-+}
-+
-+func cloneTags(tags map[string]string) map[string]string {
-+	if len(tags) == 0 {
-+		return nil
-+	}
-+	cloned := make(map[string]string, len(tags))
-+	for k, v := range tags {
-+		cloned[k] = v
-+	}
-+	return cloned
 +}
 +
 +func (m *InstancesManager) HasInstance(instanceID string) bool {
@@ -5289,10 +5194,10 @@ index 000000000..33d656cf0
 +)
 diff --git a/pkg/huaweicloud/eni/node.go b/pkg/huaweicloud/eni/node.go
 new file mode 100644
-index 000000000..407f2206b
+index 000000000..5b5ab87d6
 --- /dev/null
 +++ b/pkg/huaweicloud/eni/node.go
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,648 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -5502,7 +5407,6 @@ index 000000000..407f2206b
 +		TrunkInterfaceID: trunkInterfaceID,
 +		SubnetID:         subnetID,
 +		SecurityGroupIDs: securityGroupIDs,
-+		Tags:             n.manager.subENITags,
 +	})
 +	if err != nil {
 +		return 0, err
@@ -6529,10 +6433,10 @@ index 000000000..024f70d3a
 +}
 diff --git a/pkg/ipam/allocator/huaweicloud/huaweicloud.go b/pkg/ipam/allocator/huaweicloud/huaweicloud.go
 new file mode 100644
-index 000000000..0d202c2ec
+index 000000000..229eef5d6
 --- /dev/null
 +++ b/pkg/ipam/allocator/huaweicloud/huaweicloud.go
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,100 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -6578,10 +6482,6 @@ index 000000000..0d202c2ec
 +	if projectID == "" {
 +		return fmt.Errorf("--huawei-cloud-project-id is required for HuaweiCloud IPAM")
 +	}
-+	if len(operatorOption.Config.HuaweiCloudSubENITags) > 20 {
-+		return fmt.Errorf("--huawei-cloud-subeni-tags supports at most 20 tags")
-+	}
-+
 +	if region == "" {
 +		var err error
 +		region, err = metadata.GetRegionID(ctx)
@@ -6621,7 +6521,7 @@ index 000000000..0d202c2ec
 +		iMetrics = &ipamMetrics.NoOpMetrics{}
 +	}
 +
-+	instances := eni.NewInstancesManager(a.client, a.vpcID, operatorOption.Config.HuaweiCloudSubENITags)
++	instances := eni.NewInstancesManager(a.client, a.vpcID)
 +	nodeManager, err := ipam.NewNodeManager(instances, getterUpdater, iMetrics,
 +		operatorOption.Config.ParallelAllocWorkers,
 +		operatorOption.Config.HuaweiCloudReleaseExcessIPs,
@@ -8008,7 +7908,7 @@ index 000000000..45281a65a
 +	go build -o ycat ./cmd/ycat
 diff --git a/vendor/github.com/goccy/go-yaml/README.md b/vendor/github.com/goccy/go-yaml/README.md
 new file mode 100644
-index 000000000..945234917
+index 000000000..86513557a
 --- /dev/null
 +++ b/vendor/github.com/goccy/go-yaml/README.md
 @@ -0,0 +1,370 @@
@@ -72322,7 +72222,7 @@ index 000000000..fd892b06d
 +}
 diff --git a/vendor/github.com/tjfoc/gmsm/sm2/sm2.go b/vendor/github.com/tjfoc/gmsm/sm2/sm2.go
 new file mode 100644
-index 000000000..20b2794a8
+index 000000000..1780eb62c
 --- /dev/null
 +++ b/vendor/github.com/tjfoc/gmsm/sm2/sm2.go
 @@ -0,0 +1,674 @@
@@ -73002,7 +72902,7 @@ index 000000000..20b2794a8
 +}
 diff --git a/vendor/github.com/tjfoc/gmsm/sm2/utils.go b/vendor/github.com/tjfoc/gmsm/sm2/utils.go
 new file mode 100644
-index 000000000..03d92270b
+index 000000000..bb947ad01
 --- /dev/null
 +++ b/vendor/github.com/tjfoc/gmsm/sm2/utils.go
 @@ -0,0 +1,58 @@
@@ -80625,3 +80525,4 @@ index ce03027ed..930b1d2a4 100644
  # sigs.k8s.io/controller-tools => github.com/cilium/controller-tools v0.6.2
 -- 
 2.33.0
+

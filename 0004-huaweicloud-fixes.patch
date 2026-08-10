@@ -1,8 +1,11 @@
-From 505988f002e3e34a7be66475974ed07df3da099b Mon Sep 17 00:00:00 2001
-From: HuaweiCloudDeveloper <huaweicloud-developer@users.noreply.github.com>
-Date: Tue, 4 Aug 2026 18:35:20 +0800
-Subject: [PATCH 4/4] huaweicloud: batch lookups and preserve gateway neighbors
+From 6c0e9d2d97489577f45bbd1c706ab213f2386ac2 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-e178.novalocal>
+Date: Mon, 10 Aug 2026 18:16:29 +0800
+Subject: [PATCH] huaweicloud: batch lookups and preserve gateway neighbors
 
+Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+
+Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 ---
  pkg/datapath/linux/node.go                    |  13 +
  pkg/datapath/linux/node_linux_test.go         | 122 +++++++++
@@ -10,11 +13,11 @@ Subject: [PATCH 4/4] huaweicloud: batch lookups and preserve gateway neighbors
  .../huaweicloud_subeni_privileged_test.go     |  80 ++++++
  .../huaweicloud_subeni_test.go                |  32 +++
  pkg/huaweicloud/api/api.go                    | 257 +++++++++++++++---
- pkg/huaweicloud/api/api_boundary_test.go      | 118 +++++++-
+ pkg/huaweicloud/api/api_boundary_test.go      | 116 +++++++-
  .../api/api_integration_mock_test.go          |  53 ++++
  pkg/huaweicloud/neighbor/registry.go          | 137 ++++++++++
  pkg/huaweicloud/neighbor/registry_test.go     |  76 ++++++
- 10 files changed, 933 insertions(+), 40 deletions(-)
+ 10 files changed, 932 insertions(+), 39 deletions(-)
  create mode 100644 pkg/huaweicloud/api/api_integration_mock_test.go
  create mode 100644 pkg/huaweicloud/neighbor/registry.go
  create mode 100644 pkg/huaweicloud/neighbor/registry_test.go
@@ -521,10 +524,10 @@ index 36ef666bb..f6cd897d4 100644
  func (e testSubENIEndpoint) GetID() uint64          { return e.id }
  func (e testSubENIEndpoint) GetIfIndex() int        { return e.ifindex }
 diff --git a/pkg/huaweicloud/api/api.go b/pkg/huaweicloud/api/api.go
-index b9ed4f0ef..a59a09f26 100644
+index 64b03b4dd..a429e5b89 100644
 --- a/pkg/huaweicloud/api/api.go
 +++ b/pkg/huaweicloud/api/api.go
-@@ -606,59 +606,235 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
+@@ -546,59 +546,235 @@ func (c *Client) GetPortSecurityGroups(ctx context.Context, portID string) ([]st
  }
  
  func (c *Client) fillSubENIGatewayInfo(ctx context.Context, subENI *eniTypes.SubENI, cachedSubnets ipamTypes.SubnetMap) error {
@@ -794,7 +797,7 @@ index b9ed4f0ef..a59a09f26 100644
  }
  
  func (c *Client) resolveSubENISubnetMetadata(ctx context.Context, subnetID, privateIP string, cachedSubnets ipamTypes.SubnetMap) (string, string, error) {
-@@ -883,14 +1059,13 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+@@ -823,14 +999,13 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
  	}
  
  	instances := ipamTypes.NewInstanceMap()
@@ -811,7 +814,7 @@ index b9ed4f0ef..a59a09f26 100644
  		instanceID := parentToInstance[subENI.ParentID]
  		if instanceID == "" {
  			instanceID = item.InstanceId
-@@ -898,6 +1073,14 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
+@@ -838,6 +1013,14 @@ func (c *Client) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetwork
  		if instanceID == "" {
  			continue
  		}
@@ -827,7 +830,7 @@ index b9ed4f0ef..a59a09f26 100644
  	}
  
 diff --git a/pkg/huaweicloud/api/api_boundary_test.go b/pkg/huaweicloud/api/api_boundary_test.go
-index 61c733f51..1d2c3fb31 100644
+index 5170e72b4..c69d7fe49 100644
 --- a/pkg/huaweicloud/api/api_boundary_test.go
 +++ b/pkg/huaweicloud/api/api_boundary_test.go
 @@ -8,6 +8,7 @@ import (
@@ -857,16 +860,7 @@ index 61c733f51..1d2c3fb31 100644
  					return
  				}
  				items := make([]map[string]interface{}, count)
-@@ -285,7 +288,7 @@ func TestCreateRequestsSendTagsInline(t *testing.T) {
- 					_, _ = fmt.Fprint(w, `{"virsubnets":[{"id":"subnet-1","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.0.0/24","gateway_ip":"10.0.0.1"}]}]}`)
- 					return
- 				}
--				_, _ = fmt.Fprint(w, `{"ports":[{"mac_address":"fa:16:3e:00:00:fe"}]}`)
-+				_, _ = fmt.Fprint(w, `{"ports":[{"virsubnet_id":"subnet-1","mac_address":"fa:16:3e:00:00:fe","private_ips":[{"ip_address":"10.0.0.1"}]}]}`)
- 			}))
- 			defer server.Close()
- 
-@@ -735,6 +738,102 @@ func TestFillSubENIGatewayInfoRejectsMissingOrAmbiguousRouterPort(t *testing.T)
+@@ -653,6 +656,102 @@ func TestFillSubENIGatewayInfoRejectsMissingOrAmbiguousRouterPort(t *testing.T)
  	}
  }
  
@@ -969,7 +963,7 @@ index 61c733f51..1d2c3fb31 100644
  func TestFinalizeRollsBackAllCreatedSubENIsOnGatewayFailure(t *testing.T) {
  	deletes := 0
  	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-@@ -761,6 +860,21 @@ func TestFinalizeRollsBackAllCreatedSubENIsOnGatewayFailure(t *testing.T) {
+@@ -679,6 +778,21 @@ func TestFinalizeRollsBackAllCreatedSubENIsOnGatewayFailure(t *testing.T) {
  	}
  }
  

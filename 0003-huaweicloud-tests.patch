@@ -1,8 +1,11 @@
-From 8c1d9d8b33f8032a5158ef963ce402bf89e13be4 Mon Sep 17 00:00:00 2001
-From: root <root@liteserver-8564-1.novalocal>
-Date: Wed, 15 Jul 2026 17:24:29 +0800
-Subject: [PATCH 3/3] test(huaweicloud): add control and data plane coverage
+From deeac39f78181ceb424d61440f140489b708eef0 Mon Sep 17 00:00:00 2001
+From: root <root@liteserver-e178.novalocal>
+Date: Mon, 10 Aug 2026 18:15:10 +0800
+Subject: [PATCH] test(huaweicloud): add control and data plane coverage
 
+Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+
+Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
 ---
  bpf/tests/huaweicloud_non_trunk_test.c        |   60 +
  bpf/tests/huaweicloud_test.c                  |  424 ++++++
@@ -15,9 +18,9 @@ Subject: [PATCH 3/3] test(huaweicloud): add control and data plane coverage
  pkg/datapath/linux/routing/routing_test.go    |  424 ++++++
  .../huaweicloud_subeni_privileged_test.go     |  292 ++++
  .../huaweicloud_subeni_test.go                |  255 ++++
- pkg/huaweicloud/api/api_boundary_test.go      |  818 +++++++++++
+ pkg/huaweicloud/api/api_boundary_test.go      |  736 ++++++++++
  pkg/huaweicloud/api/error_test.go             |   96 ++
- pkg/huaweicloud/api/mock/mock.go              |  459 +++++++
+ pkg/huaweicloud/api/mock/mock.go              |  447 +++++++
  pkg/huaweicloud/api/subnet_capacity_test.go   |  376 ++++++
  pkg/huaweicloud/eni/instances_test.go         | 1191 +++++++++++++++++
  .../metadata/metadata_privileged_test.go      |   64 +
@@ -32,7 +35,7 @@ Subject: [PATCH 3/3] test(huaweicloud): add control and data plane coverage
  .../huaweicloud_map_capacity_test.go          |   84 ++
  test/hwc-real-e2e/netprobe.go                 |   90 ++
  test/provision/compile.sh                     |    2 +
- 28 files changed, 6264 insertions(+), 2 deletions(-)
+ 28 files changed, 6170 insertions(+), 2 deletions(-)
  create mode 100644 bpf/tests/huaweicloud_non_trunk_test.c
  create mode 100644 bpf/tests/huaweicloud_test.c
  create mode 100644 bpf/tests/huaweicloud_vlan_pop_failure_test.c
@@ -1981,10 +1984,10 @@ index 000000000..36ef666bb
 +}
 diff --git a/pkg/huaweicloud/api/api_boundary_test.go b/pkg/huaweicloud/api/api_boundary_test.go
 new file mode 100644
-index 000000000..61c733f51
+index 000000000..5170e72b4
 --- /dev/null
 +++ b/pkg/huaweicloud/api/api_boundary_test.go
-@@ -0,0 +1,818 @@
+@@ -0,0 +1,736 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -2202,10 +2205,7 @@ index 000000000..61c733f51
 +		{SubnetID: "subnet-1", TrunkInterfaceID: "\t"},
 +		{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", SecurityGroupIDs: []string{""}},
 +		{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", SecurityGroupIDs: []string{"sg-1", "sg-1"}},
-+		{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", Tags: map[string]string{" ": "value"}},
 +		{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", SecurityGroupIDs: make([]string, 101)},
-+		{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", Tags: map[string]string{strings.Repeat("k", 129): "value"}},
-+		{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", Tags: map[string]string{"key": strings.Repeat("v", 256)}},
 +	}
 +	for i, req := range tests {
 +		if err := validateCreateSubENIRequest(req); err == nil {
@@ -2219,88 +2219,9 @@ index 000000000..61c733f51
 +	for i := range securityGroups {
 +		securityGroups[i] = fmt.Sprintf("sg-%d", i)
 +	}
-+	tags := make(map[string]string, 20)
-+	for i := 0; i < 20; i++ {
-+		tags[fmt.Sprintf("tag-%d", i)] = ""
-+	}
-+	tags[strings.Repeat("界", 128)] = strings.Repeat("值", 255)
-+	delete(tags, "tag-0")
-+	req := CreateSubENIRequest{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", SecurityGroupIDs: securityGroups, Tags: tags}
++	req := CreateSubENIRequest{SubnetID: "subnet-1", TrunkInterfaceID: "port-1", SecurityGroupIDs: securityGroups}
 +	if err := validateCreateSubENIRequest(req); err != nil {
-+		t.Fatalf("cloud maxima and Unicode character counting should be accepted: %v", err)
-+	}
-+
-+	tags["overflow"] = "value"
-+	if err := validateCreateSubENIRequest(req); err == nil {
-+		t.Fatal("expected 21 tags to be rejected")
-+	}
-+}
-+
-+func TestCreateRequestsSendTagsInline(t *testing.T) {
-+	for _, batch := range []bool{false, true} {
-+		name := "single"
-+		if batch {
-+			name = "batch"
-+		}
-+		t.Run(name, func(t *testing.T) {
-+			var received []vpcmodel.ResourceTag
-+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-+				w.Header().Set("Content-Type", "application/json")
-+				if r.Method == http.MethodPost {
-+					var body struct {
-+						SubNetworkInterface struct {
-+							Tags []vpcmodel.ResourceTag `json:"tags"`
-+						} `json:"sub_network_interface"`
-+					}
-+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-+						t.Errorf("decode create body: %v", err)
-+						return
-+					}
-+					received = body.SubNetworkInterface.Tags
-+					item := map[string]interface{}{
-+						"id": "eni-1", "private_ip_address": "10.0.0.2", "mac_address": "fa:16:3e:00:00:01",
-+						"vlan_id": 101, "virsubnet_id": "subnet-1", "parent_id": "port-1", "tags": received,
-+					}
-+					if batch {
-+						_ = json.NewEncoder(w).Encode(map[string]interface{}{"sub_network_interfaces": []interface{}{item}})
-+					} else {
-+						_ = json.NewEncoder(w).Encode(map[string]interface{}{"sub_network_interface": item})
-+					}
-+					return
-+				}
-+				if strings.Contains(r.URL.Path, "virsubnets") {
-+					_, _ = fmt.Fprint(w, `{"virsubnets":[{"id":"subnet-1","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.0.0/24","gateway_ip":"10.0.0.1"}]}]}`)
-+					return
-+				}
-+				_, _ = fmt.Fprint(w, `{"ports":[{"mac_address":"fa:16:3e:00:00:fe"}]}`)
-+			}))
-+			defer server.Close()
-+
-+			client := newTestClient(t, server.URL)
-+			req := CreateSubENIRequest{
-+				SubnetID: "subnet-1", TrunkInterfaceID: "port-1",
-+				Tags: map[string]string{"z-key": "last", "a-key": "first"},
-+			}
-+			if batch {
-+				if _, err := client.BatchCreateSubNetworkInterfaces(context.Background(), 1, req); err != nil {
-+					t.Fatal(err)
-+				}
-+			} else if _, _, err := client.CreateSubNetworkInterface(context.Background(), req); err != nil {
-+				t.Fatal(err)
-+			}
-+			if len(received) != 2 || received[0].Key != "a-key" || received[0].Value != "first" || received[1].Key != "z-key" || received[1].Value != "last" {
-+				t.Fatalf("unexpected inline tags: %#v", received)
-+			}
-+		})
-+	}
-+}
-+
-+func TestTagSubNetworkInterfaceAllowsEmptyTags(t *testing.T) {
-+	client := &Client{}
-+	for _, tags := range []map[string]string{nil, {}} {
-+		if err := client.TagSubNetworkInterface(context.Background(), "eni-1", tags); err != nil {
-+			t.Fatal(err)
-+		}
++		t.Fatalf("cloud security group maximum should be accepted: %v", err)
 +	}
 +}
 +
@@ -2907,10 +2828,10 @@ index 000000000..5902d2b93
 +}
 diff --git a/pkg/huaweicloud/api/mock/mock.go b/pkg/huaweicloud/api/mock/mock.go
 new file mode 100644
-index 000000000..c517ef12a
+index 000000000..b1e7f217e
 --- /dev/null
 +++ b/pkg/huaweicloud/api/mock/mock.go
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,447 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// Copyright Authors of Cilium
 +
@@ -3139,18 +3060,6 @@ index 000000000..c517ef12a
 +	}
 +
 +	return result, nil
-+}
-+
-+func (a *API) TagSubNetworkInterface(ctx context.Context, subENIID string, tags map[string]string) error {
-+	_ = ctx
-+	_ = tags
-+
-+	a.mutex.RLock()
-+	defer a.mutex.RUnlock()
-+	if _, ok := a.subENIs[subENIID]; !ok {
-+		return fmt.Errorf("sub-eni %s not found", subENIID)
-+	}
-+	return nil
 +}
 +
 +func (a *API) DeleteSubNetworkInterface(ctx context.Context, subENIID string) error {
@@ -3754,7 +3663,7 @@ index 000000000..f52a55ac9
 +}
 diff --git a/pkg/huaweicloud/eni/instances_test.go b/pkg/huaweicloud/eni/instances_test.go
 new file mode 100644
-index 000000000..6050742c6
+index 000000000..0f0f3ee47
 --- /dev/null
 +++ b/pkg/huaweicloud/eni/instances_test.go
 @@ -0,0 +1,1191 @@
@@ -3875,7 +3784,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -3911,7 +3820,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -3963,7 +3872,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -3994,7 +3903,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4021,7 +3930,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4050,7 +3959,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4079,7 +3988,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("initial resync failed")
 +	}
@@ -4109,7 +4018,7 @@ index 000000000..6050742c6
 +		},
 +		[]*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil,
 +	)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4127,7 +4036,7 @@ index 000000000..6050742c6
 +func TestSecurityGroupsInheritedFromTrunkPort(t *testing.T) {
 +	api := mock.NewAPI(nil, nil, nil)
 +	api.SetPortSecurityGroups("trunk-1", []string{"sg-1", "sg-2"})
-+	node := &Node{manager: NewInstancesManager(api, "vpc-1", nil)}
++	node := &Node{manager: NewInstancesManager(api, "vpc-1")}
 +
 +	got, err := node.getSecurityGroupIDs(context.Background(), eniTypes.Spec{TrunkInterfaceID: "trunk-1"})
 +	if err != nil {
@@ -4145,7 +4054,7 @@ index 000000000..6050742c6
 +	})
 +	api.SetPortSecurityGroups("trunk-1", []string{"", "sg-trunk-b", "sg-trunk-a", "sg-trunk-b"})
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-1", SecurityGroups: []string{"", "sg-old-b", "sg-old-a", "sg-old-b"}})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4188,7 +4097,7 @@ index 000000000..6050742c6
 +		t.Fatalf("existing SubENI fallback normalization failed: groups=%v err=%v", got, err)
 +	}
 +
-+	emptyNode := &Node{manager: NewInstancesManager(mock.NewAPI(nil, nil, nil), "vpc-1", nil), node: testNodeID("new-instance"), instanceID: "new-instance"}
++	emptyNode := &Node{manager: NewInstancesManager(mock.NewAPI(nil, nil, nil), "vpc-1"), node: testNodeID("new-instance"), instanceID: "new-instance"}
 +	if _, err := emptyNode.getSecurityGroupIDs(context.Background(), eniTypes.Spec{}); err == nil {
 +		t.Fatal("first startup without trunk or historical SubENI must fail closed")
 +	}
@@ -4200,7 +4109,7 @@ index 000000000..6050742c6
 +		{ID: "sg-vpc-2", VPCID: "vpc-2", Tags: map[string]string{"role": "pod"}},
 +		{ID: "sg-unknown-vpc", Tags: map[string]string{"role": "pod"}},
 +	})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4228,7 +4137,7 @@ index 000000000..6050742c6
 +	}
 +	api := mock.NewAPI(nil, []*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, securityGroups)
 +	api.SetPortSecurityGroups("trunk-1", trunk)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4268,7 +4177,7 @@ index 000000000..6050742c6
 +	api := mock.NewAPI(nil, nil, nil)
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-a", PrivateIPAddress: "172.31.1.2"})
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-b", PrivateIPAddress: "172.31.1.10"})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("resync failed")
 +	}
@@ -4332,7 +4241,7 @@ index 000000000..6050742c6
 +	}
 +	api := &releaseControlAPI{API: base, failAt: 2}
 +	node := &Node{
-+		manager: NewInstancesManager(api, "vpc-1", nil),
++		manager: NewInstancesManager(api, "vpc-1"),
 +		k8sObj: &v2.CiliumNode{Status: v2.NodeStatus{IPAM: ipamTypes.IPAMStatus{
 +			Used: ipamTypes.AllocationMap{},
 +		}}},
@@ -4373,7 +4282,7 @@ index 000000000..6050742c6
 +	api := &releaseControlAPI{API: base, notFoundAt: 1}
 +	node := &Node{
 +		node:    testNodeID("instance-1"),
-+		manager: NewInstancesManager(api, "vpc-1", nil),
++		manager: NewInstancesManager(api, "vpc-1"),
 +		k8sObj: &v2.CiliumNode{Status: v2.NodeStatus{IPAM: ipamTypes.IPAMStatus{
 +			Used: ipamTypes.AllocationMap{},
 +		}}},
@@ -4413,7 +4322,7 @@ index 000000000..6050742c6
 +	ctx, cancel := context.WithCancel(context.Background())
 +	api := &releaseControlAPI{API: base, cancelAt: 2, cancel: cancel}
 +	node := &Node{
-+		manager: NewInstancesManager(api, "vpc-1", nil),
++		manager: NewInstancesManager(api, "vpc-1"),
 +		k8sObj: &v2.CiliumNode{Status: v2.NodeStatus{IPAM: ipamTypes.IPAMStatus{
 +			Used: ipamTypes.AllocationMap{},
 +		}}},
@@ -4441,7 +4350,7 @@ index 000000000..6050742c6
 +func TestDynamicInstanceLimitFallbackAndChanges(t *testing.T) {
 +	api := &limitResultAPI{API: mock.NewAPI(nil, nil, nil), limits: ipamTypes.Limits{IPv4: 8}}
 +	node := &Node{
-+		manager:    NewInstancesManager(api, "vpc-1", nil),
++		manager:    NewInstancesManager(api, "vpc-1"),
 +		instanceID: "instance-dynamic-limit",
 +		k8sObj: &v2.CiliumNode{
 +			Spec: v2.NodeSpec{HuaweiCloud: &eniTypes.Spec{InstanceType: "test-dynamic-limit"}},
@@ -4473,7 +4382,7 @@ index 000000000..6050742c6
 +
 +	unknownAPI := &limitResultAPI{API: mock.NewAPI(nil, nil, nil), err: errors.New("injected lookup failure")}
 +	unknownNode := &Node{
-+		manager:    NewInstancesManager(unknownAPI, "vpc-1", nil),
++		manager:    NewInstancesManager(unknownAPI, "vpc-1"),
 +		instanceID: "instance-no-limit",
 +		k8sObj: &v2.CiliumNode{Spec: v2.NodeSpec{HuaweiCloud: &eniTypes.Spec{
 +			InstanceType: "test-no-static-limit",
@@ -4514,7 +4423,7 @@ index 000000000..6050742c6
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-empty"})
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-valid", PrivateIPAddress: "172.31.1.2"})
 +	api.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 8})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("manager resync failed")
 +	}
@@ -4559,7 +4468,7 @@ index 000000000..6050742c6
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-a", PrivateIPAddress: "172.31.1.2"})
 +	api.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-b", PrivateIPAddress: "172.31.1.2"})
 +	api.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 8})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("manager resync failed")
 +	}
@@ -4582,7 +4491,7 @@ index 000000000..6050742c6
 +	api.AddSubENI("instance-new", &eniTypes.SubENI{ID: "eni-new", PrivateIPAddress: "172.31.2.2"})
 +	api.SetInstanceLimit("instance-old", ipamTypes.Limits{IPv4: 8})
 +	api.SetInstanceLimit("instance-new", ipamTypes.Limits{IPv4: 8})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("manager resync failed")
 +	}
@@ -4622,7 +4531,7 @@ index 000000000..6050742c6
 +		IPv6Address:      "2001:db8::2",
 +	})
 +	api.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 8})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("manager resync failed")
 +	}
@@ -4677,7 +4586,7 @@ index 000000000..6050742c6
 +			)
 +			base.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 8})
 +			api := &batchResultAPI{API: base, result: tc.result}
-+			manager := NewInstancesManager(api, "vpc-1", nil)
++			manager := NewInstancesManager(api, "vpc-1")
 +			if manager.Resync(context.Background()).IsZero() {
 +				t.Fatal("manager resync failed")
 +			}
@@ -4723,7 +4632,7 @@ index 000000000..6050742c6
 +			api := mock.NewAPI(nil, nil, nil)
 +			api.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 8})
 +			api.SetSubnetError("subnet-first", tc.err)
-+			manager := NewInstancesManager(api, "vpc-1", nil)
++			manager := NewInstancesManager(api, "vpc-1")
 +			node := &Node{
 +				node:       testNodeID("instance-1"),
 +				manager:    manager,
@@ -4757,7 +4666,7 @@ index 000000000..6050742c6
 +
 +func TestSubENIMutationsSerializeWithResync(t *testing.T) {
 +	api := mock.NewAPI(nil, nil, nil)
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	manager.instances.Update("instance-1", ipamTypes.InterfaceRevision{Resource: &eniTypes.SubENI{ID: "eni-old"}})
 +
 +	manager.resyncLock.Lock()
@@ -4810,7 +4719,7 @@ index 000000000..6050742c6
 +	base.SetInstanceLimit("instance-old", ipamTypes.Limits{IPv4: 8})
 +	base.SetInstanceLimit("instance-new", ipamTypes.Limits{IPv4: 2})
 +	api := &blockingBatchAPI{API: base, started: make(chan hwAPI.CreateSubENIRequest, 1), proceed: make(chan struct{})}
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	oldObj := &v2.CiliumNode{Spec: v2.NodeSpec{InstanceID: "instance-old", HuaweiCloud: &eniTypes.Spec{
 +		InstanceType:     "flavor-old",
 +		VPCID:            "vpc-1",
@@ -4863,7 +4772,7 @@ index 000000000..6050742c6
 +		ID: "subnet-1", VirtualNetworkID: "vpc-1", AvailabilityZone: "az-1", AvailableAddresses: 10,
 +	}}, nil, nil)
 +	api.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 1})
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	node := &Node{
 +		node:       testNodeID("instance-1"),
 +		manager:    manager,
@@ -4910,7 +4819,7 @@ index 000000000..6050742c6
 +	}, []*ipamTypes.VirtualNetwork{{ID: "vpc-1"}}, nil)
 +	base.SetInstanceLimit("instance-1", ipamTypes.Limits{IPv4: 2})
 +	api := &recordingBatchAPI{API: base}
-+	manager := NewInstancesManager(api, "vpc-1", nil)
++	manager := NewInstancesManager(api, "vpc-1")
 +	if manager.Resync(context.Background()).IsZero() {
 +		t.Fatal("initial manager resync failed")
 +	}
