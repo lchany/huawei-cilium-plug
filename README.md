@@ -22,6 +22,9 @@ Cilium 源码。使用时先检出固定的 upstream commit，再按 `series` �
 
 ## 更新记录
 
+- 2026-08-10：移除 Sub-ENI 创建请求中的非标准内联 `tags`，统一在创建成功后通过
+  HuaweiCloud 端口标签接口添加 `subENITags`；任一打标失败时整批删除本次新建
+  Sub-ENI，由 IPAM 后续重试。
 - 2026-08-07：清理 `0001-huaweicloud-control-plane.patch` 中的行尾空格、空白行
   Tab、混合缩进和 hunk 末尾多余空行；使用 `git apply --check
   --whitespace=error-all` 验证 patch 不再产生 whitespace 告警。
