@@ -308,7 +308,6 @@ ${EDITOR:-vi} huawei-values.yaml
 | `trunkInterface` | 第 7 节逐节点确认的 trunk 网卡 |
 | `subnetIDs` / `subnetTags` | 至少配置一种；两者并存时 `subnetIDs` 优先 |
 | `securityGroupIDs` | 只放通工作负载需要的流量 |
-| `subENITags` | 可选，最多 20 个；创建后通过官方端口标签接口添加，失败时本批 Sub-ENI 会回滚 |
 | `ipv4NativeRoutingCIDR` | VPC IPv4 CIDR，不是 Kubernetes PodCIDR |
 | `egressMasqueradeInterfaces` | 与 `trunkInterface` 一致 |
 
