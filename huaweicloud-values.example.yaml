@@ -30,7 +30,6 @@ huaweicloud:
   subnetTags: {}
   securityGroupIDs:
     - "<安全组 ID>"
-  subENITags: {}
   releaseExcessIPs: false
 
 tunnel: disabled
