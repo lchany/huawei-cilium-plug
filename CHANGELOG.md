@@ -1,13 +1,5 @@
 # HuaweiCloud Cilium Patch Changelog
 
-## Unreleased
-
-- 移除单个和批量 Sub-ENI 创建请求中的非标准内联 `tags` 字段。
-- Sub-ENI 创建并完成 gateway 信息初始化后，通过官方 `BatchCreatePortTags` 接口添加标签。
-- 任一 Sub-ENI 打标失败时，删除本批全部新建 Sub-ENI 并向 IPAM 返回错误。
-- 空 `subENITags` 不发送标签请求；单次最多支持 20 个标签。
-- 新增单建、批量创建、禁止内联 tags、创建后多标签和失败整批回滚测试。
-
 ## v1.1.2 - 2026-08-04
 
 - HuaweiCloud gateway 静态邻居设置 `NUD_PERMANENT + NTF_EXT_LEARNED`。
