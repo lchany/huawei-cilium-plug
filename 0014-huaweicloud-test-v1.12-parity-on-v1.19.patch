@@ -1,0 +1,386 @@
+From 9d571e7b4363b2a338fdc34f02dc7795330fe5fe Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 12:28:43 +0800
+Subject: [PATCH] huaweicloud: test v1.12 parity on v1.19
+
+---
+ pkg/datapath/linux/routing/info_test.go       | 10 ++
+ .../huaweicloud_subeni_test.go                | 24 +++++
+ .../api/control_plane_parity_test.go          | 99 +++++++++++++++++++
+ pkg/huaweicloud/eni/node_test.go              | 75 ++++++++++++++
+ pkg/huaweicloud/neighbor/registry_test.go     | 43 ++++++++
+ pkg/ipam/types/types_test.go                  | 13 +++
+ pkg/option/config_test.go                     | 21 ++++
+ 7 files changed, 285 insertions(+)
+ create mode 100644 pkg/huaweicloud/api/control_plane_parity_test.go
+ create mode 100644 pkg/huaweicloud/neighbor/registry_test.go
+
+diff --git a/pkg/datapath/linux/routing/info_test.go b/pkg/datapath/linux/routing/info_test.go
+index 9848fb54a5..50add606d4 100644
+--- a/pkg/datapath/linux/routing/info_test.go
++++ b/pkg/datapath/linux/routing/info_test.go
+@@ -150,3 +150,13 @@ func TestPrivilegedParse(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestNewRoutingInfoRejectsInvalidHuaweiCloudVLAN(t *testing.T) {
++	_, err := NewRoutingInfo(hivetest.Logger(t), "10.0.0.1", nil, "00:11:22:33:44:55", "0", ipamOption.IPAMHuaweiCloud, false)
++	require.ErrorContains(t, err, "invalid HuaweiCloud VLAN ID")
++}
++
++func TestHuaweiCloudRouteTableUsesVLANNamespace(t *testing.T) {
++	info := &RoutingInfo{IpamMode: ipamOption.IPAMHuaweiCloud, InterfaceNumber: 42}
++	require.Equal(t, 10042, info.routeTableID(7))
++}
+diff --git a/pkg/endpointmanager/huaweicloud_subeni_test.go b/pkg/endpointmanager/huaweicloud_subeni_test.go
+index 9569fc9624..636d476d5a 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni_test.go
++++ b/pkg/endpointmanager/huaweicloud_subeni_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"testing"
+ 
+ 	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -82,3 +83,26 @@ func TestEnsureGatewayNeighborRejectsIncompleteMetadata(t *testing.T) {
+ 	s := &huaweiCloudSubENISubscriber{}
+ 	require.Error(t, s.ensureGatewayNeighbor(&huaweiCloudEndpointInfo{}))
+ }
++
++func TestGatewayNeighborOwnershipFollowsBindings(t *testing.T) {
++	huaweiCloudNeighbor.Default.Clear()
++	t.Cleanup(huaweiCloudNeighbor.Default.Clear)
++	subscriber := &huaweiCloudSubENISubscriber{}
++	gatewayIP := net.ParseIP("10.0.0.1")
++	gatewayMAC, err := net.ParseMAC("fa:16:3e:00:00:fe")
++	require.NoError(t, err)
++	first := &huaweiCloudEndpointInfo{id: 1, gatewayIP: gatewayIP, gatewayMAC: gatewayMAC, trunkInterface: "eth0"}
++	second := &huaweiCloudEndpointInfo{id: 2, gatewayIP: gatewayIP, gatewayMAC: gatewayMAC, trunkInterface: "eth0"}
++	subscriber.bindings.Store(uint64(1), first)
++	subscriber.bindings.Store(uint64(2), second)
++	subscriber.refreshGatewayNeighborOwnership()
++	require.True(t, huaweiCloudNeighbor.Default.Ready())
++	require.Len(t, huaweiCloudNeighbor.Default.Snapshot(), 1)
++
++	subscriber.bindings.Delete(uint64(1))
++	subscriber.refreshGatewayNeighborOwnership()
++	require.True(t, huaweiCloudNeighbor.Default.Contains("eth0", gatewayIP, gatewayMAC))
++	subscriber.bindings.Delete(uint64(2))
++	subscriber.refreshGatewayNeighborOwnership()
++	require.False(t, huaweiCloudNeighbor.Default.Contains("eth0", gatewayIP, gatewayMAC))
++}
+diff --git a/pkg/huaweicloud/api/control_plane_parity_test.go b/pkg/huaweicloud/api/control_plane_parity_test.go
+new file mode 100644
+index 0000000000..94449049cb
+--- /dev/null
++++ b/pkg/huaweicloud/api/control_plane_parity_test.go
+@@ -0,0 +1,99 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"net/netip"
++	"strings"
++	"testing"
++
++	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth"
++	hwVPC "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3"
++	"github.com/stretchr/testify/require"
++
++	"github.com/cilium/cilium/pkg/api/helpers"
++	eniTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
++)
++
++func newParityTestClient(t *testing.T, endpoint string) *Client {
++	t.Helper()
++	credentials, err := auth.NewBasicCredentialsBuilder().
++		WithAk("test-ak").
++		WithSk("test-sk").
++		WithProjectId("project-1").
++		SafeBuild()
++	require.NoError(t, err)
++	hcClient, err := hwVPC.VpcClientBuilder().WithEndpoint(endpoint).WithCredential(credentials).SafeBuild()
++	require.NoError(t, err)
++	return &Client{
++		vpcClient: hwVPC.NewVpcClient(hcClient),
++		limiter:   helpers.NewAPILimiter(noOpRateLimitMetrics{}, 20, 40),
++	}
++}
++
++func TestFillSubENIsGatewayInfoBatchesListPorts(t *testing.T) {
++	portRequests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		require.Contains(t, r.URL.Path, "ports")
++		portRequests++
++		require.Equal(t, []string{"network:router_interface_distributed"}, r.URL.Query()["device_owner"])
++		require.Equal(t, []string{"subnet-1"}, r.URL.Query()["virsubnet_id"])
++		require.Equal(t, []string{"ip_address=10.0.0.1"}, r.URL.Query()["private_ips"])
++		_, _ = fmt.Fprint(w, `{"ports":[{"virsubnet_id":"subnet-1","mac_address":"fa:16:3e:00:00:fe","private_ips":[{"ip_address":"10.0.0.1"}]}]}`)
++	}))
++	defer server.Close()
++
++	client := newParityTestClient(t, server.URL)
++	subENIs := []*eniTypes.SubENI{
++		{ID: "eni-1", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.2"},
++		{ID: "eni-2", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.3"},
++		{ID: "eni-3", SubnetID: "subnet-1", PrivateIPAddress: "10.0.0.4"},
++	}
++	prefix := ipamTypes.SubnetMap{"subnet-1": {ID: "subnet-1", GatewayIP: "10.0.0.1"}}
++	parsed, err := netip.ParsePrefix("10.0.0.0/24")
++	require.NoError(t, err)
++	prefix["subnet-1"].CIDR = parsed
++	require.NoError(t, client.fillSubENIsGatewayInfo(context.Background(), subENIs, prefix))
++	require.Equal(t, 1, portRequests)
++	for _, subENI := range subENIs {
++		require.Equal(t, "10.0.0.1", subENI.GatewayIP)
++		require.Equal(t, "10.0.0.0/24", subENI.SubnetCIDR)
++		require.Equal(t, "fa:16:3e:00:00:fe", subENI.GatewayMAC)
++	}
++}
++
++func TestGetSubnetsPopulatesAvailableAddresses(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch {
++		case strings.HasSuffix(r.URL.Path, "/subnets"):
++			_, _ = fmt.Fprint(w, `{"subnets":[{"id":"subnet-empty","available_ip_address_count":0},{"id":"subnet-ready","available_ip_address_count":37}]}`)
++		case strings.Contains(r.URL.Path, "virsubnets"):
++			_, _ = fmt.Fprint(w, `{"virsubnets":[{"id":"subnet-empty","name":"empty","vpc_id":"vpc-1","zone_id":"az-1","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.2.0/24","gateway_ip":"10.0.2.1"}]},{"id":"subnet-ready","name":"ready","vpc_id":"vpc-1","zone_id":"az-1","subnet_cidrs":[{"ip_version":"4","cidr":"10.0.0.0/24","gateway_ip":"10.0.0.1"}]}]}`)
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer server.Close()
++
++	client := newParityTestClient(t, server.URL)
++	subnets, err := client.GetSubnets(context.Background(), "vpc-1")
++	require.NoError(t, err)
++	require.Equal(t, 0, subnets["subnet-empty"].AvailableAddresses)
++	require.Equal(t, 37, subnets["subnet-ready"].AvailableAddresses)
++}
++
++func TestListSubnetsV2ResponseDecodesCapacity(t *testing.T) {
++	var response listSubnetsV2Response
++	require.NoError(t, json.Unmarshal([]byte(`{"subnets":[{"id":"subnet-ready","available_ip_address_count":37}]}`), &response))
++	require.NotNil(t, response.Subnets)
++	require.Equal(t, int32(37), (*response.Subnets)[0].AvailableIPAddressCount)
++}
+diff --git a/pkg/huaweicloud/eni/node_test.go b/pkg/huaweicloud/eni/node_test.go
+index dd02cdee34..021444171b 100644
+--- a/pkg/huaweicloud/eni/node_test.go
++++ b/pkg/huaweicloud/eni/node_test.go
+@@ -5,6 +5,8 @@ package eni
+ 
+ import (
+ 	"context"
++	"errors"
++	"fmt"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/assert"
+@@ -26,6 +28,21 @@ type mockNodeActions struct {
+ 	id string
+ }
+ 
++type releaseControlAPI struct {
++	*mock.API
++	deleteCount int
++	notFoundAt  int
++}
++
++func (a *releaseControlAPI) DeleteSubNetworkInterface(ctx context.Context, subENIID string) error {
++	a.deleteCount++
++	if a.notFoundAt == a.deleteCount {
++		_ = a.API.DeleteSubNetworkInterface(ctx, subENIID)
++		return fmt.Errorf("%w: injected already absent SubENI", hwAPI.ErrNotFound)
++	}
++	return a.API.DeleteSubNetworkInterface(ctx, subENIID)
++}
++
+ func (m *mockNodeActions) InstanceID() string { return m.id }
+ 
+ func newTestNode(t *testing.T) (*Node, *mock.API) {
+@@ -208,6 +225,64 @@ func TestNodeReleaseIPs(t *testing.T) {
+ 	assert.False(t, exists)
+ }
+ 
++func TestPrepareIPReleaseKeepsCandidatesStable(t *testing.T) {
++	node, _ := newTestNode(t)
++	node.subENIs = map[string]eniTypes.SubENI{
++		"eni-c": {ID: "eni-c", PrivateIPAddress: "172.31.1.30"},
++		"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.10"},
++		"eni-b": {ID: "eni-b", PrivateIPAddress: "172.31.1.20"},
++	}
++
++	for range 25 {
++		action := node.PrepareIPRelease(2, hivetest.Logger(t))
++		require.Equal(t, []string{"172.31.1.10", "172.31.1.20"}, action.IPsToRelease)
++	}
++}
++
++func TestPrepareIPReleaseRequiresKnownUsedState(t *testing.T) {
++	node, _ := newTestNode(t)
++	node.k8sObj.Status.IPAM.Used = nil
++	node.subENIs = map[string]eniTypes.SubENI{
++		"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.10"},
++	}
++
++	require.Empty(t, node.PrepareIPRelease(1, hivetest.Logger(t)).IPsToRelease)
++}
++
++func TestReleaseIPsTreatsNotFoundAsConverged(t *testing.T) {
++	base := mock.NewAPI(nil, nil, nil)
++	base.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-a", PrivateIPAddress: "172.31.1.1"})
++	base.AddSubENI("instance-1", &eniTypes.SubENI{ID: "eni-b", PrivateIPAddress: "172.31.1.2"})
++	api := &releaseControlAPI{API: base, notFoundAt: 1}
++	mgr := NewInstancesManager(hivetest.Logger(t), api, "vpc-1")
++	mgr.Resync(context.Background())
++	node := &Node{
++		node:       &mockNodeActions{id: "instance-1"},
++		manager:    mgr,
++		instanceID: "instance-1",
++		k8sObj: &v2.CiliumNode{Status: v2.NodeStatus{IPAM: ipamTypes.IPAMStatus{
++			Used: ipamTypes.AllocationMap{},
++		}}},
++		subENIs: map[string]eniTypes.SubENI{
++			"eni-a": {ID: "eni-a", PrivateIPAddress: "172.31.1.1"},
++			"eni-b": {ID: "eni-b", PrivateIPAddress: "172.31.1.2"},
++		},
++	}
++
++	err := node.ReleaseIPs(context.Background(), &ipam.ReleaseAction{IPsToRelease: []string{"172.31.1.1", "172.31.1.2"}})
++	require.NoError(t, err)
++	require.Equal(t, 2, api.deleteCount)
++	require.Empty(t, node.subENIs)
++}
++
++func TestReleaseIPsHonorsCancellation(t *testing.T) {
++	node, _ := newTestNode(t)
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	err := node.ReleaseIPs(ctx, &ipam.ReleaseAction{IPsToRelease: []string{"172.31.1.1"}})
++	require.True(t, errors.Is(err, context.Canceled))
++}
++
+ func TestNodeResyncInterfacesAndIPs(t *testing.T) {
+ 	node, mockAPI := newTestNode(t)
+ 
+diff --git a/pkg/huaweicloud/neighbor/registry_test.go b/pkg/huaweicloud/neighbor/registry_test.go
+new file mode 100644
+index 0000000000..5eb9464490
+--- /dev/null
++++ b/pkg/huaweicloud/neighbor/registry_test.go
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package neighbor
++
++import (
++	"net"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestRegistryMatchesExactGatewayNeighbor(t *testing.T) {
++	registry := NewRegistry()
++	ip := net.ParseIP("10.0.0.1")
++	mac, err := net.ParseMAC("fa:16:3e:00:00:fe")
++	require.NoError(t, err)
++	key, ok := NewKey("eth0", ip, mac)
++	require.True(t, ok)
++	registry.Replace([]Key{key, key})
++	require.True(t, registry.Ready())
++	require.True(t, registry.Contains("eth0", ip, mac))
++	require.False(t, registry.Contains("eth1", ip, mac))
++	otherMAC, err := net.ParseMAC("fa:16:3e:00:00:ff")
++	require.NoError(t, err)
++	require.False(t, registry.Contains("eth0", ip, otherMAC))
++	require.Len(t, registry.Snapshot(), 1)
++}
++
++func TestRegistryTracksStaleNeighbors(t *testing.T) {
++	registry := NewRegistry()
++	firstMAC, _ := net.ParseMAC("fa:16:3e:00:00:01")
++	secondMAC, _ := net.ParseMAC("fa:16:3e:00:00:02")
++	first, _ := NewKey("eth0", net.ParseIP("10.0.0.1"), firstMAC)
++	second, _ := NewKey("eth0", net.ParseIP("10.0.1.1"), secondMAC)
++	registry.Replace([]Key{first})
++	registry.Replace([]Key{second})
++	require.Equal(t, []Key{first}, registry.StaleSnapshot())
++	registry.ForgetStale([]Key{first})
++	require.Empty(t, registry.StaleSnapshot())
++	registry.Clear()
++	require.False(t, registry.Ready())
++}
+diff --git a/pkg/ipam/types/types_test.go b/pkg/ipam/types/types_test.go
+index feb798e1ba..751bc78afa 100644
+--- a/pkg/ipam/types/types_test.go
++++ b/pkg/ipam/types/types_test.go
+@@ -124,6 +124,19 @@ func TestGetInterface(t *testing.T) {
+ 	require.Equal(t, rev, intf)
+ }
+ 
++func TestDeleteInterface(t *testing.T) {
++	instances := NewInstanceMap()
++	instances.Update("i-1", InterfaceRevision{Resource: &mockInterface{id: "intf0"}})
++	instances.Update("i-1", InterfaceRevision{Resource: &mockInterface{id: "intf1"}})
++
++	instances.DeleteInterface("i-1", "intf0")
++	_, found := instances.GetInterface("i-1", "intf0")
++	require.False(t, found)
++	_, found = instances.GetInterface("i-1", "intf1")
++	require.True(t, found)
++	instances.DeleteInterface("missing", "intf0")
++}
++
+ func TestInstanceMapNumInstances(t *testing.T) {
+ 	m := NewInstanceMap()
+ 	m.Update("i-1", InterfaceRevision{
+diff --git a/pkg/option/config_test.go b/pkg/option/config_test.go
+index 93958c1b2a..bee3d2a3bf 100644
+--- a/pkg/option/config_test.go
++++ b/pkg/option/config_test.go
+@@ -34,6 +34,27 @@ func TestAreDevicesRequiredHuaweiCloud(t *testing.T) {
+ 	require.True(t, cfg.AreDevicesRequired(kpr.KPRConfig{}, false, false))
+ }
+ 
++func TestValidateRejectsHuaweiCloudIPv6(t *testing.T) {
++	cfg := &DaemonConfig{
++		IPAM:                          ipamOption.IPAMHuaweiCloud,
++		EnableIPv6:                    true,
++		IPv6ClusterAllocCIDR:          "fdfd::/64",
++		IPv6NAT46x64CIDR:              "fd00::/96",
++		RoutingMode:                   RoutingModeNative,
++		PolicyCIDRMatchMode:           []string{},
++		ClusterName:                   defaults.ClusterName,
++		ClusterID:                     0,
++		MaxConnectedClusters:          defaults.MaxConnectedClusters,
++		EnableIPv4:                    true,
++		EnableIPv4Masquerade:          false,
++		EnableIPv6Masquerade:          false,
++		ContainerIPLocalReservedPorts: defaults.ContainerIPLocalReservedPortsAuto,
++	}
++
++	err := cfg.Validate(viper.New())
++	require.ErrorContains(t, err, "IPv6 cannot be enabled in HuaweiCloud IPAM mode")
++}
++
+ func TestValidateIPv6ClusterAllocCIDR(t *testing.T) {
+ 	valid1 := &DaemonConfig{
+ 		IPv6ClusterAllocCIDR: "fdfd::/64",
+-- 
+2.33.0

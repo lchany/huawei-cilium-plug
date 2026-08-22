@@ -12,6 +12,27 @@
 - 测试日期：2026-07-13
 - 状态含义：通过、未通过、部分通过、跳过
 
+### 1.1 2026-08-22 补丁迁移验证
+
+`0012`–`0014` 在 upstream `v1.19.1@d0d0c8792c3420b3a6739fa21e3a182827a0bbc6`
+应用既有 `0001`–`0011` 补丁后开发，并完成以下定向单元测试：
+
+```bash
+go test -mod=vendor \
+  ./pkg/ipam/types \
+  ./pkg/huaweicloud/api \
+  ./pkg/huaweicloud/eni \
+  ./pkg/huaweicloud/neighbor \
+  ./pkg/endpointmanager \
+  ./pkg/datapath/neighbor \
+  ./pkg/datapath/linux/routing \
+  ./pkg/option
+```
+
+结果：完整 `0001`–`0014` series 已从上述干净基线成功重放，重放后的源码树与开发树一致；
+全部定向测试通过。该结果只证明补丁迁移的重放、编译和单元测试范围，不替代本文后续真实
+集群结果。
+
 ## 2. P0 功能测试
 
 | 用例 | 状态 | 实际结果 |

@@ -6,6 +6,10 @@
 
 ## 1. 测试准入与结论规则
 
+提交 patch series 前，必须先在声明的 upstream commit 上从零执行 `apply.sh`，并至少运行
+`TEST-RESULTS.md` 记录的 HuaweiCloud、邻居、路由和 IPAM 定向单元测试。补丁重放或任一
+定向测试失败时不得进入真实环境验收。
+
 优先级定义：
 
 | 优先级 | 含义 | 发布要求 |

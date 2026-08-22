@@ -9,3 +9,6 @@
 0009-huaweicloud-strip-duplicate-VLAN-representations.patch
 0010-huaweicloud-process-VLAN-on-attached-interface.patch
 0011-ipam-replace-used-address-status-on-refresh.patch
+0012-huaweicloud-port-control-plane-reliability-fixes.patch
+0013-huaweicloud-protect-gateway-neighbors-and-routes.patch
+0014-huaweicloud-test-v1.12-parity-on-v1.19.patch

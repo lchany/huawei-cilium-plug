@@ -41,6 +41,9 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 ├── 0009-huaweicloud-strip-duplicate-VLAN-representations.patch
 ├── 0010-huaweicloud-process-VLAN-on-attached-interface.patch
 ├── 0011-ipam-replace-used-address-status-on-refresh.patch
+├── 0012-huaweicloud-port-control-plane-reliability-fixes.patch
+├── 0013-huaweicloud-protect-gateway-neighbors-and-routes.patch
+├── 0014-huaweicloud-test-v1.12-parity-on-v1.19.patch
 ├── series
 ├── apply.sh
 ├── INSTALL-DEPLOY.md
@@ -56,6 +59,10 @@ patch series。需要构建 HuaweiCloud 版本 Cilium 时，将这些 patch 按�
 - `TROUBLESHOOTING.md`：真实构建和部署中遇到的问题、修复方法及验证状态。
 - `TEST-RESULTS.md`：真实环境已执行、部分执行和未执行用例的验收记录。
 - `TEST-PLAN.md`：覆盖功能、可靠性、升级回滚、性能和长稳的真实环境测试用例。
+
+追加的 `0012`–`0014` 从 `patch-archive/huaweicloud-v1.12.19` 迁移最终行为，补齐真实
+子网容量、批量网关查询、SubENI 释放收敛、IPv4 限制、网关邻居所有权和 VLAN 路由表
+冲突保护。迁移不包含离线构建提交，也不会恢复已取消的 SubENI tag/detach 行为。
 
 ## Patch 管理流程
 

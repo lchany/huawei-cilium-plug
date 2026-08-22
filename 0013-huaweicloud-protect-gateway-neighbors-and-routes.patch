@@ -1,0 +1,807 @@
+From 57813da295d85f803a9650053c2329eccd6767ff Mon Sep 17 00:00:00 2001
+From: lchany <lchany@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 12:28:43 +0800
+Subject: [PATCH] huaweicloud: protect gateway neighbors and routes
+
+---
+ .../linux/linux_defaults/linux_defaults.go    |   4 +
+ pkg/datapath/linux/routing/huaweicloud.go     | 235 ++++++++++++++++++
+ pkg/datapath/linux/routing/info.go            |   4 +
+ pkg/datapath/linux/routing/routing.go         | 109 ++++++--
+ pkg/datapath/neighbor/neighbor_reconciler.go  |  12 +
+ pkg/endpointmanager/huaweicloud_subeni.go     | 108 +++++++-
+ pkg/huaweicloud/neighbor/registry.go          | 114 +++++++++
+ 7 files changed, 561 insertions(+), 25 deletions(-)
+ create mode 100644 pkg/datapath/linux/routing/huaweicloud.go
+ create mode 100644 pkg/huaweicloud/neighbor/registry.go
+
+diff --git a/pkg/datapath/linux/linux_defaults/linux_defaults.go b/pkg/datapath/linux/linux_defaults/linux_defaults.go
+index bdc5086adf..03ffe6352f 100644
+--- a/pkg/datapath/linux/linux_defaults/linux_defaults.go
++++ b/pkg/datapath/linux/linux_defaults/linux_defaults.go
+@@ -27,6 +27,10 @@ const (
+ 	// table which is between 253-255. See ip-route(8).
+ 	RouteTableInterfacesOffset = 10
+ 
++	// RouteTableHuaweiCloudInterfacesOffset keeps VLAN-derived HuaweiCloud
++	// route tables separate from interface-index-derived ENI tables.
++	RouteTableHuaweiCloudInterfacesOffset = 10000
++
+ 	// MarkSkipTProxy is the default mark to use to indicate that a packet
+ 	// should skip tproxy-processing. This is needed for eg. traffic by transparent
+ 	// proxy connections which later passes through the cilium_host / cilium_net pair.
+diff --git a/pkg/datapath/linux/routing/huaweicloud.go b/pkg/datapath/linux/routing/huaweicloud.go
+new file mode 100644
+index 0000000000..11b785f657
+--- /dev/null
++++ b/pkg/datapath/linux/routing/huaweicloud.go
+@@ -0,0 +1,235 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++package linuxrouting
++
++import (
++	"errors"
++	"fmt"
++	"net"
++	"strings"
++	"sync"
++
++	"github.com/vishvananda/netlink"
++	"golang.org/x/sys/unix"
++
++	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
++	"github.com/cilium/cilium/pkg/datapath/linux/route"
++	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++)
++
++var routingHuaweiCloudConfigureMu sync.Mutex
++
++func (info *RoutingInfo) routeTableID(ifindex int) int {
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		return linux_defaults.RouteTableHuaweiCloudInterfacesOffset + info.InterfaceNumber
++	}
++	ifaceNum := info.InterfaceNumber
++	if info.useCompatEgressPriority() {
++		ifaceNum = ifindex
++	}
++	return computeTableIDFromIfaceNumber(info.useCompatEgressPriority(), ifaceNum)
++}
++
++type routeChange struct {
++	installed netlink.Route
++	previous  *netlink.Route
++}
++
++type configureTransaction struct {
++	rules         []route.Rule
++	routes        []routeChange
++	deletedRoutes []netlink.Route
++}
++
++func (tx *configureTransaction) replaceRule(spec route.Rule) error {
++	existing, err := route.ListRules(netlink.FAMILY_V4, &spec)
++	if err != nil {
++		return err
++	}
++	if err := route.ReplaceRule(spec); err != nil {
++		return err
++	}
++	if len(existing) == 0 {
++		tx.rules = append(tx.rules, spec)
++	}
++	return nil
++}
++
++func sameRouteDestination(first, second *net.IPNet) bool {
++	isDefault := func(destination *net.IPNet) bool {
++		if destination == nil {
++			return true
++		}
++		ones, bits := destination.Mask.Size()
++		return bits == 32 && ones == 0 && destination.IP.To4() != nil
++	}
++	if isDefault(first) || isDefault(second) {
++		return isDefault(first) && isDefault(second)
++	}
++	return first.String() == second.String()
++}
++
++func sameIP(first, second net.IP) bool {
++	if first == nil || second == nil {
++		return first == nil && second == nil
++	}
++	return first.Equal(second)
++}
++
++func (tx *configureTransaction) replaceRoute(spec netlink.Route) error {
++	existing, err := safenetlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: spec.Table}, netlink.RT_FILTER_TABLE)
++	if err != nil {
++		return err
++	}
++	var previous *netlink.Route
++	for index := range existing {
++		if !sameRouteDestination(existing[index].Dst, spec.Dst) {
++			continue
++		}
++		if existing[index].Table == spec.Table &&
++			(spec.LinkIndex == 0 || existing[index].LinkIndex == spec.LinkIndex) &&
++			existing[index].Scope == spec.Scope && sameIP(existing[index].Gw, spec.Gw) {
++			return nil
++		}
++		copy := existing[index]
++		previous = &copy
++		break
++	}
++	if err := netlink.RouteReplace(&spec); err != nil {
++		return err
++	}
++	tx.routes = append(tx.routes, routeChange{installed: spec, previous: previous})
++	return nil
++}
++
++func (tx *configureTransaction) deleteRoute(spec netlink.Route) error {
++	if err := netlink.RouteDel(&spec); err != nil {
++		return err
++	}
++	tx.deletedRoutes = append(tx.deletedRoutes, spec)
++	return nil
++}
++
++func (tx *configureTransaction) rollback() error {
++	var rollbackErrors []string
++	for index := len(tx.deletedRoutes) - 1; index >= 0; index-- {
++		if err := netlink.RouteReplace(&tx.deletedRoutes[index]); err != nil {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	for index := len(tx.routes) - 1; index >= 0; index-- {
++		change := tx.routes[index]
++		var err error
++		if change.previous != nil {
++			err = netlink.RouteReplace(change.previous)
++		} else {
++			err = netlink.RouteDel(&change.installed)
++			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
++				err = nil
++			}
++		}
++		if err != nil {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	for index := len(tx.rules) - 1; index >= 0; index-- {
++		if err := route.DeleteRule(netlink.FAMILY_V4, tx.rules[index]); err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
++			rollbackErrors = append(rollbackErrors, err.Error())
++		}
++	}
++	if len(rollbackErrors) > 0 {
++		return errors.New(strings.Join(rollbackErrors, "; "))
++	}
++	return nil
++}
++
++func inspectHuaweiCloudRouteTableOwnership(tableID, ifindex int, gateway net.IP) ([]netlink.Route, error) {
++	routes, err := safenetlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: tableID}, netlink.RT_FILTER_TABLE)
++	if err != nil {
++		return nil, fmt.Errorf("unable to inspect HuaweiCloud route table %d: %w", tableID, err)
++	}
++	var conflicting []netlink.Route
++	for _, existing := range routes {
++		isDefault := existing.Dst == nil || existing.Dst.String() == "0.0.0.0/0"
++		if isDefault && existing.Gw != nil && existing.Gw.Equal(gateway) {
++			continue
++		}
++		isGatewayHostRoute := false
++		if existing.Dst != nil {
++			ones, bits := existing.Dst.Mask.Size()
++			isGatewayHostRoute = bits == 32 && ones == 32 && existing.Dst.IP.Equal(gateway) && existing.LinkIndex == ifindex
++		}
++		if !isGatewayHostRoute {
++			conflicting = append(conflicting, existing)
++		}
++	}
++	if len(conflicting) == 0 {
++		return nil, nil
++	}
++	rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{Table: tableID})
++	if err != nil {
++		return nil, fmt.Errorf("unable to inspect rules for HuaweiCloud route table %d: %w", tableID, err)
++	}
++	if len(rules) != 0 || len(routes) != 2 {
++		return nil, fmt.Errorf("HuaweiCloud route table %d is already owned by conflicting route %s", tableID, conflicting[0].String())
++	}
++	var oldDefault, oldNexthop *netlink.Route
++	for index := range routes {
++		existing := &routes[index]
++		if existing.Dst == nil || existing.Dst.String() == "0.0.0.0/0" {
++			if existing.Gw == nil || oldDefault != nil {
++				return nil, fmt.Errorf("HuaweiCloud route table %d has an invalid retained default route", tableID)
++			}
++			oldDefault = existing
++			continue
++		}
++		ones, bits := existing.Dst.Mask.Size()
++		if bits != 32 || ones != 32 || existing.Scope != netlink.SCOPE_LINK || existing.LinkIndex != ifindex || oldNexthop != nil {
++			return nil, fmt.Errorf("HuaweiCloud route table %d is already owned by conflicting route %s", tableID, existing.String())
++		}
++		oldNexthop = existing
++	}
++	if oldDefault == nil || oldNexthop == nil || !oldNexthop.Dst.IP.Equal(oldDefault.Gw) {
++		return nil, fmt.Errorf("HuaweiCloud route table %d does not contain a complete retained route pair", tableID)
++	}
++	return []netlink.Route{*oldNexthop}, nil
++}
++
++func cleanupStaleHuaweiCloudEgressRules(ip *net.IPNet, priority, tableID int) error {
++	var deleted []route.Rule
++	restoreDeleted := func(cause error) error {
++		var restoreErrors []string
++		for index := len(deleted) - 1; index >= 0; index-- {
++			if err := route.ReplaceRule(deleted[index]); err != nil {
++				restoreErrors = append(restoreErrors, err.Error())
++			}
++		}
++		if len(restoreErrors) > 0 {
++			return fmt.Errorf("%w; restoring stale rules failed: %s", cause, strings.Join(restoreErrors, "; "))
++		}
++		return cause
++	}
++	for _, candidatePriority := range []int{linux_defaults.RulePriorityEgress, linux_defaults.RulePriorityEgressv2} {
++		rules, err := route.ListRules(netlink.FAMILY_V4, &route.Rule{Priority: candidatePriority, From: ip})
++		if err != nil {
++			return restoreDeleted(err)
++		}
++		for _, existing := range rules {
++			if existing.Priority == priority && existing.Table == tableID {
++				continue
++			}
++			var mask uint32
++			if existing.Mask != nil {
++				mask = *existing.Mask
++			}
++			spec := route.Rule{Priority: existing.Priority, Mark: existing.Mark, Mask: mask, From: existing.Src, To: existing.Dst, Table: existing.Table}
++			deleted = append(deleted, spec)
++			if err := route.DeleteRule(netlink.FAMILY_V4, spec); err != nil {
++				return restoreDeleted(err)
++			}
++		}
++	}
++	return nil
++}
+diff --git a/pkg/datapath/linux/routing/info.go b/pkg/datapath/linux/routing/info.go
+index ca8d222c7a..fd2df669b1 100644
+--- a/pkg/datapath/linux/routing/info.go
++++ b/pkg/datapath/linux/routing/info.go
+@@ -10,6 +10,7 @@ import (
+ 	"net"
+ 	"strconv"
+ 
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	"github.com/cilium/cilium/pkg/logging/logfields"
+ 	"github.com/cilium/cilium/pkg/mac"
+ )
+@@ -86,6 +87,9 @@ func parse(logger *slog.Logger, gateway string, cidrs []string, macAddr, ifaceNu
+ 	if err != nil {
+ 		return nil, fmt.Errorf("invalid interface number: %s", ifaceNum)
+ 	}
++	if ipamMode == ipamOption.IPAMHuaweiCloud && (parsedIfaceNum < 1 || parsedIfaceNum > 4094) {
++		return nil, fmt.Errorf("invalid HuaweiCloud VLAN ID: %d", parsedIfaceNum)
++	}
+ 
+ 	return &RoutingInfo{
+ 		logger:          logger.With(logfields.LogSubsys, "linux-routing"),
+diff --git a/pkg/datapath/linux/routing/routing.go b/pkg/datapath/linux/routing/routing.go
+index 4ec3796009..5a4b637e0d 100644
+--- a/pkg/datapath/linux/routing/routing.go
++++ b/pkg/datapath/linux/routing/routing.go
+@@ -43,7 +43,7 @@ func (info *RoutingInfo) useCompatEgressPriority() bool {
+ // info: The interface routing info used to create rules and routes.
+ // mtu: The interface MTU.
+ // host: Whether the IP is a host IP and needs to be routed via the 'local' table
+-func (info *RoutingInfo) Configure(ip net.IP, mtu int, host bool) error {
++func (info *RoutingInfo) Configure(ip net.IP, mtu int, host bool) (retErr error) {
+ 	if ip == nil || (ip.To4() == nil && ip.To16() == nil) {
+ 		info.logger.Warn(
+ 			"Unable to configure rules and routes because IP is not a valid IP address",
+@@ -74,6 +74,51 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, host bool) error {
+ 		}
+ 	}
+ 
++	var egressPriority int
++	if info.useCompatEgressPriority() {
++		egressPriority = linux_defaults.RulePriorityEgress
++	} else {
++		egressPriority = linux_defaults.RulePriorityEgressv2
++	}
++	tableID := info.routeTableID(ifindex)
++
++	var transaction *configureTransaction
++	var staleRoutes []netlink.Route
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		if ip.To4() == nil {
++			return errors.New("HuaweiCloud IPAM supports IPv4 only")
++		}
++		routingHuaweiCloudConfigureMu.Lock()
++		defer routingHuaweiCloudConfigureMu.Unlock()
++		staleRoutes, err = inspectHuaweiCloudRouteTableOwnership(tableID, ifindex, info.Gateway)
++		if err != nil {
++			return err
++		}
++		transaction = &configureTransaction{}
++		replaceRule = transaction.replaceRule
++		defer func() {
++			if retErr == nil {
++				return
++			}
++			if rollbackErr := transaction.rollback(); rollbackErr != nil {
++				retErr = fmt.Errorf("%w; rollback failed: %v", retErr, rollbackErr)
++			}
++		}()
++	}
++	if host && info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		for index := range info.CIDRs {
++			if err := replaceRule(route.Rule{
++				Priority: linux_defaults.RulePriorityIngress,
++				From:     &ipWithMask,
++				To:       &info.CIDRs[index],
++				Table:    route.MainTable,
++				Protocol: linux_defaults.RTProto,
++			}); err != nil {
++				return fmt.Errorf("unable to install HuaweiCloud host VPC rule: %w", err)
++			}
++		}
++	}
++
+ 	// Ingress rule. This rule is not installed for the cilium_host IP, because
+ 	// the cilium_host IP is a local IP and therefore must be routed via the
+ 	// 'local' table instead of 'main'.
+@@ -90,16 +135,6 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, host bool) error {
+ 		}
+ 	}
+ 
+-	var egressPriority, ifaceNum, tableID int
+-	if info.useCompatEgressPriority() {
+-		egressPriority = linux_defaults.RulePriorityEgress
+-		ifaceNum = ifindex
+-	} else {
+-		egressPriority = linux_defaults.RulePriorityEgressv2
+-		ifaceNum = info.InterfaceNumber
+-	}
+-	tableID = computeTableIDFromIfaceNumber(info.useCompatEgressPriority(), ifaceNum)
+-
+ 	// The condition here should mirror the condition in Delete.
+ 	if info.Masquerade && (info.IpamMode == ipamOption.IPAMENI || info.IpamMode == ipamOption.IPAMAzure) {
+ 		// Lookup a VPC specific table for all traffic from an endpoint to the
+@@ -129,7 +164,25 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, host bool) error {
+ 		}
+ 	}
+ 
+-	return info.installRoutes(ifindex, tableID)
++	if transaction == nil {
++		return info.installRoutes(ifindex, tableID)
++	}
++	routes := info.gatewayRoutes(ifindex, tableID)
++	if err := transaction.replaceRoute(*routes[0]); err != nil {
++		return fmt.Errorf("unable to add L2 nexthop route: %w", err)
++	}
++	for _, staleRoute := range staleRoutes {
++		if err := transaction.deleteRoute(staleRoute); err != nil {
++			return fmt.Errorf("unable to remove stale HuaweiCloud nexthop route: %w", err)
++		}
++	}
++	if err := transaction.replaceRoute(*routes[1]); err != nil {
++		return fmt.Errorf("unable to add default route: %w", err)
++	}
++	if err := cleanupStaleHuaweiCloudEgressRules(&ipWithMask, egressPriority, tableID); err != nil {
++		return fmt.Errorf("unable to clean stale HuaweiCloud egress rules: %w", err)
++	}
++	return nil
+ }
+ 
+ func (info *RoutingInfo) ReconcileGatewayRoutes(mtu int, rx statedb.ReadTxn, routes statedb.Table[*tables.Route]) (*statedb.WatchSet, error) {
+@@ -140,26 +193,42 @@ func (info *RoutingInfo) ReconcileGatewayRoutes(mtu int, rx statedb.ReadTxn, rou
+ 		return set, fmt.Errorf("unable to find ifindex for interface MAC: %w", err)
+ 	}
+ 
+-	var ifaceNum, tableID int
+-	if info.useCompatEgressPriority() {
+-		ifaceNum = ifindex
+-	} else {
+-		ifaceNum = info.InterfaceNumber
++	tableID := info.routeTableID(ifindex)
++	if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++		routingHuaweiCloudConfigureMu.Lock()
++		defer routingHuaweiCloudConfigureMu.Unlock()
++		staleRoutes, err := inspectHuaweiCloudRouteTableOwnership(tableID, ifindex, info.Gateway)
++		if err != nil {
++			return set, err
++		}
++		if len(staleRoutes) > 0 {
++			return set, fmt.Errorf("HuaweiCloud route table %d requires endpoint reconfiguration before reconciliation", tableID)
++		}
+ 	}
+-	tableID = computeTableIDFromIfaceNumber(info.useCompatEgressPriority(), ifaceNum)
+ 
+ 	// Get the desired routes.
+ 	gwRoutes := info.gatewayRoutes(ifindex, tableID)
+ 	for _, r := range gwRoutes {
+ 		// See if they already exist.
+ 		cidr, _ := r.Dst.Mask.Size()
+-		_, _, watch, found := routes.GetWatch(rx, tables.RouteIDIndex.Query(tables.RouteID{
++		desiredPrefix := netip.PrefixFrom(netipx.MustFromStdIP(r.Dst.IP), cidr)
++		existing, _, watch, found := routes.GetWatch(rx, tables.RouteIDIndex.Query(tables.RouteID{
+ 			Table:     tables.RouteTable(r.Table),
+ 			LinkIndex: r.LinkIndex,
+-			Dst:       netip.PrefixFrom(netipx.MustFromStdIP(r.Dst.IP), cidr),
++			Dst:       desiredPrefix,
+ 		}))
+ 
+ 		if found {
++			if info.IpamMode == ipamOption.IPAMHuaweiCloud {
++				var actualGateway net.IP
++				if existing.Gw.IsValid() {
++					actualGateway = existing.Gw.AsSlice()
++				}
++				if existing.Dst != desiredPrefix || !sameIP(actualGateway, r.Gw) ||
++					existing.LinkIndex != r.LinkIndex || int(existing.Scope) != int(r.Scope) {
++					return set, fmt.Errorf("HuaweiCloud route table %d contains a conflicting route for %s", tableID, r.Dst)
++				}
++			}
+ 			// If a route already exist, just add it to the watch
+ 			set.Add(watch)
+ 		} else {
+diff --git a/pkg/datapath/neighbor/neighbor_reconciler.go b/pkg/datapath/neighbor/neighbor_reconciler.go
+index a0ad4b11f3..c3f55e66be 100644
+--- a/pkg/datapath/neighbor/neighbor_reconciler.go
++++ b/pkg/datapath/neighbor/neighbor_reconciler.go
+@@ -19,6 +19,9 @@ import (
+ 
+ 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
+ 	"github.com/cilium/cilium/pkg/datapath/tables"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
++	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
++	"github.com/cilium/cilium/pkg/option"
+ 	"github.com/cilium/cilium/pkg/rate"
+ 	"github.com/cilium/cilium/pkg/time"
+ )
+@@ -189,12 +192,21 @@ func (ops *ops) Delete(ctx context.Context, rx statedb.ReadTxn, _ statedb.Revisi
+ 
+ // Prune any neighbor entries in the kernel not in the desired neighbors table.
+ func (ops *ops) Prune(ctx context.Context, rx statedb.ReadTxn, _ iter.Seq2[*DesiredNeighbor, statedb.Revision]) error {
++	if option.Config.IPAM == ipamOption.IPAMHuaweiCloud && !huaweiCloudNeighbor.Default.Ready() {
++		return nil
++	}
+ 	var errs error
+ 	for actualNeighbor := range ops.neighbors.All(rx) {
+ 		ciliumManaged := actualNeighbor.Flags&netlink.NTF_EXT_LEARNED > 0
+ 		if !ciliumManaged {
+ 			continue
+ 		}
++		if option.Config.IPAM == ipamOption.IPAMHuaweiCloud && actualNeighbor.State&netlink.NUD_PERMANENT != 0 {
++			link, err := netlink.LinkByIndex(actualNeighbor.LinkIndex)
++			if err == nil && huaweiCloudNeighbor.Default.Contains(link.Attrs().Name, actualNeighbor.IPAddr.AsSlice(), net.HardwareAddr(actualNeighbor.HardwareAddr)) {
++				continue
++			}
++		}
+ 
+ 		_, _, found := ops.desiredNeighbor.Get(rx, DesiredNeighborIndex.Query(DesiredNeighborKey{
+ 			IP:      actualNeighbor.IPAddr,
+diff --git a/pkg/endpointmanager/huaweicloud_subeni.go b/pkg/endpointmanager/huaweicloud_subeni.go
+index 868bc2bd46..f0198b2c9e 100644
+--- a/pkg/endpointmanager/huaweicloud_subeni.go
++++ b/pkg/endpointmanager/huaweicloud_subeni.go
+@@ -4,10 +4,12 @@
+ package endpointmanager
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"fmt"
+ 	"log/slog"
+ 	"net"
++	"strings"
+ 	"sync"
+ 
+ 	"github.com/cilium/hive/cell"
+@@ -17,6 +19,7 @@ import (
+ 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
+ 	"github.com/cilium/cilium/pkg/endpoint"
+ 	huaweiCloudTypes "github.com/cilium/cilium/pkg/huaweicloud/eni/types"
++	huaweiCloudNeighbor "github.com/cilium/cilium/pkg/huaweicloud/neighbor"
+ 	"github.com/cilium/cilium/pkg/huaweicloud/subenimap"
+ 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+ 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+@@ -43,11 +46,12 @@ type subENIMapUpdater interface {
+ }
+ 
+ type huaweiCloudSubENISubscriber struct {
+-	logger    *slog.Logger
+-	clientset client.Clientset
+-	mapMgr    subENIMapUpdater
+-	bindings  sync.Map
+-	pending   sync.Map
++	logger        *slog.Logger
++	clientset     client.Clientset
++	mapMgr        subENIMapUpdater
++	bindings      sync.Map
++	pending       sync.Map
++	neighborMutex sync.Mutex
+ }
+ 
+ type subENIEndpoint interface {
+@@ -111,6 +115,7 @@ func registerHuaweiCloudSubENIManager(p huaweiCloudSubENIParams) error {
+ 			}
+ 			p.Manager.Unsubscribe(subscriber)
+ 			mapMgr.Close()
++			huaweiCloudNeighbor.Default.Clear()
+ 			return nil
+ 		},
+ 	})
+@@ -136,12 +141,20 @@ func (s *huaweiCloudSubENISubscriber) run(ctx context.Context, manager EndpointM
+ 				s.bindings.Delete(key)
+ 				return true
+ 			})
++			s.refreshGatewayNeighborOwnership()
++			if err := s.reconcileGatewayNeighbors(); err != nil {
++				s.logger.Warn("Failed to reconcile stale HuaweiCloud gateway neighbors", logfields.Error, err)
++			}
+ 		}
+ 	}
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) reconcileEndpoints(endpoints []*endpoint.Endpoint, reason string) {
+ 	if len(endpoints) == 0 {
++		huaweiCloudNeighbor.Default.Replace(nil)
++		if err := s.reconcileGatewayNeighbors(); err != nil {
++			s.logger.Warn("Failed to reconcile stale HuaweiCloud gateway neighbors", logfields.Error, err)
++		}
+ 		return
+ 	}
+ 	nodeName := nodeTypes.GetName()
+@@ -154,6 +167,10 @@ func (s *huaweiCloudSubENISubscriber) reconcileEndpoints(endpoints []*endpoint.E
+ 		info, err := subENIInfoForEndpoint(cn, ep)
+ 		s.programEndpoint(ep, info, err, reason)
+ 	}
++	s.refreshGatewayNeighborOwnership()
++	if err := s.reconcileGatewayNeighbors(); err != nil {
++		s.logger.Warn("Failed to reconcile stale HuaweiCloud gateway neighbors", logfields.Error, err)
++	}
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) EndpointCreated(ep *endpoint.Endpoint) {
+@@ -195,6 +212,10 @@ func (s *huaweiCloudSubENISubscriber) EndpointDeleted(ep *endpoint.Endpoint, _ e
+ 	}
+ 	s.bindings.Delete(ep.GetID())
+ 	s.pending.Delete(ep.GetID())
++	s.refreshGatewayNeighborOwnership()
++	if err := s.reconcileGatewayNeighbors(); err != nil {
++		s.logger.Warn("Failed to reconcile stale HuaweiCloud gateway neighbors", logfields.Error, err)
++	}
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) upsertEndpoint(ep *endpoint.Endpoint, reason string) {
+@@ -235,6 +256,7 @@ func (s *huaweiCloudSubENISubscriber) programEndpoint(ep *endpoint.Endpoint, inf
+ 	}
+ 	s.bindings.Store(ep.GetID(), info)
+ 	s.pending.Delete(ep.GetID())
++	s.refreshGatewayNeighborOwnership()
+ }
+ 
+ func (s *huaweiCloudSubENISubscriber) resolveEndpointInfo(ep *endpoint.Endpoint) (*huaweiCloudEndpointInfo, error) {
+@@ -329,15 +351,91 @@ func (s *huaweiCloudSubENISubscriber) ensureGatewayNeighbor(info *huaweiCloudEnd
+ 		return fmt.Errorf("resolve trunk interface %s: %w", info.trunkInterface, err)
+ 	}
+ 
++	s.neighborMutex.Lock()
++	defer s.neighborMutex.Unlock()
++
++	neighbors, err := safenetlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++	if err != nil {
++		return fmt.Errorf("list neighbors on trunk interface %s: %w", info.trunkInterface, err)
++	}
++	for _, neighbor := range neighbors {
++		if neighbor.State&netlink.NUD_PERMANENT == 0 || !neighbor.IP.Equal(info.gatewayIP) {
++			continue
++		}
++		if !bytes.Equal(neighbor.HardwareAddr, info.gatewayMAC) {
++			return fmt.Errorf("permanent neighbor %s on trunk interface %s already uses MAC %s, conflicts with %s",
++				info.gatewayIP, info.trunkInterface, neighbor.HardwareAddr, info.gatewayMAC)
++		}
++		if neighbor.Flags&netlink.NTF_EXT_LEARNED != 0 {
++			return nil
++		}
++		break
++	}
++
+ 	return netlink.NeighSet(&netlink.Neigh{
+ 		LinkIndex:    link.Attrs().Index,
+ 		Family:       netlink.FAMILY_V4,
+ 		State:        netlink.NUD_PERMANENT,
++		Flags:        netlink.NTF_EXT_LEARNED,
+ 		IP:           info.gatewayIP,
+ 		HardwareAddr: info.gatewayMAC,
+ 	})
+ }
+ 
++func (s *huaweiCloudSubENISubscriber) refreshGatewayNeighborOwnership() {
++	keys := make([]huaweiCloudNeighbor.Key, 0)
++	s.bindings.Range(func(_, value any) bool {
++		info, ok := value.(*huaweiCloudEndpointInfo)
++		if !ok || info == nil {
++			return true
++		}
++		if key, ok := huaweiCloudNeighbor.NewKey(info.trunkInterface, info.gatewayIP, info.gatewayMAC); ok {
++			keys = append(keys, key)
++		}
++		return true
++	})
++	huaweiCloudNeighbor.Default.Replace(keys)
++}
++
++func (s *huaweiCloudSubENISubscriber) reconcileGatewayNeighbors() error {
++	stale := huaweiCloudNeighbor.Default.StaleSnapshot()
++	removed := make([]huaweiCloudNeighbor.Key, 0, len(stale))
++	for _, key := range stale {
++		link, err := safenetlink.LinkByName(key.LinkName)
++		if err != nil {
++			if _, ok := err.(netlink.LinkNotFoundError); ok {
++				removed = append(removed, key)
++				continue
++			}
++			return fmt.Errorf("resolve trunk interface %s: %w", key.LinkName, err)
++		}
++		neighbors, err := safenetlink.NeighList(link.Attrs().Index, netlink.FAMILY_V4)
++		if err != nil {
++			return fmt.Errorf("list gateway neighbors on trunk interface %s: %w", key.LinkName, err)
++		}
++		found := false
++		for _, neighbor := range neighbors {
++			if neighbor.IP.String() != key.IPv4 || !strings.EqualFold(neighbor.HardwareAddr.String(), key.MAC) {
++				continue
++			}
++			found = true
++			if !huaweiCloudNeighbor.Default.Contains(key.LinkName, neighbor.IP, neighbor.HardwareAddr) &&
++				neighbor.State&netlink.NUD_PERMANENT != 0 && neighbor.Flags&netlink.NTF_EXT_LEARNED != 0 {
++				if err := netlink.NeighDel(&neighbor); err != nil {
++					return fmt.Errorf("remove stale HuaweiCloud gateway neighbor %s on %s: %w", neighbor.IP, key.LinkName, err)
++				}
++			}
++			removed = append(removed, key)
++			break
++		}
++		if !found {
++			removed = append(removed, key)
++		}
++	}
++	huaweiCloudNeighbor.Default.ForgetStale(removed)
++	return nil
++}
++
+ var _ Subscriber = (*huaweiCloudSubENISubscriber)(nil)
+ var _ subENIMapUpdater = (*subenimap.SubENIMapManager)(nil)
+ var _ = huaweiCloudTypes.SubENI{}
+diff --git a/pkg/huaweicloud/neighbor/registry.go b/pkg/huaweicloud/neighbor/registry.go
+new file mode 100644
+index 0000000000..e27e2b91ea
+--- /dev/null
++++ b/pkg/huaweicloud/neighbor/registry.go
+@@ -0,0 +1,114 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright Authors of Cilium
++
++// Package neighbor tracks HuaweiCloud gateway neighbors owned by the Sub-ENI
++// endpoint manager.
++package neighbor
++
++import (
++	"net"
++	"strings"
++	"sync"
++)
++
++type Key struct {
++	LinkName string
++	IPv4     string
++	MAC      string
++}
++
++func NewKey(linkName string, ip net.IP, mac net.HardwareAddr) (Key, bool) {
++	ipv4 := ip.To4()
++	if linkName == "" || ipv4 == nil || len(mac) == 0 {
++		return Key{}, false
++	}
++	return Key{LinkName: linkName, IPv4: ipv4.String(), MAC: strings.ToLower(mac.String())}, true
++}
++
++type Registry struct {
++	mu    sync.RWMutex
++	keys  map[Key]struct{}
++	stale map[Key]struct{}
++	ready bool
++}
++
++func NewRegistry() *Registry {
++	return &Registry{keys: make(map[Key]struct{}), stale: make(map[Key]struct{})}
++}
++
++func (r *Registry) Replace(keys []Key) {
++	next := make(map[Key]struct{}, len(keys))
++	for _, key := range keys {
++		if key.LinkName != "" && key.IPv4 != "" && key.MAC != "" {
++			next[key] = struct{}{}
++		}
++	}
++	r.mu.Lock()
++	for key := range r.keys {
++		if _, found := next[key]; !found {
++			r.stale[key] = struct{}{}
++		}
++	}
++	r.keys = next
++	for key := range next {
++		delete(r.stale, key)
++	}
++	r.ready = true
++	r.mu.Unlock()
++}
++
++func (r *Registry) Contains(linkName string, ip net.IP, mac net.HardwareAddr) bool {
++	key, ok := NewKey(linkName, ip, mac)
++	if !ok {
++		return false
++	}
++	r.mu.RLock()
++	_, found := r.keys[key]
++	r.mu.RUnlock()
++	return found
++}
++
++func (r *Registry) Snapshot() []Key {
++	r.mu.RLock()
++	keys := make([]Key, 0, len(r.keys))
++	for key := range r.keys {
++		keys = append(keys, key)
++	}
++	r.mu.RUnlock()
++	return keys
++}
++
++func (r *Registry) StaleSnapshot() []Key {
++	r.mu.RLock()
++	keys := make([]Key, 0, len(r.stale))
++	for key := range r.stale {
++		keys = append(keys, key)
++	}
++	r.mu.RUnlock()
++	return keys
++}
++
++func (r *Registry) ForgetStale(keys []Key) {
++	r.mu.Lock()
++	for _, key := range keys {
++		delete(r.stale, key)
++	}
++	r.mu.Unlock()
++}
++
++func (r *Registry) Clear() {
++	r.mu.Lock()
++	r.keys = make(map[Key]struct{})
++	r.stale = make(map[Key]struct{})
++	r.ready = false
++	r.mu.Unlock()
++}
++
++func (r *Registry) Ready() bool {
++	r.mu.RLock()
++	ready := r.ready
++	r.mu.RUnlock()
++	return ready
++}
++
++var Default = NewRegistry()
+-- 
+2.33.0
